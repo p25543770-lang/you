@@ -104,7 +104,6 @@
     g.closePath();
   }
 
-/** Подпись цеха у рамки: на широком полотне свободные поля не пустуют. */
 /** Подпись полотна: что нарисовано и в каком масштабе (цифры — с бэкенда). */
   function drawCaption(g, f, state) {
     const room = (state && state.map) || {};
@@ -112,8 +111,9 @@
     g.font = '11px ui-monospace, monospace';
     g.fillText('ЦЕХ ' + f.world.w.toFixed(1).replace('.', ',') + ' × ' +
       f.world.h.toFixed(1).replace('.', ',') + ' М · КЛЕТКА ' +
-      String(room.res || 0.05).replace('.', ',') + ' М · ИСТОЧНИК «' +
-      String(room.source || '—') + '»', f.ox, f.padTop - 9);
+      Number(room.res || 0.05).toFixed(2).replace('.', ',') + ' М · ИСТОЧНИК ' +
+      String(room.source || '—').toUpperCase(),
+      f.ox, f.padTop - 9);
   }
 
   function drawGrid(g, f) {

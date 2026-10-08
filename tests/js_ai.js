@@ -128,6 +128,7 @@ const state = {
     angles: { FL: -30, FR: -30, RL: -30, RR: -30 },
     throttle: 0.62, speed: 0.6,
     loss: 0.0085, lossAvg: 0.01, pretrainLoss: 0.19, steps: 12345,
+    tickMs: 0.52, tickAvgMs: 0.61, budgetMs: 5,
     activations: Array.from({ length: 32 }, (_, i) => (i % 3 - 1) * 0.4),
     inputs: {
       dx: 0.4, dy: -0.3, dth: 0.2, crab: 0, obstL: 0.2, obstC: 0.9,
@@ -201,6 +202,14 @@ check('обучение: такты и ошибка',
 
 const ros = registry.get('sc-ai-ros').textContent;
 check('ROS 2: показан топик и честная причина', /\/cmd_vel/.test(ros) && /rclpy/.test(ros), ros);
+const tick = registry.get('sc-ai-tick');
+check('отклик такта и бюджет 5 мс видны',
+  /0,52 мс/.test(tick.textContent) && /бюджет 5 мс/.test(tick.textContent) &&
+  /сред\. 0,61/.test(tick.textContent), tick.textContent);
+check('такт в бюджете не помечен тревогой', tick.dataset.over === 'no');
+aiCtx.RSAiPanel.render({ ai: Object.assign({}, state.ai, { tickMs: 7.5 }) });
+check('такт сверх бюджета помечен', registry.get('sc-ai-tick').dataset.over === 'yes');
+aiCtx.RSAiPanel.render(state);
 check('препятствия с дальномера в цифрах',
   /слева 0,20/.test(registry.get('sc-ai-obst').textContent) &&
   /центр 0,90/.test(registry.get('sc-ai-obst').textContent),

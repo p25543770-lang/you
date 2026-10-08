@@ -109,7 +109,7 @@ DEMO_GOALS = (
 # --- Карта цеха: мир, сканирование, упаковка в строку -----------------------
 WORLD_W, WORLD_H = 4.8, 3.2          # м — размер цеха на стенде
 MAP_W, MAP_H = 96, 64                # клеток
-MAP_RES = WORLD_W / MAP_W            # 0,05 м на клетку
+MAP_RES = round(WORLD_W / MAP_W, 4)  # 0,05 м на клетку (ровно: 4,8 / 96)
 UNKNOWN, FREE, OCCUPIED = 0, 1, 2
 
 #: Стены и стеллажи: (x0, y0, x1, y1) в метрах. По ним же считаются препятствия
@@ -130,6 +130,24 @@ WORLD_PADS = ((0.55, 0.60, "А"), (4.05, 2.60, "Б"), (2.40, 0.40, "база"))
 
 #: Клеток карты для честного процента: за вычетом стен и стеллажей.
 MAP_AREA = MAP_W * MAP_H
+
+#: Бюджет отклика: борт обязан выдать следующий такт управления за 5 мс.
+#: Заказчик назвал ПК робота — i5-13400, 16 ГБ ОЗУ; запас по нашей машине
+#: меряется скриптом tests/bench_ai.py и проверяется тестом.
+TICK_BUDGET_MS = 5.0
+
+#: Таблица направлений лучей по числу лучей: тригонометрия считается один раз
+#: на процесс, а не каждый такт (обзор 72 лучей идёт каждый такт управления).
+_RAY_TABLE: dict = {}
+
+
+def _ray_table(rays: int):
+    table = _RAY_TABLE.get(rays)
+    if table is None:
+        table = tuple((math.cos(2.0 * math.pi * i / rays), math.sin(2.0 * math.pi * i / rays))
+                      for i in range(rays))
+        _RAY_TABLE[rays] = table
+    return table
 
 
 class RoomMap:
@@ -155,18 +173,23 @@ class RoomMap:
 
     @staticmethod
     def cast(x: float, y: float, angle: float, max_range: float):
-        """Луч дальномера: (до препятствия, м; точка попадания)."""
+        """Луч дальномера: (до препятствия, м; точка попадания).
+
+        Косинус и синус считаются один раз на луч, а не на каждый шаг: обзор
+        из 72 лучей каждый такт — самая горячая точка управления.
+        """
         step = MAP_RES * 0.8
+        ux, uy = math.cos(angle), math.sin(angle)
         dist = 0.0
         while dist < max_range:
             dist += step
-            px = x + math.cos(angle) * dist
-            py = y + math.sin(angle) * dist
+            px = x + ux * dist
+            py = y + uy * dist
             if not (0.0 <= px <= WORLD_W and 0.0 <= py <= WORLD_H):
                 return dist, (px, py)
             if RoomMap.blocked(px, py):
                 return dist, (px, py)
-        return max_range, (x + math.cos(angle) * max_range, y + math.sin(angle) * max_range)
+        return max_range, (x + ux * max_range, y + uy * max_range)
 
     # --- разметка --------------------------------------------------------
     def _mark(self, cx: int, cy: int, value: int) -> bool:
@@ -181,20 +204,57 @@ class RoomMap:
         return True
 
     def scan(self, x: float, y: float, heading: float, rays: int = 72, max_range: float = 3.0) -> bool:
-        """Круговой обзор: свободное по пути луча, препятствие на попадании."""
+        """Круговой обзор: свободное по пути луча, препятствие на попадании.
+
+        Луч идёт не шагами по 0,04 м с косинусом в каждой точке, а по клеткам
+        (целые индексы, шаг в соседнюю клетку). Занятость мира лежит готовой
+        таблицей — по клетке на байт, без перебора прямоугольников. Урок:
+        обзор 72 лучей был самой дорогой операцией такта; теперь такт целиком
+        укладывается в бюджет отклика 5 мс.
+        """
         changed = False
-        for i in range(rays):
-            angle = heading + (2 * math.pi * i / rays)
-            dist, (hx, hy) = self.cast(x, y, angle, max_range)
-            for step in range(1, int(dist / MAP_RES) + 1):
-                px = x + math.cos(angle) * step * MAP_RES
-                py = y + math.sin(angle) * step * MAP_RES
-                if RoomMap.blocked(px, py):
+        cells = self.cells
+        truth = WORLD_TRUTH
+        inv = 1.0 / MAP_RES
+        cos_h, sin_h = math.cos(heading), math.sin(heading)
+        inf = float("inf")
+        for ux, uy in _ray_table(rays):
+            dx = ux * cos_h - uy * sin_h               # луч, повёрнутый на курс
+            dy = ux * sin_h + uy * cos_h
+            cx, cy = int(x * inv), int(y * inv)
+            if not (0 <= cx < MAP_W and 0 <= cy < MAP_H):
+                continue
+            step_x = 1 if dx > 0.0 else -1
+            step_y = 1 if dy > 0.0 else -1
+            # до какой дистанции луч идёт до следующих границ клетки по осям
+            t_x = ((cx + 1) * MAP_RES - x) / dx if dx else inf
+            t_y = ((cy + 1) * MAP_RES - y) / dy if dy else inf
+            d_x = MAP_RES / abs(dx) if dx else inf
+            d_y = MAP_RES / abs(dy) if dy else inf
+            travel = 0.0
+            while True:
+                idx = cy * MAP_W + cx
+                if truth[idx]:                          # клетка занята: попадание
+                    if travel > 0.0 and cells[idx] != OCCUPIED:
+                        if cells[idx] == UNKNOWN:
+                            self.scanned += 1
+                        cells[idx] = OCCUPIED
+                        changed = True
                     break
-                cx, cy = int(px / MAP_RES), int(py / MAP_RES)
-                if abs(px - x) > 0.12 or abs(py - y) > 0.12:
-                    changed |= self._mark(cx, cy, FREE)
-            changed |= self._mark(int(hx / MAP_RES), int(hy / MAP_RES), OCCUPIED)
+                if travel > 0.12:                       # корпус не размечаем
+                    if cells[idx] == UNKNOWN:
+                        cells[idx] = FREE
+                        self.scanned += 1
+                        changed = True
+                    elif cells[idx] != FREE:
+                        cells[idx] = FREE
+                        changed = True
+                if t_x < t_y:                            # шаг в соседнюю клетку
+                    travel, cx, t_x = t_x, cx + step_x, t_x + d_x
+                else:
+                    travel, cy, t_y = t_y, cy + step_y, t_y + d_y
+                if travel >= max_range or not (0 <= cx < MAP_W and 0 <= cy < MAP_H):
+                    break
         if changed:
             self.version += 1
         return changed
@@ -217,6 +277,27 @@ class RoomMap:
         if prev is not None:
             parts.append(f"{prev}*{count}")
         return ",".join(parts)
+
+
+def _build_truth() -> bytearray:
+    """Занятость цеха по клеткам: 1 — стена или стеллаж, 0 — проход.
+
+    Таблица считается один раз при импорте: дальномер в каждом такте читает
+    её байтом, а не перебирает прямоугольники препятствий.
+    """
+    cells = bytearray(MAP_AREA)
+    half = MAP_RES * 0.5
+    for cy in range(MAP_H):
+        y = cy * MAP_RES + half
+        base = cy * MAP_W
+        for cx in range(MAP_W):
+            if RoomMap.blocked(cx * MAP_RES + half, y):
+                cells[base + cx] = 1
+    return cells
+
+
+#: Истинная занятость мира (не то, что разведано): по ней идёт луч дальномера.
+WORLD_TRUTH = _build_truth()
 
 
 def decode_rle(text: str, expect: int = MAP_AREA) -> bytes:
@@ -563,7 +644,7 @@ class SimSource:
         self.th = (self.th + self.wz * dt) % (2 * math.pi)
         # «стоим» — когда почти не двигаемся и не разворачиваемся: задание не
         # выполняется, и киоск не должен смотреть в замершего робота
-        self.stall_s = self.stall_s + dt if (moved < 0.02 and turned < 0.01) else 0.0 % (2 * math.pi)
+        self.stall_s = self.stall_s + dt if (moved < 0.02 and turned < 0.01) else 0.0
 
         if moved:
             last_pt = self.trail[-1]
@@ -1047,9 +1128,21 @@ class App:
         self.cargo_nominal_kg = cargo_nominal_kg
         self.lock_open = False
         self.started = time.time()
+        #: средний отклик такта (мс) — сглаживается, чтобы не дрожал на экране
+        self.tick_avg_ms = None
 
     def snapshot(self):
+        tick_began = time.perf_counter()
         data = self.source.read()
+        #: сколько занял такт управления: сеть, обзор дальномера, карта, ROS
+        tick_ms = (time.perf_counter() - tick_began) * 1000.0
+        self.tick_avg_ms = tick_ms if self.tick_avg_ms is None else \
+            self.tick_avg_ms * 0.9 + tick_ms * 0.1
+        ai_block = data.get("ai")
+        if isinstance(ai_block, dict):
+            ai_block["tickMs"] = round(tick_ms, 3)
+            ai_block["tickAvgMs"] = round(self.tick_avg_ms, 3)
+            ai_block["budgetMs"] = TICK_BUDGET_MS
         lock_state = self.vault.state(self.lock_open)
         cargo = dict(data.get("cargo") or {})
         cargo["closed"] = not self.lock_open

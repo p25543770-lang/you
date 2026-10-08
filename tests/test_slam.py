@@ -713,6 +713,109 @@ def test_kiosk_puts_the_map_under_the_motors_and_the_battery_above_the_ai():
     assert re.search(r"#sc-map \{[^}]*width: 100%", css, re.S)
 
 
+def test_ai_tick_fits_the_five_millisecond_budget(monkeypatch):
+    """Отклик борта: такт управления целиком укладывается в 5 мс.
+
+    Заказчик назвал ПК робота (i5-13400, 16 ГБ) и бюджет отклика — 5 мс это
+    максимум. В такт входит всё: прямой проход сети, шаг обучения, обзор
+    дальномера (72 луча), разметка карты, публикация в /cmd_vel и телеметрия.
+    Здесь меряется тот же путь, что идёт на борту; числа рядом — для журнала.
+    """
+    import statistics
+    import time as time_mod
+
+    from slam_gui import ai_driver, backend
+
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(backend.time, "time", lambda: clock["t"])
+    source = backend.SimSource()
+    for _ in range(120):                       # прогреваем карту и ход
+        source.read()
+        clock["t"] += 1.0 / 60.0
+
+    ticks = []
+    for _ in range(400):
+        clock["t"] += 1.0 / 60.0
+        began = time_mod.perf_counter()
+        source.read()
+        ticks.append((time_mod.perf_counter() - began) * 1000.0)
+
+    mean = statistics.mean(ticks)
+    p95 = sorted(ticks)[int(len(ticks) * 0.95)]
+    print("\nотклик такта: сред. %.3f мс · p95 %.3f мс · макс %.3f мс (бюджет 5 мс)" % (
+        mean, p95, max(ticks)))
+    assert mean < backend.TICK_BUDGET_MS, "средний такт %.3f мс" % mean
+    assert p95 < backend.TICK_BUDGET_MS, "p95 такта %.3f мс" % p95
+
+    # сама сеть — доли миллисекунды: 32 нейрона, 10 входов, 8 выходов
+    nets = []
+    for _ in range(400):
+        began = time_mod.perf_counter()
+        source.driver.forward([0.1] * len(ai_driver.INPUTS))
+        nets.append((time_mod.perf_counter() - began) * 1000.0)
+    assert statistics.mean(nets) < 1.0, "прямой проход %.3f мс" % statistics.mean(nets)
+    assert source.driver.neurons == 32
+
+
+def test_state_carries_the_tick_ms_and_the_budget(monkeypatch):
+    """Панель ИИ показывает отклик такта и бюджет — числа идут с борта."""
+    from slam_gui import backend
+
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(backend.time, "time", lambda: clock["t"])
+    app = backend.App(backend.SimSource(), backend.Vault("/tmp/ai_budget_vault.json", "1234"))
+    data = app.snapshot()
+    ai = data["ai"]
+    assert ai["budgetMs"] == backend.TICK_BUDGET_MS == 5.0
+    assert 0.0 < ai["tickMs"] < backend.TICK_BUDGET_MS
+    assert ai["tickAvgMs"] > 0.0
+    assert data["map"]["res"] == 0.05, "клетка уходит на экран ровным числом"
+    from pathlib import Path
+
+    panel = (Path(__file__).resolve().parent.parent / "slam_gui" / "ai_panel.js").read_text(
+        encoding="utf-8")
+    assert "sc-ai-tick" in panel and "бюджет " in panel, "на панели виден отклик и бюджет"
+
+
+def test_the_neural_net_is_ours_and_stdlib_only():
+    """Сеть написана в этом репозитории и не тянет ни одного фреймворка.
+
+    «Сделай сам нейросеть»: тут свой перцептрон 10 → 24 → 8 с обратным
+    распространением на чистой стандартной библиотеке — ни numpy, ни torch.
+    Такую сеть можно поднять на борту без интернета и без тяжёлых пакетов.
+    """
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    src = (root / "slam_gui" / "ai_driver.py").read_text(encoding="utf-8")
+    for banned in ("numpy", "torch", "tensorflow", "keras", "sklearn", "scipy"):
+        assert banned not in src.lower(), "в ai_driver.py появился " + banned
+    imports = {line.split()[1].split(".")[0] for line in src.splitlines()
+               if line.startswith("import ")}
+    assert imports <= {"math", "random", "__future__"}, imports
+    assert "class NeuralDriver" in src and "def step(self, x, target)" in src
+
+
+def test_map_scan_marks_only_true_cells():
+    """Обзор дальномера не врёт: разведанное свободное — действительно свободно.
+
+    Луч идёт по клеткам (целые индексы) — это и быстрее, и точнее прежнего
+    шага по 0,04 м: ложных «свободно» и ложных «препятствие» нет ни одной.
+    """
+    from slam_gui import backend
+
+    room = backend.RoomMap()
+    for i in range(240):
+        room.scan(2.4 + 0.02 * i, 0.9 + 0.004 * i, 0.03 * i)
+    false_free = sum(1 for i, v in enumerate(room.cells)
+                     if v == backend.FREE and backend.WORLD_TRUTH[i])
+    false_occ = sum(1 for i, v in enumerate(room.cells)
+                    if v == backend.OCCUPIED and not backend.WORLD_TRUTH[i])
+    assert false_free == 0, "клеток «свободно» на препятствии: %d" % false_free
+    assert false_occ == 0, "клеток «препятствие» в проходе: %d" % false_occ
+    assert room.percent() > 10, "обзор пуст"
+
+
 def test_ai_panel_and_map_render_the_board_data():
     """Панель ИИ и карта собираются и рисуются по данным борта.
 

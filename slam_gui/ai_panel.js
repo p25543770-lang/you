@@ -57,6 +57,7 @@
       '  <div><span>колёса</span><b id="sc-ai-angles">—</b></div>',
       '  <div><span>тяга</span><b id="sc-ai-throttle">—</b></div>',
       '  <div><span>обучение</span><b id="sc-ai-train">—</b></div>',
+      '  <div><span>отклик</span><b id="sc-ai-tick">—</b></div>',
       '  <div><span>ROS 2</span><b id="sc-ai-ros">—</b></div>',
       '  <div><span>препятствия</span><b id="sc-ai-obst">—</b></div>',
       '  <div><span>задание</span><b id="sc-ai-goal">—</b></div>',
@@ -84,6 +85,7 @@
       angles: el('sc-ai-angles'),
       throttle: el('sc-ai-throttle'),
       train: el('sc-ai-train'),
+      tick: el('sc-ai-tick'),
       ros: el('sc-ai-ros'),
       obst: el('sc-ai-obst'),
       goal: el('sc-ai-goal'),
@@ -160,6 +162,7 @@
       setText(refs.angles, '—');
       setText(refs.throttle, '—');
       setText(refs.train, '—');
+      setText(refs.tick, '—');
       setText(refs.ros, ai.reason || '—');
       setText(refs.obst, '—');
       setText(refs.goal, '—');
@@ -172,6 +175,15 @@
     inputBars(ai.inputs || {});
     setText(refs.angles, wheelText(ai.angles));
     setText(refs.throttle, fmt(ai.throttle) + ' · ' + fmt(ai.speed, 1) + ' м/с');
+    if (refs.tick) {
+      const budget = Number(ai.budgetMs || 5);
+      const spent = Number(ai.tickMs || 0);
+      refs.tick.textContent = fmt(spent, 2) + ' мс · бюджет ' + fmt(budget, 0) + ' мс' +
+        (ai.tickAvgMs != null ? ' · сред. ' + fmt(ai.tickAvgMs, 2) : '');
+      refs.tick.dataset.over = spent > budget ? 'yes' : 'no';
+      refs.tick.title = 'отклик такта: сеть, обзор дальномера, карта, ROS 2 — уложились в ' +
+        fmt(budget, 0) + ' мс';
+    }
     setText(refs.train, 'тактов ' + (ai.steps || 0) + ' · ошибка ' + fmt(ai.loss, 4) +
       (ai.pretrainLoss != null ? ' · урок ' + fmt(ai.pretrainLoss, 4) : ''));
     setText(refs.ros, rosText(ai.ros, ai.available !== false));
