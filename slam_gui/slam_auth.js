@@ -7,6 +7,10 @@
  *
  * В обычном браузере (робот, телефон, ноутбук) cookie работают, токена st в
  * адресе нет — и скрипт не меняет ничего.
+ *
+ * Переходы между экранами (ссылки и location.href) тоже должны нести токен:
+ * иначе вместо инженерного пульта открылась бы страница входа. Для этого
+ * наружу отдаётся RS_AUTH.withToken(url) — им пользуются кнопки переходов.
  */
 (function () {
   "use strict";
@@ -40,6 +44,13 @@
       return nativeFetch.call(this, input, init);
     };
   }
+
+  // Переходы между экранами: сохраняем сессию в адресе
+  window.RS_AUTH = {
+    token: token,
+    withToken: withToken,
+    go: function (url) { window.location.href = withToken(url); },
+  };
 
   var nativeOpen = XMLHttpRequest.prototype.open;
   XMLHttpRequest.prototype.open = function (method, url) {

@@ -318,15 +318,16 @@ def test_unknown_page_returns_404(client):
 
 
 # --------------------------- режим без пароля ---------------------------- #
-# По умолчанию (RC_REQUIRE_LOGIN=0) пульт открыт: пароля нет ни у основного
-# экрана, ни у инженерного пульта, ни у служебной страницы. Парольный режим
-# проверяют тесты выше — они собирают приложение с require_login=True.
+# Пароль включён по умолчанию. Отключается RC_REQUIRE_LOGIN=0: тогда пульт
+# открыт — ни у основного экрана, ни у инженерного пульта, ни у служебной
+# страницы пароля нет. Этот режим проверяют тесты ниже.
 
 
-def test_default_config_has_no_password():
+def test_default_config_requires_password():
+    """По умолчанию пульт закрыт паролем."""
     from robot_control.config import Config
 
-    assert Config(secret_key="k").require_login is False
+    assert Config(secret_key="k").require_login is True
 
 
 def test_open_mode_pages_do_not_ask_for_password(open_client):
@@ -370,3 +371,58 @@ def test_password_mode_is_turned_on_by_env(monkeypatch, tmp_path):
 
     monkeypatch.setenv("RC_REQUIRE_LOGIN", "0")
     assert Config.from_env(project_root=tmp_path).require_login is False
+
+
+def test_default_app_asks_for_password(tmp_path, monkeypatch):
+    """Приложение из настроек по умолчанию закрыто паролем."""
+    from robot_control.app import create_app
+    from robot_control.config import Config
+
+    monkeypatch.delenv("RC_REQUIRE_LOGIN", raising=False)
+    application = create_app(
+        Config(
+            secret_key="k",
+            operators_file=tmp_path / "ops.json",
+            testing=True,
+            slam_source="sim",
+            slam_lock_file=tmp_path / "lock.json",
+        )
+    )
+    application.config.update(TESTING=True)
+    client = application.test_client()
+
+    for path in ("/", "/console", "/panel"):
+        response = client.get(path)
+        assert response.status_code == 302, f"{path} открыт без пароля"
+        assert "/login" in response.headers["Location"]
+
+    login_page = client.get("/login")
+    assert login_page.status_code == 200
+    assert 'name="password"' in login_page.get_data(as_text=True)
+    assert client.get("/healthz").get_json()["auth"] == "password"
+
+
+def test_screens_carry_session_token_between_them():
+    """Переходы киоск ↔ пульт не теряют сессию (иначе пароль спросят снова).
+
+    В средах без cookie сессия едет параметром st; переходы должны добавлять
+    его сами — это и проверяет tests/js_nav.js.
+    """
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    node = shutil.which("node")
+    if node is None:
+        import pytest
+
+        pytest.skip("node не установлен — проверка JS пропущена")
+
+    root = Path(__file__).resolve().parent.parent
+    result = subprocess.run(
+        [node, str(root / "tests" / "js_nav.js")],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr

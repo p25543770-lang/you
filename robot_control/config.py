@@ -44,9 +44,9 @@ class Config:
     port: int = 8080
     cookie_secure: bool = False
     cookie_samesite: str = "Lax"
-    # Пароль на вход: по умолчанию выключен — пульт открывается сразу, как
-    # на дисплее робота, так и по сети. Включается RC_REQUIRE_LOGIN=1.
-    require_login: bool = False
+    # Пароль на вход включён по умолчанию: без него любой, кто видит сеть
+    # робота, попадает в интерфейс. Отключается RC_REQUIRE_LOGIN=0.
+    require_login: bool = True
     max_failed_attempts: int = 5
     lockout_seconds: int = 300
     session_lifetime_minutes: int = 60
@@ -75,7 +75,7 @@ class Config:
             port=int(os.environ.get("RC_PORT", "8080")),
             cookie_secure=_env_bool("RC_COOKIE_SECURE", False),
             cookie_samesite=os.environ.get("RC_COOKIE_SAMESITE", "Lax"),
-            require_login=_env_bool("RC_REQUIRE_LOGIN", False),
+            require_login=_env_bool("RC_REQUIRE_LOGIN", True),
             max_failed_attempts=int(os.environ.get("RC_MAX_FAILED_ATTEMPTS", "5")),
             lockout_seconds=int(os.environ.get("RC_LOCKOUT_SECONDS", "300")),
             session_lifetime_minutes=int(os.environ.get("RC_SESSION_MINUTES", "60")),

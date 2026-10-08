@@ -427,7 +427,13 @@
   /* ======================================================================
    * 7. Навигация: основной экран ↔ инженерный пульт
    * ==================================================================== */
-  function goConsole() { window.location.href = 'index.html'; }
+  /* Переход на пульт: в средах без cookie адрес несёт сессию (RS_AUTH),
+     поэтому пароль спрашивается один раз — при входе. */
+  function goConsole() {
+    const url = 'index.html';
+    if (window.RS_AUTH && window.RS_AUTH.go) window.RS_AUTH.go(url);
+    else window.location.href = url;
+  }
 
   function initNav() {
     const link = $('sc-console-link');
