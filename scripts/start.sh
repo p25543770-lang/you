@@ -48,39 +48,8 @@ else
 fi
 
 # --- 2. python и зависимости -------------------------------------------------- #
-if ! python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' 2>/dev/null; then
-  echo "Нужен Python 3.9+ (у вас $(python3 --version 2>&1))." >&2; exit 1
-fi
-if ! python3 -c 'import venv' 2>/dev/null; then
-  log "ставлю python3-venv…"
-  if command -v sudo >/dev/null 2>&1 && [[ $EUID -ne 0 ]]; then SUDO=sudo; else SUDO=; fi
-  $SUDO apt update -y && $SUDO apt install -y python3-venv python3-pip
-fi
-if [[ ! -x .venv/bin/python ]]; then
-  log "создаю .venv…"
-  python3 -m venv .venv
-fi
-# На Ubuntu venv может создаться без pip (ensurepip отключён) — чиним.
-if [[ ! -x .venv/bin/pip ]]; then
-  log "в .venv нет pip — ставлю…"
-  .venv/bin/python -m ensurepip --default-pip 2>/dev/null || {
-    log "ensurepip не сработал — качаю get-pip.py…"
-    .venv/bin/python -c '
-import urllib.request
-urllib.request.urlretrieve("https://bootstrap.pypa.io/get-pip.py", "/tmp/get-pip.py")
-' && .venv/bin/python /tmp/get-pip.py -q
-  }
-fi
-[[ -x .venv/bin/pip ]] || { echo "Не удалось поставить pip в .venv." >&2; exit 127; }
-REQ_HASH="$(sha256sum requirements.txt | awk '{print $1}')"
-CACHED="$(cat .venv/.req-hash 2>/dev/null || true)"
-if [[ "$REQ_HASH" != "$CACHED" ]]; then
-  log "подтягиваю зависимости…"
-  .venv/bin/pip install -q -r requirements.txt
-  echo "$REQ_HASH" > .venv/.req-hash
-else
-  log "зависимости уже установлены"
-fi
+# Работает и без интернета: pip и колёса лежат в vendor/ (см. ensure_deps.sh).
+./scripts/ensure_deps.sh
 
 # --- 3. .env и учётка ----------------------------------------------------------- #
 if [[ ! -f .env ]]; then

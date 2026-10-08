@@ -39,22 +39,8 @@ if ! python3 -c 'import sys; sys.exit(0 if sys.version_info >= (3, 9) else 1)' 2
 fi
 log "python3: $(python3 --version 2>&1) (нужен 3.9+)"
 
-# --- 1. зависимости --------------------------------------------------------- #
-if ! python3 -c 'import venv' 2>/dev/null; then
-  log "ставлю python3-venv и pip через apt…"
-  if command -v sudo >/dev/null 2>&1 && [[ $EUID -ne 0 ]]; then SUDO=sudo; else SUDO=; fi
-  $SUDO apt update -y
-  $SUDO apt install -y python3 python3-venv python3-pip
-fi
-log "python3: $(python3 --version 2>&1)"
-
-# --- 2. виртуальное окружение ----------------------------------------------- #
-if [[ ! -x .venv/bin/python ]]; then
-  log "создаю .venv…"
-  python3 -m venv .venv
-fi
-log "ставлю зависимости…"
-.venv/bin/pip install -q -r requirements.txt
+# --- 1-2. python и зависимости (работает офлайн через vendor/) -------------- #
+./scripts/ensure_deps.sh
 
 # --- 3. .env с секретным ключом ---------------------------------------------- #
 if [[ ! -f .env ]]; then
