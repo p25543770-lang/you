@@ -9,7 +9,8 @@ backend.py — сервер борта RUS SLAM: отдаёт экраны и д
 
     /                     → основной экран робота (main.html, киоск)
     /index.html, /console → инженерный пульт (index.html)
-    /api/state            → состояние: двигатели, АКБ, груз, замок, связь
+    /api/state            → состояние: двигатели, АКБ, груз, замок, связь, ИИ
+    /api/map              → клетки карты цеха (строкой, по смене версии)
     /api/lock/open        → открыть грузовой отсек по PIN-коду
     /api/lock/close       → закрыть отсек
     /api/lock/pin         → сменить PIN-код
@@ -60,6 +61,12 @@ from functools import partial
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 
 ROOT = os.path.dirname(os.path.abspath(__file__))
+
+# ИИ-водитель лежит рядом (gui/ai_driver.py). Пакетом gui не является — это
+# набор файлов, поэтому кладём каталог в путь импорта, а не тянем пакет.
+if ROOT not in sys.path:
+    sys.path.insert(0, ROOT)
+import ai_driver                                                   # noqa: E402
 STATE_DIR = os.path.join(ROOT, "state")
 LOCK_FILE = os.path.join(STATE_DIR, "lock.json")
 MAIN_PAGE = "/main.html"
@@ -81,37 +88,151 @@ MODULE_TITLES = {
 }
 WHEEL_R_M = 0.127            # радиус колеса Xiaomi M365 Pro, м
 
-#: Демонстрационные режимы езды: сколько секунд держать, куда повёрнуты колёса
-#: и в какую сторону крутятся (знак оборотов). Режимы сменяют друг друга по
-#: кругу. Прежде каждое колесо крутилось своей синусоидой, и углы четырёх
-#: модулей не были связаны между собой — по экрану нельзя было понять, куда
-#: едет робот. Здесь углы согласованы, как у настоящей 4WIS-машины, у которой
-#: рулевых модуля четыре и в повороте участвуют все:
-#:   • поворот — все четыре колеса в одну сторону, задние как передние
-#:     (внутреннее доворачивается больше);
-#:   • краб    — все четыре под 90°: машина едет боком, как паркуется;
-#:   • разворот — передние +90°, задние −90°: машина крутится вокруг центра.
-DEMO_DRIVE_MODES = (
-    {"sec": 8.0, "angles": {"FL": 0, "FR": 0, "RL": 0, "RR": 0}, "spin": 1, "title": "прямо"},
-    {"sec": 4.0, "angles": {"FL": 26, "FR": 34, "RL": 26, "RR": 34}, "spin": 1, "title": "поворот вправо"},
-    {"sec": 4.0, "angles": {"FL": 90, "FR": 90, "RL": 90, "RR": 90}, "spin": 1, "title": "краб боком"},
-    {"sec": 5.0, "angles": {"FL": 90, "FR": 90, "RL": -90, "RR": -90}, "spin": 1, "title": "разворот на месте"},
-    {"sec": 4.0, "angles": {"FL": 0, "FR": 0, "RL": 0, "RR": 0}, "spin": -1, "title": "назад"},
+#: Скорость рулевого модуля, °/с — колесо не перескакивает мгновенно.
+DEMO_STEER_RATE = 110.0
+
+#: Задания стенда: куда ехать. Робот едет к точке, а как встать колёсами —
+#: решает ИИ (gui/ai_driver.py): у машины четыре рулевых модуля, поэтому она
+#: ездит боком и разворачивается на месте, как настоящая 4WIS.
+DEMO_GOALS = (
+    {"label": "проход у стеллажа", "x": 3.80, "y": 0.45},
+    {"label": "крабом вбок", "x": 3.80, "y": 1.05, "crab": True},
+    {"label": "разворот на месте", "turn": 90.0},     # курс: на север, как в цехе
+    {"label": "коридор вдоль стеллажа", "x": 3.80, "y": 2.55},
+    {"label": "площадка Б", "x": 4.05, "y": 2.60},
+    {"label": "спуск к столу", "x": 3.80, "y": 1.60},
+    {"label": "низ цеха", "x": 3.80, "y": 0.45},
+    {"label": "площадка А", "x": 0.55, "y": 0.60},
+    {"label": "база / зарядка", "x": 2.40, "y": 0.40},
 )
 
-#: Скорость рулевого модуля, °/с — колесо не перескакивает мгновенно.
-DEMO_STEER_RATE = 70.0
+# --- Карта цеха: мир, сканирование, упаковка в строку -----------------------
+WORLD_W, WORLD_H = 4.8, 3.2          # м — размер цеха на стенде
+MAP_W, MAP_H = 96, 64                # клеток
+MAP_RES = WORLD_W / MAP_W            # 0,05 м на клетку
+UNKNOWN, FREE, OCCUPIED = 0, 1, 2
+
+#: Стены и стеллажи: (x0, y0, x1, y1) в метрах. По ним же считаются препятствия
+#: для дальномера — мир и карта не расходятся.
+WORLD_BLOCKS = (
+    (0.00, 0.00, 4.80, 0.06),        # стены цеха
+    (0.00, 3.14, 4.80, 3.20),
+    (0.00, 0.00, 0.06, 3.20),
+    (4.74, 0.00, 4.80, 3.20),
+    (1.20, 1.00, 1.36, 2.30),        # стеллажи
+    (1.95, 1.00, 2.11, 2.30),
+    (3.30, 0.60, 3.46, 1.90),
+    (2.05, 1.85, 2.90, 2.00),        # стол посреди цеха
+)
+
+#: Площадки на карте: (x, y, подпись).
+WORLD_PADS = ((0.55, 0.60, "А"), (4.05, 2.60, "Б"), (2.40, 0.40, "база"))
+
+#: Клеток карты для честного процента: за вычетом стен и стеллажей.
+MAP_AREA = MAP_W * MAP_H
 
 
-def demo_drive_mode(t: float):
-    """Режим демонстрационной езды на момент ``t`` (цикл повторяется)."""
-    cycle = sum(mode["sec"] for mode in DEMO_DRIVE_MODES)
-    x = t % cycle
-    for mode in DEMO_DRIVE_MODES:
-        if x < mode["sec"]:
-            return mode
-        x -= mode["sec"]
-    return DEMO_DRIVE_MODES[0]
+class RoomMap:
+    """Карта цеха: клетки размечает дальномер, пока робот едет.
+
+    Значения клеток: 0 — не разведано, 1 — свободно, 2 — препятствие. Карта
+    копится с версией: экран забирает клетки только когда версия изменилась,
+    поэтому опрос состояния остаётся лёгким.
+    """
+
+    def __init__(self):
+        self.cells = bytearray(MAP_AREA)
+        self.version = 1
+        self.scanned = 0
+
+    # --- мир -------------------------------------------------------------
+    @staticmethod
+    def blocked(x: float, y: float) -> bool:
+        for x0, y0, x1, y1 in WORLD_BLOCKS:
+            if x0 <= x <= x1 and y0 <= y <= y1:
+                return True
+        return False
+
+    @staticmethod
+    def cast(x: float, y: float, angle: float, max_range: float):
+        """Луч дальномера: (до препятствия, м; точка попадания)."""
+        step = MAP_RES * 0.8
+        dist = 0.0
+        while dist < max_range:
+            dist += step
+            px = x + math.cos(angle) * dist
+            py = y + math.sin(angle) * dist
+            if not (0.0 <= px <= WORLD_W and 0.0 <= py <= WORLD_H):
+                return dist, (px, py)
+            if RoomMap.blocked(px, py):
+                return dist, (px, py)
+        return max_range, (x + math.cos(angle) * max_range, y + math.sin(angle) * max_range)
+
+    # --- разметка --------------------------------------------------------
+    def _mark(self, cx: int, cy: int, value: int) -> bool:
+        if not (0 <= cx < MAP_W and 0 <= cy < MAP_H):
+            return False
+        idx = cy * MAP_W + cx
+        if self.cells[idx] == value:
+            return False
+        if self.cells[idx] == UNKNOWN and value != UNKNOWN:
+            self.scanned += 1
+        self.cells[idx] = value
+        return True
+
+    def scan(self, x: float, y: float, heading: float, rays: int = 72, max_range: float = 3.0) -> bool:
+        """Круговой обзор: свободное по пути луча, препятствие на попадании."""
+        changed = False
+        for i in range(rays):
+            angle = heading + (2 * math.pi * i / rays)
+            dist, (hx, hy) = self.cast(x, y, angle, max_range)
+            for step in range(1, int(dist / MAP_RES) + 1):
+                px = x + math.cos(angle) * step * MAP_RES
+                py = y + math.sin(angle) * step * MAP_RES
+                if RoomMap.blocked(px, py):
+                    break
+                cx, cy = int(px / MAP_RES), int(py / MAP_RES)
+                if abs(px - x) > 0.12 or abs(py - y) > 0.12:
+                    changed |= self._mark(cx, cy, FREE)
+            changed |= self._mark(int(hx / MAP_RES), int(hy / MAP_RES), OCCUPIED)
+        if changed:
+            self.version += 1
+        return changed
+
+    def percent(self) -> int:
+        """Доля разведанной площади — по ней на экране видно, как идёт съёмка."""
+        return int(round(100.0 * self.scanned / MAP_AREA))
+
+    def rle(self) -> str:
+        """Клетки одной строкой: «значение×количество» через запятую."""
+        parts = []
+        prev, count = None, 0
+        for value in self.cells:
+            if value == prev:
+                count += 1
+                continue
+            if prev is not None:
+                parts.append(f"{prev}*{count}")
+            prev, count = value, 1
+        if prev is not None:
+            parts.append(f"{prev}*{count}")
+        return ",".join(parts)
+
+
+def decode_rle(text: str, expect: int = MAP_AREA) -> bytes:
+    """Обратная к :meth:`RoomMap.rle` — нужна тестам и отладке."""
+    out = bytearray()
+    for chunk in text.split(","):
+        value, _, count = chunk.partition("*")
+        out.extend([int(value)] * int(count))
+    if len(out) != expect:
+        raise ValueError(f"в строке {len(out)} клеток, ожидалось {expect}")
+    return bytes(out)
+
+
+def _clampf(v: float, lo: float, hi: float) -> float:
+    return lo if v < lo else hi if v > hi else v
+
 
 # --- АКБ 12S3P LiFePO4 (совпадает с gui/console-core.js) --------------------
 PACK = {
@@ -250,11 +371,16 @@ def pack_state(pack_v, pack_a, soc=None, temp_c=28.0):
 # 3. Источники данных
 # ============================================================================
 class SimSource:
-    """Демонстрационная физика: робот едет по маршруту, модули рулят."""
+    """Стенд: ИИ ведёт робота по заданиям, дальномер размечает карту.
+
+    Манёвры больше не сценарий: сеть на 32 нейрона (gui/ai_driver.py) решает
+    на каждом такте, как встать колёсами, и учится на ходу, повторяя
+    геометрического учителя. Те же скорости уходят в ROS, если рядом rclpy.
+    """
 
     name = "sim"
 
-    def __init__(self):
+    def __init__(self, ai_ros=None):
         self.t0 = time.time()
         self.soc = 78.0
         self.last = time.time()
@@ -262,6 +388,35 @@ class SimSource:
         self.motors = [{"id": mid, "title": MODULE_TITLES[mid], "angle": 0.0,
                         "rpm": 0.0, "temp": 36.0, "homed": True} for mid in MODULE_NAMES.values()]
 
+        # --- водитель и его связь с ROS ---
+        if ai_ros is None:
+            ai_ros = os.environ.get("RC_AI_ROS", "0").strip().lower() in {"1", "true", "yes", "on"}
+        self.driver = ai_driver.NeuralDriver()
+        self.pretrain_loss = self.driver.pretrain()      # урок перед выездом
+        self.sink = ai_driver.RosCommandSink(enabled=ai_ros)
+
+        # --- цех: место робота, карта, след ---
+        self.map = RoomMap()
+        self.x, self.y, self.th = WORLD_PADS[2][0], WORLD_PADS[2][1], 0.0
+        self.trail = [[round(self.x, 2), round(self.y, 2)]]
+        self.goal_index = 0
+        self.goal_entered = time.time()
+        self.goal_hold_until = 0.0
+        self.turn_target = None
+        self.turn_start = 0.0
+
+        self.target_vec = None            # цель обучения, сглаженная по тактам
+        self.throttle = 0.0               # тяга после привода (фильтр)
+        self.last_inputs = {}
+        self.last_target = {}
+        self.last_command = {"label": "—", "mode": "—", "steer": "прямо", "angles": {},
+                             "throttle": 0.0, "speed": 0.0}
+        self.command_log = []
+        self.vx = self.vy = self.wz = 0.0
+        self.stuck_s = 0.0                            # стоим, упёршись в препятствие
+        self.stall_s = 0.0                            # стоим, не выполняя задание
+
+    # --- обмен ------------------------------------------------------------
     def bus(self):
         """Счётчики обмена для экрана диагностики.
 
@@ -278,45 +433,235 @@ class SimSource:
             "modules": sorted(MODULE_NAMES),
         }
 
+    # --- задания ----------------------------------------------------------
+    def _goal(self):
+        return DEMO_GOALS[self.goal_index % len(DEMO_GOALS)]
+
+    def _goal_error(self, goal):
+        """Задание в системе робота: (dx, dy) в метрах и рассогласование курса."""
+        if goal.get("turn") is not None:
+            if self.turn_target is None:                  # курс задания, ° от оси x
+                self.turn_target = math.radians(goal["turn"])
+            dth = self.turn_target - self.th
+            while dth > math.pi:
+                dth -= 2 * math.pi
+            while dth <= -math.pi:
+                dth += 2 * math.pi
+            return 0.0, 0.0, dth
+        gx, gy = float(goal["x"]) - self.x, float(goal["y"]) - self.y
+        cos_t, sin_t = math.cos(self.th), math.sin(self.th)
+        dx = gx * cos_t + gy * sin_t                  # вперёд
+        dy = -gx * sin_t + gy * cos_t                 # влево
+        if goal.get("crab"):
+            return dx, dy, 0.0                        # боком: курс держим, не доворачиваем
+        dth = math.atan2(gy, gx) - self.th
+        while dth > math.pi:
+            dth -= 2 * math.pi
+        while dth <= -math.pi:
+            dth += 2 * math.pi
+        return dx, dy, dth
+
+    def _goal_reached(self, goal, dx, dy, dth, now) -> bool:
+        if now < self.goal_hold_until:
+            return False
+        if (now - self.goal_entered) > 8.0:           # задание зависло — идём дальше
+            return True
+        if self.stall_s > 2.5:                        # робот встал: задание не идёт
+            return True
+        if goal.get("turn") is not None:
+            return abs(math.degrees(dth)) < 6.0
+        if goal.get("crab"):
+            return math.hypot(dx, dy) < 0.18
+        return math.hypot(dx, dy) < 0.22
+
+    def _next_goal(self, now):
+        self.goal_index = (self.goal_index + 1) % len(DEMO_GOALS)
+        self.goal_entered = now
+        self.goal_hold_until = now + 0.5              # пауза: робот осматривается
+        self.turn_target = None
+
+    @staticmethod
+    def _free(x: float, y: float) -> bool:
+        """Место свободно для центра машины (с запасом от стен)."""
+        return (not RoomMap.blocked(x, y)) and 0.09 <= x <= WORLD_W - 0.09 and 0.09 <= y <= WORLD_H - 0.09
+
+    def _obstacles(self):
+        """Близость препятствий слева/по центру/справа — входы дальномера."""
+        out = []
+        for offset in (math.radians(-35), 0.0, math.radians(35)):
+            dist, _ = RoomMap.cast(self.x, self.y, self.th + offset, 1.6)
+            out.append(round(max(0.0, 1.0 - dist / 1.6), 3))
+        return out
+
+    def _inputs(self, goal, dx, dy, dth, obst):
+        data = ai_driver.scenario_inputs(dx, dy, dth, bool(goal.get("crab")), obst,
+                                         soc=self.soc / 100.0,
+                                         speed=abs(self.vx) / ai_driver.V_MAX)
+        self.last_inputs = data
+        return [data[name] for name in ai_driver.INPUTS]
+
+    # --- такт -------------------------------------------------------------
     def read(self):
         now = time.time()
         dt = max(0.001, min(0.5, now - self.last))
         self.last = now
         t = now - self.t0
 
-        speed = 0.55 + 0.45 * math.sin(t / 9.0)          # условная скорость 0,1…1,0
-        drive = demo_drive_mode(t)
-        target_rpm = speed * 260.0 * drive["spin"]
+        goal = self._goal()
+        dx, dy, dth = self._goal_error(goal)
+        obst = self._obstacles()
+        vector = self._inputs(goal, dx, dy, dth, obst)
+        # краб разрешён только на заданиях с пометкой «crab»: там машина идёт
+        # боком, а на остальных доворачивается и едет — так манёвры не хлопают
+        target = ai_driver.geometric_target(dx, dy, dth, crab=bool(goal.get("crab")), obst=obst)
+        wanted = list(target["vector"])
+        if self.target_vec is None:
+            self.target_vec = wanted
+        else:
+            k = min(1.0, dt * 3.0)                    # сглаживание цели, ~0,3 с
+            self.target_vec = [p + (w - p) * k for p, w in zip(self.target_vec, wanted)]
+        self.last_target = {"mode": target["mode"]}
+
+        out = self.driver.step(vector, self.target_vec)
+        # тяга проходит через привод: фильтр сглаживает дрожь выходов сети
+        raw = ai_driver.command_from_outputs(out["y"])
+        k = min(1.0, dt * 3.0)
+        self.throttle = self.throttle + (raw["throttle"] - self.throttle) * k
+        cmd = ai_driver.command_from_outputs(out["y"])
+        cmd["throttle"] = self.throttle
+        cmd["label"] = cmd["label"].rsplit(" · ", 1)[0] + " · " + \
+            ("%.1f м/с" % (abs(self.throttle) * ai_driver.V_MAX)).replace(".", ",")
+        self.last_command = cmd
+
+        # рулевые модули перекладываются с ограниченной скоростью, как настоящие
+        step = DEMO_STEER_RATE * dt
+        actual = {}
         for i, m in enumerate(self.motors):
-            want = float(drive["angles"].get(m["id"], 0.0))
-            step = DEMO_STEER_RATE * dt
+            want = float(cmd["angles"].get(m["id"], 0.0))
             diff = want - m["angle"]
-            if abs(diff) <= step:
-                m["angle"] = want
-            else:
-                m["angle"] += math.copysign(step, diff)
+            m["angle"] = want if abs(diff) <= step else m["angle"] + math.copysign(step, diff)
+            actual[m["id"]] = m["angle"]
+            target_rpm = cmd["throttle"] * 240.0
             m["rpm"] += (target_rpm - m["rpm"]) * min(1.0, dt * 2.0)
             m["temp"] = 34.0 + abs(m["rpm"]) / 40.0 + math.sin(t / 5 + i) * 1.4
-        amps = 6.0 + 12.0 * abs(math.sin(t / 9.0))
+
+        # движение: та же модель, что уходит в ROS
+        self.vx, self.vy, self.wz = ai_driver.body_velocity(actual, cmd["throttle"])
+        cos_t, sin_t = math.cos(self.th), math.sin(self.th)
+        nx = self.x + (self.vx * cos_t - self.vy * sin_t) * dt
+        ny = self.y + (self.vx * sin_t + self.vy * cos_t) * dt
+        if not self._free(nx, ny):
+            if self._free(nx, self.y):          # задели препятствие — скользим вдоль него
+                ny = self.y
+            elif self._free(self.x, ny):
+                nx = self.x
+            else:
+                nx, ny, self.stuck_s = self.x, self.y, self.stuck_s + dt
+        moved = math.hypot(nx - self.x, ny - self.y)
+        turned = abs(self.wz * dt)
+        self.x, self.y = nx, ny
+        self.th = (self.th + self.wz * dt) % (2 * math.pi)
+        # «стоим» — когда почти не двигаемся и не разворачиваемся: задание не
+        # выполняется, и киоск не должен смотреть в замершего робота
+        self.stall_s = self.stall_s + dt if (moved < 0.02 and turned < 0.01) else 0.0 % (2 * math.pi)
+
+        if moved:
+            last_pt = self.trail[-1]
+            if math.hypot(self.x - last_pt[0], self.y - last_pt[1]) >= 0.12:
+                self.trail.append([round(self.x, 2), round(self.y, 2)])
+                del self.trail[:-200]
+
+        self.map.scan(self.x, self.y, self.th)
+        self.sink.publish(self.vx, self.vy, self.wz)      # ROS 2: /cmd_vel
+
+        if self._goal_reached(goal, dx, dy, dth, now):
+            self._next_goal(now)
+
+        speed = math.hypot(self.vx, self.vy)
+        amps = 4.0 + 16.0 * abs(cmd["throttle"]) + 3.0 * abs(self.wz)
         self.soc = max(4.0, self.soc - amps * dt / 3600.0 * 100.0 / PACK["capacityAh"])
         volts = voltage_from_soc(self.soc) - amps * PACK["internalR"]
-        return self._payload(self.motors, volts, amps, speed, drive["title"])
+        return self._payload(self.motors, volts, amps, speed, cmd["label"])
 
+    # --- данные наружу ----------------------------------------------------
     def _payload(self, motors, volts, amps, speed, drive_mode=None):
         # 4 модуля × 1 кадр телеметрии за выборку — как на реальной шине.
         self.frames_ok += len(MODULE_NAMES)
         battery = pack_state(volts, amps, self.soc)
+        goal = self._goal()
+        dx, dy, dth = self._goal_error(goal)
+        self._log_command()
         return {
             "motors": motors,
             "battery": battery,
             "cargo": {"kg": 80, "closed": True},
             "mode": "АВТОНОМНЫЙ РЕЖИМ",
-            # манёвр есть только у демонстрации: реальные модули его не сообщают
             "driveMode": drive_mode,
             "route": "склад → зона выгрузки",
             "speedMps": round(speed, 2),
             "powerKw": round(battery["watts"] / 1000.0, 2),
             "linkOk": True,
+            "ai": self.ai_state(goal, dx, dy, dth),
+            "map": self.map_state(goal),
+        }
+
+    def _log_command(self):
+        """Журнал команд: пишем, когда меняется манёвр или сторона поворота."""
+        cmd = self.last_command
+        key = (cmd.get("mode"), cmd.get("steer"))
+        if self.command_log and self.command_log[-1].get("key") == key:
+            return
+        self.command_log.append({
+            "key": key,
+            "time": time.strftime("%H:%M:%S"),
+            "label": cmd.get("label", "—"),
+            "mode": cmd.get("mode", "—"),
+        })
+        del self.command_log[:-12]
+
+    def ai_state(self, goal, dx, dy, dth):
+        cmd = self.last_command
+        return {
+            "available": True,
+            "neurons": self.driver.neurons,
+            "layers": self.driver.layers,
+            "command": cmd.get("label", "—"),
+            "mode": cmd.get("mode", "—"),
+            "steer": cmd.get("steer", "прямо"),
+            "angles": {k: round(v, 1) for k, v in (cmd.get("angles") or {}).items()},
+            "throttle": round(float(cmd.get("throttle", 0.0)), 3),
+            "speed": round(abs(float(cmd.get("throttle", 0.0))) * ai_driver.V_MAX, 2),
+            "loss": round(float(self.driver.loss), 4),
+            "pretrainLoss": round(float(self.pretrain_loss), 5),
+            "lossAvg": round(float(self.driver.loss_avg or 0.0), 4),
+            "steps": self.driver.steps,
+            "activations": self.driver.activations(),
+            "inputs": dict(self.last_inputs),
+            "teacher": self.last_target.get("mode", "—"),
+            "goal": {
+                "label": goal["label"],
+                "dist": round(math.hypot(dx, dy), 2),
+                "dth": round(math.degrees(dth), 1),
+            },
+            "log": list(self.command_log[-6:]),
+            "ros": self.sink.status(),
+            "stuckSec": round(self.stuck_s, 1),
+            "stallSec": round(self.stall_s, 1),
+        }
+
+    def map_state(self, goal=None):
+        goal = goal or self._goal()
+        return {
+            "ok": True,
+            "w": MAP_W, "h": MAP_H, "res": MAP_RES,
+            "world": {"w": WORLD_W, "h": WORLD_H},
+            "version": self.map.version,
+            "scanPct": self.map.percent(),
+            "pose": {"x": round(self.x, 3), "y": round(self.y, 3), "th": round(self.th, 4)},
+            "trail": self.trail[-160:],
+            "pads": [{"x": p[0], "y": p[1], "label": p[2]} for p in WORLD_PADS],
+            "goal": {"x": goal.get("x"), "y": goal.get("y"), "label": goal["label"]},
+            "source": "sim",
         }
 
 
@@ -417,6 +762,15 @@ class SerialSource:
             "battery": battery,
             "cargo": dict(self.cargo),
             "mode": "АВТОНОМНЫЙ РЕЖИМ" if link else "НЕТ СВЯЗИ С МОДУЛЯМИ",
+            "driveMode": None,
+            "ai": {
+                "available": False,
+                "reason": "реальные модули: ИИ ведёт только стенд (—source sim)",
+            },
+            "map": {
+                "ok": False,
+                "reason": "карту даёт SLAM: на стенде — дальномер, на роботе — ROS (/map)",
+            },
             "route": "—",
             "speedMps": round(sum(abs(m.get("rpm", 0)) for m in motors) / 4 * 2 * math.pi * WHEEL_R_M / 60, 2),
             "powerKw": round(battery["watts"] / 1000.0, 2),
@@ -510,6 +864,7 @@ class RosSource:
 
     def read(self):
         if self.fallback:
+            # rclpy не поднялся: честно работаем стендом, ИИ и карта — стендовые
             return self.fallback.read()
         d = self.data
         volts = float(d.get("battery", {}).get("volts") or 0.0)
@@ -713,6 +1068,21 @@ class App:
         out["ts"] = time.time()
         return out
 
+    def map_cells(self):
+        """Клетки карты строкой: экран забирает их, когда сменилась версия."""
+        source = self.source
+        room = getattr(source, "map", None)
+        if room is None:
+            return {"ok": False, "reason": "у источника данных нет карты"}
+        return {
+            "ok": True,
+            "version": room.version,
+            "w": MAP_W,
+            "h": MAP_H,
+            "res": MAP_RES,
+            "cells": room.rle(),
+        }
+
     def open_lock(self, pin):
         res = self.vault.verify(pin)
         if res.get("ok"):
@@ -761,6 +1131,9 @@ class ApiHandler(SimpleHTTPRequestHandler):
         path = self.path.split("?", 1)[0]
         if path == "/api/state":
             return self._json({"ok": True, "data": self.app.snapshot()})
+        if path == "/api/map":
+            # клетки отдельно от состояния: 6 КБ на каждый опрос в 300 мс ни к чему
+            return self._json(self.app.map_cells())
         if path == "/api/audit":
             limit = 20
             m = re.search(r"[?&]limit=(\d+)", self.path)

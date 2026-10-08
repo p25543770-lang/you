@@ -47,6 +47,9 @@ ASSETS = {
     "vision.js": "vision_js",
     # наша приборная оснастка: частота опроса, тренды, диагностика обмена
     "instrument.js": "instrument_js",
+    # карта цеха и панель ИИ: клетки дальномера и сеть на 32 нейрона
+    "map.js": "map_js",
+    "ai_panel.js": "ai_panel_js",
     # наш скрипт: пробрасывает токен сессии в подзапросы (нужен в iframe без cookie)
     "slam_auth.js": "slam_auth_js",
 }
@@ -182,6 +185,19 @@ def create_blueprint(state, guard=None) -> Blueprint:
     @guard
     def api_state():
         return jsonify({"ok": True, "data": state.snapshot()})
+
+    @bp.get("/api/map")
+    @guard
+    def api_map():
+        """Клетки карты цеха: строка «значение×количество» + версия.
+
+        Отдельно от состояния намеренно: карта весит килобайты и меняется
+        реже опроса, поэтому экран забирает её только по смене версии.
+        """
+        cells = getattr(state, "map_cells", None)
+        if not callable(cells):
+            return jsonify({"ok": False, "reason": "у источника данных нет карты"})
+        return jsonify(cells())
 
     @bp.get("/api/audit")
     @guard

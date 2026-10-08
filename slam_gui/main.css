@@ -687,3 +687,190 @@ body.sc-dark {
   background: var(--sc-rd);
   box-shadow: 0 0 7px var(--sc-rd);
 }
+
+/* ============================================================================
+   Карта цеха и панель ИИ — вместо колонки АКБ на экране борта.
+   Слева остаются двигатели, справа столбец: карта сверху, ИИ снизу.
+   ========================================================================== */
+.sc-grid {
+  /* Двигатели + столбец «карта и ИИ» (панель АКБ убрана с киоска: заряд
+     виден лампой и графиком в приборной линейке). */
+  grid-template-columns: minmax(0, 1.5fr) minmax(340px, 1fr);
+}
+
+.sc-side {
+  display: grid;
+  grid-template-rows: minmax(0, 1.05fr) minmax(0, 1fr);
+  gap: var(--sc-gap);
+  min-height: 0;
+}
+
+/* --- Карта ---------------------------------------------------------------- */
+.sc-map-wrap {
+  position: relative;
+  flex: 1;
+  min-height: 0;
+  padding: 8px;
+}
+
+#sc-map {
+  display: block;
+  width: 100%;
+  height: 100%;
+  background: #0d1418;
+  border: 1px solid var(--sc-line);
+  border-radius: var(--sc-r);
+}
+
+.sc-map-legend {
+  position: absolute;
+  left: 14px;
+  bottom: 14px;
+  display: flex;
+  gap: 10px;
+  padding: 4px 8px;
+  background: rgba(7, 10, 12, 0.72);
+  border: 1px solid var(--sc-line);
+  border-radius: var(--sc-r);
+  font: 11px/1.3 var(--sc-mono);
+  color: var(--sc-tx-2);
+}
+
+.sc-map-legend span { display: flex; align-items: center; gap: 5px; }
+.sc-map-legend i { width: 9px; height: 9px; border-radius: 1px; }
+.sc-map-legend .lg-free { background: #1d3b45; }
+.sc-map-legend .lg-occ { background: #d9a441; }
+.sc-map-legend .lg-unk { background: #0d1418; border: 1px solid var(--sc-line-2); }
+
+.sc-map-foot {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 14px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--sc-line);
+  font: 12px/1.4 var(--sc-mono);
+  color: var(--sc-tx-2);
+}
+
+.sc-map-foot span:last-child { margin-left: auto; }
+
+/* --- ИИ: сеть, команда, обучение ------------------------------------------ */
+.sc-ai { gap: 0; overflow-y: auto; }
+
+.sc-ai-net { padding: 10px 12px 6px; }
+
+.sc-ai-neurons {
+  /* 32 клетки лентой: 19 в ряд при ширине столбца — два ряда и видно всех */
+  display: flex;
+  flex-wrap: wrap;
+  gap: 3px;
+}
+
+.sc-ai-n {
+  width: 18px;
+  height: 18px;
+  border-radius: 2px;
+  background: var(--sc-cy);
+  opacity: 0.2;
+  transition: opacity 0.15s linear;
+}
+
+.sc-ai-n[data-sign="minus"] { background: var(--sc-am); }
+.sc-ai-n-out { outline: 1px solid var(--sc-line-2); }
+
+.sc-ai-net-legend {
+  display: flex;
+  gap: 12px;
+  margin-top: 6px;
+  font: 11px/1.3 var(--sc-mono);
+  color: var(--sc-tx-3);
+}
+
+.sc-ai-net-legend span { display: flex; align-items: center; gap: 5px; }
+.sc-ai-net-legend i { width: 8px; height: 8px; border-radius: 2px; background: var(--sc-cy); }
+.sc-ai-net-legend .sc-ai-leg-hid { background: var(--sc-cy); }
+.sc-ai-net-legend .sc-ai-leg-out { background: var(--sc-am); }
+.sc-ai-net-legend .sc-ai-leg-in { background: var(--sc-tx-3); }
+
+.sc-ai-cmd {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 4px 12px;
+  padding: 8px 12px;
+  border-top: 1px solid var(--sc-line);
+  border-bottom: 1px solid var(--sc-line);
+  background: var(--sc-panel-2);
+}
+
+.sc-ai-cmd b { font: 600 17px/1.3 var(--sc-mono); color: var(--sc-cy); }
+.sc-ai-cmd span { font: 12px/1.3 var(--sc-mono); color: var(--sc-tx-2); }
+
+.sc-ai-inputs {
+  display: grid;
+  /* 10 входов сети: два ряда по пять — панель не занимает пол-экрана */
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: 3px 8px;
+  padding: 7px 12px;
+}
+
+.sc-ai-in { display: flex; align-items: center; gap: 4px; min-width: 0; }
+.sc-ai-in small {
+  flex: 0 0 34px;
+  font: 10px/1.2 var(--sc-mono);
+  color: var(--sc-tx-3);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.sc-ai-in i {
+  display: block;
+  height: 6px;
+  width: 0;
+  border-radius: 3px;
+  background: var(--sc-cy);
+}
+.sc-ai-in i[data-sign="minus"] { background: var(--sc-am); }
+
+.sc-ai-rows { padding: 4px 12px 8px; }
+
+.sc-ai-rows div {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 3px 0;
+  border-bottom: 1px solid var(--sc-line);
+}
+
+.sc-ai-rows div:last-child { border-bottom: 0; }
+.sc-ai-rows span { flex: 0 0 96px; font-size: 12px; color: var(--sc-tx-3); }
+.sc-ai-rows b {
+  font: 12px/1.35 var(--sc-mono);
+  color: var(--sc-tx);
+  text-align: right;
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.sc-ai-log {
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  padding: 6px 12px 10px;
+  margin-top: auto;
+  border-top: 1px solid var(--sc-line);
+  font: 11px/1.35 var(--sc-mono);
+  color: var(--sc-tx-2);
+}
+
+.sc-ai-log b { color: var(--sc-tx-3); font-weight: 500; }
+
+@media (max-width: 1180px) {
+  .sc-grid { grid-template-columns: minmax(0, 1.2fr) minmax(300px, 1fr); }
+}
+
+@media (max-width: 900px) {
+  .sc-side { grid-template-rows: minmax(240px, auto) auto; }
+  .sc-grid { grid-template-columns: 1fr; }
+}

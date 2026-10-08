@@ -107,39 +107,39 @@
         </div>
       </section>
 
-      <section class="sc-panel sc-batt" aria-label="Аккумулятор">
-        <div class="sc-panel-head">
-          <h1>Аккумулятор</h1>
-          <span class="sc-note">LiFePO4 12S3P · 714 Вт·ч</span>
-        </div>
-
-        <div class="sc-ring-wrap">
-          <svg class="sc-ring" viewBox="0 0 140 140" role="img" aria-label="Заряд аккумулятора">
-            <circle class="sc-ring-bg" cx="70" cy="70" r="60" />
-            <circle class="sc-ring-fill" id="sc-ring-fill" cx="70" cy="70" r="60" />
-          </svg>
-          <div class="sc-ring-center">
-            <b id="sc-soc">78<span>%</span></b>
-            <small id="sc-soc-label">заряд</small>
+      <div class="sc-side">
+        <!-- Карта цеха: клетки размечает дальномер, рисует модуль map.js -->
+        <section class="sc-panel sc-map-panel" aria-label="Карта цеха">
+          <div class="sc-panel-head">
+            <h1>Карта цеха</h1>
+            <span class="sc-note">SLAM · дальномер 72 луча · клетка 0,05 м</span>
           </div>
-        </div>
+          <div class="sc-map-wrap">
+            <canvas id="sc-map" width="660" height="420"
+                    title="Карта: разведанные клетки, препятствия, робот, площадки"></canvas>
+            <div class="sc-map-legend">
+              <span><i class="lg-free"></i>свободно</span>
+              <span><i class="lg-occ"></i>препятствие</span>
+              <span><i class="lg-unk"></i>не разведано</span>
+            </div>
+          </div>
+          <div class="sc-map-foot">
+            <span id="sc-map-stats">разведано —</span>
+            <span id="sc-map-pose">робот —</span>
+            <span id="sc-map-goal">задание —</span>
+          </div>
+        </section>
 
-        <div class="sc-batt-rows">
-          <div class="sc-batt-row"><span>Напряжение</span><b id="sc-volts">41,2 В</b></div>
-          <div class="sc-batt-row"><span>Ток</span><b id="sc-amps">12,4 А</b></div>
-          <div class="sc-batt-row"><span>Запас хода</span><b id="sc-range">14 км</b></div>
-          <div class="sc-batt-row"><span>Состояние</span><b id="sc-batt-state">разряд</b></div>
-        </div>
-
-        <div class="sc-batt-foot">
-          <span id="sc-batt-hint">пороги: 35,5 В предупреждение · 33,5 В авария</span>
-        </div>
-      </section>
-
+        <!-- Искусственный интеллект: сеть 32 нейрона ведёт машину, разметку
+             панели строит модуль ai_panel.js. -->
+        <section class="sc-panel sc-ai" id="sc-ai-panel" aria-label="Искусственный интеллект"></section>
+      </div>
     </main>
   </div>
 
   <script src="/slam_auth.js"></script>
+  <script src="map.js"></script>
+  <script src="ai_panel.js"></script>
   <script src="main.js"></script>
   <script src="instrument.js"></script>
 </body>

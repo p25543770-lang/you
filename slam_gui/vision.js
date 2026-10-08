@@ -202,6 +202,10 @@ function drawCam() {
 }
 
 function drawMap() {
+  // Борт отдаёт настоящую карту — её рисует map.js (клетки дальномера, робот,
+  // площадки). Демо-мир остаётся запасным вариантом: он нужен, когда карты с
+  // борта нет (реальный робот без SLAM или стенд без дальномера).
+  if (window.RSMap && RSMap.active()) return;
   const c = document.getElementById("map");
   const ctx = c.getContext("2d");
   const dw = Math.max(320, c.clientWidth | 0);

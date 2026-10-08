@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import math
 import re
 
 from conftest import login
@@ -134,7 +135,8 @@ def test_audit_records_attempts(client, operator):
 def test_assets_are_served(client, operator):
     login(client)
     for name in ("main.css", "main.js", "styles.css", "app.js",
-                 "console.js", "console-core.js", "vision.js"):
+                 "console.js", "console-core.js", "vision.js",
+                 "map.js", "ai_panel.js"):
         response = client.get(f"/{name}")
         assert response.status_code == 200, name
         assert len(response.data) > 100, name
@@ -144,7 +146,8 @@ def test_assets_are_public_without_login(client):
     """CSS/JS отдаются без входа: в iframe-предпросмотре cookie нет, и подзапросы
     не могут передать сессию — иначе страница приезжает сломанной."""
     for name in ("main.css", "main.js", "styles.css", "app.js",
-                 "console.js", "console-core.js", "vision.js", "slam_auth.js"):
+                 "console.js", "console-core.js", "vision.js", "slam_auth.js",
+                 "map.js", "ai_panel.js"):
         assert client.get(f"/{name}").status_code == 200, name
 
 
@@ -382,6 +385,8 @@ def test_kiosk_js_survives_without_removed_blocks():
             str(root / "tests" / "js_smoke.js"),
             str(root / "slam_gui" / "main.js"),
             str(root / "slam_gui" / "instrument.js"),
+            str(root / "slam_gui" / "map.js"),
+            str(root / "slam_gui" / "ai_panel.js"),
         ],
         capture_output=True,
         text=True,
@@ -428,54 +433,297 @@ def test_motor_panel_shows_the_robot_with_wheels_around():
     )
 
 
-def test_demo_drive_modes_are_coherent():
-    """Демонстрация едет по режимам, а не крутит колёсами вразнобой.
-
-    Прежде каждое колесо ходило своей синусоидой: углы четырёх модулей не
-    были связаны, и по экрану нельзя было понять, куда едет робот.
-    """
+def _ai_module():
+    """Загружает gui/ai_driver.py по пути — как это делает бэкенд."""
     import importlib.util
     from pathlib import Path
 
     root = Path(__file__).resolve().parent.parent
-    spec = importlib.util.spec_from_file_location("slam_backend", root / "slam_gui" / "backend.py")
-    backend = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(backend)
+    spec = importlib.util.spec_from_file_location("ai_driver_test", root / "slam_gui" / "ai_driver.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
-    modes = {m["title"]: m["angles"] for m in backend.DEMO_DRIVE_MODES}
-    turn = modes["поворот вправо"]
-    assert turn["FL"] > 0 and turn["FR"] > 0
-    assert turn["FR"] > turn["FL"]                        # внутреннее колесо довёрнуто больше
-    assert turn["RL"] == turn["FL"] and turn["RR"] == turn["FR"]   # задние как передние
-    assert set(modes["краб боком"].values()) == {90}      # чистый боком, все под 90°
-    assert modes["разворот на месте"]["FL"] == 90         # передние в одну сторону
-    assert modes["разворот на месте"]["RL"] == -90        # задние в другую
-    assert set(modes["прямо"].values()) == {0}
 
-    # режим выбирается по времени и цикл повторяется
-    first = backend.demo_drive_mode(1.0)
-    assert first["title"] == "прямо"
-    cycle = sum(m["sec"] for m in backend.DEMO_DRIVE_MODES)
-    assert backend.demo_drive_mode(1.0 + cycle)["title"] == "прямо"
-    assert backend.demo_drive_mode(cycle / 2)["title"] != "прямо"
+def test_ai_driver_is_a_real_network_of_32_neurons():
+    """ИИ — настоящая сеть на 32 нейрона: считает и учится, а не рисует числа."""
+    ai = _ai_module()
 
-    # источник отдаёт согласованные углы и название манёвра.
-    # Часы подменяем: 12 тактов по 0,3 с — как реальный опрос экрана,
-    # а фаза «краб вправо» удерживается той же (иначе время уезжает дальше).
-    import time
+    assert ai.NEURONS == 32, ai.NEURONS
+    assert ai.HIDDEN + len(ai.OUTPUTS) == 32
+    driver = ai.NeuralDriver()
+    assert driver.neurons == 32
+    assert driver.layers == [len(ai.INPUTS), ai.HIDDEN, len(ai.OUTPUTS)]
+    assert driver.layers == [10, 24, 8]
+
+    # входы → выходы: значения ограничены tanh, активаций ровно 32
+    inputs = [0.4, -0.3, 0.2, 1.0, 0.1, 0.9, 0.2, 0.7, 1.0, 0.3]
+    h, y = driver.forward(inputs)
+    assert len(h) + len(y) == 32
+    assert all(-1.0 <= v <= 1.0 for v in h + y)
+    assert len(driver.activations()) == 32
+
+    # обучение уменьшает ошибку: сеть повторяет геометрического учителя
+    target = ai.geometric_target(1.5, -0.8, 0.1, crab=False)["vector"]
+    first = None
+    for _ in range(240):
+        out = driver.step(inputs, target)
+        if first is None:
+            first = out["loss"]
+    assert driver.steps == 240
+    assert out["loss"] < first / 3, f"ошибка почти не упала: {first:.4f} → {out['loss']:.4f}"
+
+    # очный урок: сеть выходит на стенд уже обученной и дальше учится на ходу
+    loss = ai.NeuralDriver().pretrain()
+    assert loss < 0.35, f"очный урок не сошёлся: {loss:.3f}"
+    assert ai.NeuralDriver().pretrain() == loss, "урок должен браться из кэша"
+
+
+def test_ai_teacher_and_4wis_kinematics():
+    """Учитель знает геометрию 4WIS, а модель считает скорости по углам колёс."""
+    ai = _ai_module()
+
+    straight = ai.geometric_target(1.5, 0.0, 0.0)
+    assert straight["mode"] == "вперёд"
+    assert set(straight["angles"].values()) == {0.0}
+
+    # положительный угол колеса — «вправо», поэтому влево (dy > 0) колёса идут влево
+    sideways = ai.geometric_target(0.0, 1.0, 0.0, crab=True)
+    assert sideways["mode"] == "краб"
+    assert len(set(sideways["angles"].values())) == 1        # все четыре параллельно
+    assert sideways["angles"]["FL"] < -85.0
+    other = ai.geometric_target(0.0, -1.0, 0.0, crab=True)
+    assert other["angles"]["FL"] > 85.0
+
+    turn = ai.geometric_target(0.0, 0.0, -1.57)          # курс надо взять вправо
+    assert turn["mode"] == "разворот"
+    assert turn["angles"]["FL"] == turn["angles"]["FR"] == ai.ANGLE_LIMIT
+    assert turn["angles"]["RL"] == turn["angles"]["RR"] == -ai.ANGLE_LIMIT
+
+    back = ai.geometric_target(-1.2, 0.0, 0.0)
+    assert back["mode"] == "назад" and back["throttle"] < 0
+
+    # краб: машина едет боком, вперёд почти не смещается
+    vx, vy, wz = ai.body_velocity(sideways["angles"], 0.5)
+    assert abs(vx) < 0.05 and abs(vy) > 0.4 and abs(wz) < 1e-9
+
+    # разворот на месте: угловая есть, поступательного движения нет
+    vx, vy, wz = ai.body_velocity(turn["angles"], 0.4)
+    assert abs(vx) < 1e-9 and abs(vy) < 1e-9 and abs(wz) > 0.3
+
+    # ход прямо: едем вперёд, угловая нулевая
+    vx, vy, wz = ai.body_velocity(straight["angles"], 0.6)
+    assert vx > 0.5 and abs(vy) < 1e-9 and abs(wz) < 1e-9
+
+    # разворот заканчивается, а не висит: у самой цели доворачиваем до ±4°
+    aimed = ai.geometric_target(0.0, 0.0, math.radians(-3.0))
+    assert aimed["mode"] != "разворот", aimed["mode"]
+    off = ai.geometric_target(0.0, 0.0, math.radians(-30.0))
+    assert off["mode"] == "разворот"
+
+    # препятствие впереди — объезд в свободную сторону: лучи дальномера в деле
+    left_blocked = ai.geometric_target(1.5, 0.0, 0.0, obst=(0.9, 0.8, 0.1))
+    assert left_blocked["mode"] == "объезд"
+    assert left_blocked["angles"]["FL"] > 0          # уходим вправо: слева препятствие
+    right_blocked = ai.geometric_target(1.5, 0.0, 0.0, obst=(0.1, 0.8, 0.9))
+    assert right_blocked["angles"]["FL"] < 0         # уходим влево
+    clear = ai.geometric_target(1.5, 0.0, 0.0, obst=(0.1, 0.1, 0.1))
+    assert clear["mode"] == "вперёд"
+
+
+def test_ros_sink_sends_commands_to_cmd_vel(monkeypatch):
+    """С ROS 2 ИИ работает вместе: те же скорости уходят в /cmd_vel.
+
+    rclpy на стенде нет, поэтому подставляем заглушку — проверяем, что команды
+    действительно публикуются и с правильными числами.
+    """
+    import sys
+    import types
+
+    ai = _ai_module()
+    published = []
+
+    class FakeTwist:
+        def __init__(self):
+            self.linear = types.SimpleNamespace(x=0.0, y=0.0)
+            self.angular = types.SimpleNamespace(z=0.0)
+
+    class FakePublisher:
+        def publish(self, msg):
+            published.append((msg.linear.x, msg.linear.y, msg.angular.z))
+
+    class FakeNode:
+        def create_publisher(self, msg_type, topic, qos):
+            assert msg_type is FakeTwist
+            assert topic == "/cmd_vel"
+            return FakePublisher()
+
+    fake_rclpy = types.ModuleType("rclpy")
+    fake_rclpy.ok = lambda: True
+    fake_rclpy.init = lambda args=None: None
+    fake_rclpy.create_node = lambda name: FakeNode()
+    geometry = types.ModuleType("geometry_msgs")
+    geometry_msg = types.ModuleType("geometry_msgs.msg")
+    geometry_msg.Twist = FakeTwist
+    geometry.msg = geometry_msg
+    monkeypatch.setitem(sys.modules, "rclpy", fake_rclpy)
+    monkeypatch.setitem(sys.modules, "geometry_msgs", geometry)
+    monkeypatch.setitem(sys.modules, "geometry_msgs.msg", geometry_msg)
+
+    sink = ai.RosCommandSink(enabled=True)
+    assert sink.available, sink.reason
+    assert sink.publish(0.4, -0.1, 0.2) is True
+    assert sink.publish(0.0, 0.6, 0.0) is True
+    assert published == [(0.4, -0.1, 0.2), (0.0, 0.6, 0.0)]
+    assert sink.status()["published"] == 2
+
+    # без разрешения стенд никому не командует
+    quiet = ai.RosCommandSink(enabled=False)
+    assert quiet.publish(1.0, 0.0, 0.0) is False
+    assert quiet.published == 0
+
+
+def test_state_reports_ai_and_map(client, operator):
+    """Экран получает от борта ИИ и карту, клетки — отдельным запросом."""
+    import re
+
+    login(client)
+    body = client.get("/api/state").get_json()["data"]
+
+    ai = body["ai"]
+    assert ai["available"] is True
+    assert ai["neurons"] == 32
+    assert ai["layers"] == [10, 24, 8]
+    assert ai["command"] and ai["mode"]
+    assert len(ai["activations"]) == 32
+    assert set(ai["angles"]) == {"FL", "FR", "RL", "RR"}
+    assert ai["steps"] >= 1 and ai["loss"] >= 0.0
+    assert ai["ros"]["topic"] == "/cmd_vel"
+    # АКБ ушла с панели киоска, но данные по-прежнему нужны приборной линейке
+    assert body["battery"]["soc"] > 0 and body["battery"]["volts"] > 0
+    assert "goal" in ai and ai["goal"]["label"]
+
+    room = body["map"]
+    assert room["ok"] is True
+    assert room["w"] == 96 and room["h"] == 64
+    assert abs(room["res"] - 0.05) < 1e-6
+    assert room["version"] >= 1
+    assert 0 < room["scanPct"] <= 100
+    assert set(room["pose"]) == {"x", "y", "th"}
+    assert len(room["trail"]) >= 1
+    assert [p["label"] for p in room["pads"]] == ["А", "Б", "база"]
+
+    cells = client.get("/api/map").get_json()
+    assert cells["ok"] is True
+    assert cells["w"] == room["w"] and cells["h"] == room["h"]
+    rle = cells["cells"]
+    assert re.fullmatch(r"\d+\*\d+(,\d+\*\d+)*", rle), rle[:60]
+
+    from robot_control.slam import load_backend
+
+    backend = load_backend()
+    decoded = backend.decode_rle(rle, expect=room["w"] * room["h"])
+    assert len(decoded) == room["w"] * room["h"]
+    assert set(decoded) <= {0, 1, 2}
+
+
+def test_map_grows_and_ai_drives(monkeypatch):
+    """ИИ действительно везёт робота: позиция меняется, карта разведывается."""
     from unittest import mock
 
-    clock = [2000.0]
+    from robot_control.slam import load_backend
+
+    backend = load_backend()
+    clock = [5000.0]
+
     with mock.patch("time.time", side_effect=lambda: clock[0]):
         source = backend.SimSource()
-        source.t0 = clock[0] - 14.0        # фаза «краб боком» (8 + 4 = 12 с)
-        for _ in range(12):
-            clock[0] += 0.3
-            source.t0 += 0.3
+        start = (source.x, source.y)
+        first_scan = source.map.percent()
+        commands = set()
+        for _ in range(120):
+            clock[0] += 0.1
             payload = source.read()
-    assert payload["driveMode"] == "краб боком"
-    angles = [round(m["angle"]) for m in payload["motors"]]
-    assert angles == [90, 90, 90, 90], angles
+            commands.add(payload["ai"]["mode"])
+        moved = ((source.x - start[0]) ** 2 + (source.y - start[1]) ** 2) ** 0.5
+
+    assert moved > 0.5, f"робот почти не сдвинулся: {moved:.2f} м"
+    assert source.map.percent() > first_scan, "карта не разведывается"
+    assert source.map.version > 1
+    assert len(source.trail) > 3
+    assert payload["ai"]["steps"] == 120                  # очный урок в счёт не идёт
+    assert len(payload["ai"]["log"]) >= 1
+    assert commands, "ИИ не выдал ни одного манёвра"
+
+
+def test_real_sources_admit_they_have_no_ai_or_map():
+    """Реальные модули не притворяются: у них нет ни ИИ, ни карты."""
+    from robot_control.slam import load_backend
+
+    backend = load_backend()
+    source = backend.SerialSource(ports=[], baud=115200)
+    payload = source.read()
+    assert payload["ai"]["available"] is False
+    assert payload["ai"]["reason"]
+    assert payload["map"]["ok"] is False
+    assert payload["map"]["reason"]
+
+
+def test_kiosk_shows_the_map_and_the_ai_instead_of_the_battery_column():
+    """На киоске карта цеха и панель ИИ, колонки АКБ больше нет.
+
+    Просьба: «на место правой колонки — карта и ИИ». АКБ при этом не потеряна:
+    заряд видно лампой и графиком в приборной линейке, а панели отдано место
+    под карту и сеть. Панель ИИ держит контейнер #sc-ai-panel — разметку
+    строит модуль gui/ai_panel.js.
+    """
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    html = (root / "slam_gui" / "main.html").read_text(encoding="utf-8")
+    css = (root / "slam_gui" / "main.css").read_text(encoding="utf-8")
+    js = (root / "slam_gui" / "main.js").read_text(encoding="utf-8")
+
+    assert 'id="sc-map"' in html and "<canvas" in html[html.index('id="sc-map"') - 60:html.index('id="sc-map"')]
+    assert 'id="sc-ai-panel"' in html
+    assert '<script src="map.js"></script>' in html
+    assert '<script src="ai_panel.js"></script>' in html
+    assert "RSMap.tick" in js and "RSAiPanel.render" in js
+
+    # колонка АКБ с киоска убрана целиком: кольцо, проценты, пороги
+    for gone in ("sc-ring-fill", "sc-soc", "sc-volts", "sc-batt-hint", 'class="sc-panel sc-batt"'):
+        assert gone not in html, gone
+    assert "sc-batt" not in css or ".sc-batt" not in html
+
+    # сетка: слева двигатели, справа столбец карты и ИИ
+    assert ".sc-side" in css and "grid-template-rows" in css[css.index(".sc-side"):css.index(".sc-side") + 200]
+    assert re.search(r"\.sc-ai-neurons \{[^}]*flex-wrap: wrap", css, re.S), "нейроны лентой"
+    assert re.search(r"\.sc-ai-n \{[^}]*width: 18px", css, re.S), "клетка нейрона своего размера"
+    assert ".sc-map-wrap" in css and "#sc-map" in css
+
+
+def test_ai_panel_and_map_render_the_board_data():
+    """Панель ИИ и карта собираются и рисуются по данным борта.
+
+    Прогон tests/js_ai.js в заглушке DOM: 32 нейрона (24 + 8), 10 входов,
+    команда, обучение, ROS 2, препятствия, журнал; карта разбирает клетки
+    «значение×количество» и рисует робота с площадками.
+    """
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    node = shutil.which("node")
+    if node is None:
+        import pytest
+
+        pytest.skip("node не установлен — проверка JS пропущена")
+
+    root = Path(__file__).resolve().parent.parent
+    result = subprocess.run([node, str(root / "tests" / "js_ai.js")],
+                            capture_output=True, text=True, timeout=60)
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "ошибок" not in result.stdout
 
 
 def test_dash_cockpit_fills_the_screen_without_empty_columns():
