@@ -9,6 +9,6 @@ venv/
 # --- Секреты и локальные данные: в git не кладём ---
 .env
 *.secret
-data/operators.json
+data/
 var/
 *.log

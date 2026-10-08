@@ -14,17 +14,20 @@
 # Флаги:
 #   --no-run     установить, но не запускать сервер
 #   --systemd    после установки поставить автозапуск через systemd
+#   --ap         поднять на этой машине точку доступа Wi-Fi (робот сам раздаёт сеть)
 #
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 RUN=1
 SYSTEMD=0
+AP=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
     --no-run)  RUN=0; shift ;;
     --systemd) SYSTEMD=1; shift ;;
-    -h|--help) sed -n '2,16p' "$0"; exit 0 ;;
+    --ap)      AP=1; shift ;;
+    -h|--help) sed -n '2,17p' "$0"; exit 0 ;;
     *) echo "неизвестный аргумент: $1" >&2; exit 1 ;;
   esac
 done
@@ -88,6 +91,12 @@ if [[ $SYSTEMD -eq 1 ]]; then
   log "служба robot-control запущена"
 fi
 
+# --- 6b. точка доступа Wi-Fi (опция) ---------------------------------------- #
+if [[ $AP -eq 1 ]]; then
+  log "поднимаю точку доступа Wi-Fi…"
+  ./scripts/setup_ap.sh --autostart || log "точку доступа поднять не удалось — см. текст выше"
+fi
+
 # --- 7. ярлык на рабочем столе (если есть графика) --------------------------- #
 if [[ -n "${DISPLAY:-}" ]]; then
   ./scripts/make_shortcut.sh || log "ярлык создать не удалось — не критично"
@@ -101,8 +110,13 @@ echo "  Локально : http://127.0.0.1:8080/"
 [[ -n "$IP" ]] && echo "  В сети   : http://${IP}:8080/   (с телефона/ноутбука в той же сети)"
 echo
 echo "  Подключение: логин/пароль оператора, которые вы задали на шаге 4."
-echo "  Точка доступа Wi-Fi (если машина робота раздаёт сеть):"
-echo "    sudo ./scripts/setup_ap.sh"
+if [[ $AP -eq 1 ]]; then
+  echo "  Через Wi-Fi робота: подключитесь к сети из data/wifi.txt"
+  echo "    и откройте http://10.42.0.1:8080/"
+else
+  echo "  Точка доступа Wi-Fi (если машина робота раздаёт сеть):"
+  echo "    sudo ./scripts/setup_ap.sh --autostart"
+fi
 
 if [[ $RUN -eq 1 && $SYSTEMD -eq 0 ]]; then
   echo
