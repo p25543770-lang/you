@@ -1307,8 +1307,6 @@ input[type="range"]::-moz-range-thumb { width: 11px; height: 14px; border: 0; ba
   opacity: 0;
 }
 
-#csl-lock-ring { flex: 0 0 auto; }
-
 .csl-keypad {
   display: grid;
   grid-template-columns: repeat(3, 1fr);
@@ -1349,13 +1347,6 @@ input[type="range"]::-moz-range-thumb { width: 11px; height: 14px; border: 0; ba
 .csl-msg.ok { border-left-color: var(--gr); color: var(--gr); }
 .csl-msg.err { border-left-color: var(--rd); color: var(--rd); }
 .csl-msg.warn { border-left-color: var(--am); color: var(--am); }
-
-.csl-timer {
-  margin-top: 6px;
-  font: 400 11px/1.4 var(--mono);
-  color: var(--am);
-}
-
 .csl-details { margin-top: 10px; border-top: 1px solid var(--line); padding-top: 8px; }
 
 .csl-details summary {

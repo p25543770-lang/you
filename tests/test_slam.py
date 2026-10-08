@@ -292,3 +292,39 @@ def test_main_screen_has_no_blind_lock_controls():
     console = (root / "index.html").read_text(encoding="utf-8")
     assert 'id="csl-keypad"' in console
     assert 'id="csl-pin-open"' in console
+
+
+def test_lock_panel_keeps_only_the_pin():
+    """На панели замка остаётся только ввод PIN.
+
+    Регрессия к просьбе «в разделе замка всё удали, кроме пароля в начале»:
+    у панели «Ячейка хранения» должны остаться ввод PIN и кнопки открытия,
+    а QR/RFID, автозакрытие с обратным отсчётом и журнал доступа — убраны.
+    Сами данные журнала и API при этом живы (см. test_api_audit_*).
+    """
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent / "slam_gui"
+    console = (root / "index.html").read_text(encoding="utf-8")
+
+    # осталось: ввод PIN, клавиатура, открытие и закрытие ячейки
+    for keep in ("csl-pin-dots", "csl-pin-input", "csl-keypad",
+                 "csl-pin-open", "csl-pin-close", "csl-pin-msg"):
+        assert f'id="{keep}"' in console, f"на панели замка нет {keep}"
+
+    # убрано: всё прочее (альтернативные метки, автозакрытие, журнал)
+    for gone in ("csl-audit", "csl-pin-qr", "csl-pin-rfid", "csl-pin-extend",
+                 "csl-lock-timer", "csl-lock-ring", "csl-lock-kind"):
+        assert f'id="{gone}"' not in console, f"панель замка всё ещё содержит {gone}"
+
+    assert "Журнал доступа" not in console
+    assert "автозакрытие" not in console.split("Ячейка хранения")[1][:300].lower()
+
+    # в коде пульта не осталось отрисовки журнала и кнопок меток
+    script = (root / "console.js").read_text(encoding="utf-8")
+    for gone in ("renderAudit", "csl-pin-extend", "csl-pin-qr", "csl-pin-rfid"):
+        assert gone not in script, f"console.js всё ещё ссылается на {gone}"
+
+    # лампа «отсек» на основном экране осталась — состояние видно
+    main = (root / "main.html").read_text(encoding="utf-8")
+    assert 'id="ins-lamp-cargo"' in main

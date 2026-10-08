@@ -5,7 +5,7 @@
  * Ядро без DOM: gui/console-core.js (window.RS), тесты gui/tests/console.test.js.
  *
  * Панели окна:
- *   1) Ячейка хранения — PIN-клавиатура, QR/RFID, смена PIN, аудит доступа;
+ *   1) Ячейка хранения — ввод PIN и состояние замка;
  *   2) Двигатели — 4 модуля × 2 канала (руль/тяга): поле ввода + кнопка «Ввод»,
  *      джоги, «мёртвая рука» для тяги, факт телеметрии, HEX кадра UART;
  *   3) АКБ 12S3P LiFePO4 — напряжение, SOC, ток, мощность, ячейки, запас хода;
@@ -130,11 +130,13 @@
     },
 
     async refreshAudit() {
+      /* Журнал доступа с панели убран, но данные по-прежнему читаются с борта:
+         они нужны статистике и остаются доступны через /api/audit. */
       try {
         const r = await withTimeout(fetch('api/audit?limit=12', { cache: 'no-store' }), 1500);
         if (!r.ok) return;
         const body = await r.json();
-        if (body && body.ok) { this.auditCache = body.audit || []; renderAudit(); }
+        if (body && body.ok) this.auditCache = body.audit || [];
       } catch (e) { /* журнал обновится следующим циклом */ }
     },
 
@@ -881,39 +883,15 @@
     if (b) b.disabled = lock.busy || rem > 0;
   }
 
-  function renderAudit() {
-    const rows = vault.audit(12).map((e) => `
-      <tr>
-        <td>${F.time(e.ts)}</td>
-        <td>${e.action === 'unlock' ? 'Доступ' : e.action === 'pin_change' ? 'Смена PIN' : e.action}</td>
-        <td class="${e.ok ? 'ok' : 'err'}">${e.ok ? 'разрешено' : 'отказ'}</td>
-        <td>${e.detail || ''}</td>
-      </tr>`).join('');
-    setHTML('csl-audit', rows || '<tr><td colspan="4" class="muted">Записей нет</td></tr>');
-  }
-
   function renderLock() {
     renderLockStatus();
-    setText('csl-lock-kind', 'Последний доступ: ' + lock.lastKind);
+    /* Автозакрытие ячейки поведением осталось (замок закрывается сам через
+       30 с), но обратный отсчёт с панели убран: на панели — только ввод PIN.
+       Журнал доступа тоже больше не показывается, данные при этом пишутся. */
     if (lock.autoCloseAt) {
       const left = Math.max(0, (lock.autoCloseAt - performance.now()) / 1000);
-      setText('csl-lock-timer', 'Автозакрытие через ' + left.toFixed(0) + ' с');
-      const ring = $('csl-lock-ring');
-      if (ring && ring.getContext) {
-        const ctx = ring.getContext('2d');
-        const W = ring.width, H = ring.height, r = Math.min(W, H) / 2 - 3;
-        ctx.clearRect(0, 0, W, H);
-        ctx.lineWidth = 4;
-        ctx.strokeStyle = 'rgba(110,140,130,0.3)';
-        ctx.beginPath(); ctx.arc(W / 2, H / 2, r, 0, Math.PI * 2); ctx.stroke();
-        ctx.strokeStyle = '#e5a438';
-        ctx.beginPath(); ctx.arc(W / 2, H / 2, r, -Math.PI / 2, -Math.PI / 2 + Math.PI * 2 * (left / (AUTO_CLOSE_MS / 1000))); ctx.stroke();
-      }
-      if (left <= 0) { closeLock('таймер 30 с'); return; }
-    } else {
-      setText('csl-lock-timer', '');
+      if (left <= 0) closeLock('таймер 30 с');
     }
-    renderAudit();
   }
 
   async function changePin() {
@@ -1427,8 +1405,6 @@
     /* --- замок --- */
     if ($('csl-pin-open')) $('csl-pin-open').addEventListener('click', () => tryOpen('pin'));
     if ($('csl-pin-close')) $('csl-pin-close').addEventListener('click', () => closeLock('кнопка'));
-    if ($('csl-pin-qr')) $('csl-pin-qr').addEventListener('click', () => tryOpen('qr'));
-    if ($('csl-pin-rfid')) $('csl-pin-rfid').addEventListener('click', () => tryOpen('rfid'));
     if ($('csl-pin-change')) $('csl-pin-change').addEventListener('click', changePin);
     if ($('csl-pin-reset')) $('csl-pin-reset').addEventListener('click', async () => {
       const cur = $('csl-pin-cur') ? $('csl-pin-cur').value.trim() : '';
@@ -1453,7 +1429,6 @@
     if ($('csl-tb-help')) $('csl-tb-help').addEventListener('click', showHelp);
     if ($('csl-tb-sound')) $('csl-tb-sound').addEventListener('click', () => setSound(!settings.sound));
     if ($('csl-tb-ui')) $('csl-tb-ui').addEventListener('click', () => setLarge(!settings.large));
-    if ($('csl-pin-extend')) $('csl-pin-extend').addEventListener('click', () => { autoClose(true); say('ok', 'автозакрытие ячейки отложено на 30 с'); });
 
     /* --- стенд --- */
     if ($('csl-stand')) $('csl-stand').addEventListener('change', (e) => applyStand(e.target.checked));
