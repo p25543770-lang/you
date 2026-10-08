@@ -63,19 +63,19 @@ B.time.time = lambda: clock["t"]
 src = B.SimSource()
 for _ in range(300):
     src.read()
-    clock["t"] += 1.0 / 60.0
+    clock["t"] += B.SIM_DT
 
 ticks, rays = [], []
 for _ in range(3000):
-    clock["t"] += 1.0 / 60.0
+    clock["t"] += B.SIM_DT
     t0 = time.perf_counter()
     src.read()
     ticks.append(time.perf_counter() - t0)
     t0 = time.perf_counter()
-    src._obstacles()
+    src.lidar.sectors(src.scan)          # что такт отдаёт сети: три сектора с /scan
     rays.append(time.perf_counter() - t0)
 report("такт стенда (сеть + карта + ROS)", ticks)
-report("из них: три луча дальномера", rays)
+report("из них: секторы дальномера с /scan", rays)
 m = ms(ticks)
 print("бюджет 5 мс: средний такт оставляет %.2f мс запаса, макс %.2f мс" % (
     5.0 - statistics.mean(m), 5.0 - max(m)))

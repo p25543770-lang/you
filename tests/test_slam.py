@@ -530,6 +530,16 @@ def test_ai_teacher_and_4wis_kinematics():
     clear = ai.geometric_target(1.5, 0.0, 0.0, obst=(0.1, 0.1, 0.1))
     assert clear["mode"] == "вперёд"
 
+    # нос упёрся в стену, а цель сбоку: доворачиваться дугой некуда — только
+    # разворот на месте (центр не сдвигается), иначе машина виснет в углу
+    corner = ai.geometric_target(-0.4, 1.0, math.radians(-55.0), obst=(0.3, 0.95, 0.4))
+    assert corner["mode"] == "разворот", corner["mode"]
+    vx, vy, wz = ai.body_velocity(corner["angles"], corner["throttle"])
+    assert abs(vx) < 0.02 and abs(vy) < 0.02 and abs(wz) > 0.3
+    # та же цель без стены — обычная дуга передом, без разворота
+    open_goal = ai.geometric_target(-0.4, 1.0, math.radians(-55.0), obst=(0.1, 0.1, 0.1))
+    assert open_goal["mode"] == "вперёд", open_goal["mode"]
+
 
 def test_ros_sink_sends_commands_to_cmd_vel(monkeypatch):
     """С ROS 2 ИИ работает вместе: те же скорости уходят в /cmd_vel.
@@ -651,7 +661,8 @@ def test_map_grows_and_ai_drives(monkeypatch):
     assert source.map.percent() > first_scan, "карта не разведывается"
     assert source.map.version > 1
     assert len(source.trail) > 3
-    assert payload["ai"]["steps"] == 120                  # очный урок в счёт не идёт
+    # контур идёт 100 Гц: 120 чтений по 0,1 с — это 12 с хода, ~1200 тактов
+    assert payload["ai"]["steps"] >= 1000, payload["ai"]["steps"]
     assert len(payload["ai"]["log"]) >= 1
     assert commands, "ИИ не выдал ни одного манёвра"
 

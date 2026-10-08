@@ -43,10 +43,12 @@ backend.py — сервер борта RUS SLAM: отдаёт экраны и д
 """
 
 import argparse
+import collections
 import hashlib
 import json
 import math
 import os
+import random
 import re
 import secrets
 import shutil
@@ -95,14 +97,17 @@ DEMO_STEER_RATE = 110.0
 #: решает ИИ (gui/ai_driver.py): у машины четыре рулевых модуля, поэтому она
 #: ездит боком и разворачивается на месте, как настоящая 4WIS.
 DEMO_GOALS = (
-    {"label": "проход у стеллажа", "x": 3.80, "y": 0.45},
-    {"label": "крабом вбок", "x": 3.80, "y": 1.05, "crab": True},
-    {"label": "разворот на месте", "turn": 90.0},     # курс: на север, как в цехе
+    # Обход цеха по проходам: правый коридор, верх, левый коридор, низ.
+    # Точки стоят в свободных полосах (0,3 м до стеллажей), поэтому маршрут
+    # не режет углы, а карта размечается по всему цеху, а не пятачком у базы.
+    {"label": "проход у правого стеллажа", "x": 3.80, "y": 0.45},
+    {"label": "разворот на север", "turn": 90.0},
     {"label": "коридор вдоль стеллажа", "x": 3.80, "y": 2.55},
-    {"label": "площадка Б", "x": 4.05, "y": 2.60},
-    {"label": "спуск к столу", "x": 3.80, "y": 1.60},
-    {"label": "низ цеха", "x": 3.80, "y": 0.45},
+    {"label": "площадка Б", "x": 4.02, "y": 2.62},
+    {"label": "верхний проход", "x": 2.45, "y": 2.62},
+    {"label": "проход у левого стеллажа", "x": 0.55, "y": 2.60},
     {"label": "площадка А", "x": 0.55, "y": 0.60},
+    {"label": "выход к базе", "x": 1.55, "y": 0.60},
     {"label": "база / зарядка", "x": 2.40, "y": 0.40},
 )
 
@@ -141,12 +146,15 @@ TICK_BUDGET_MS = 5.0
 _RAY_TABLE: dict = {}
 
 
-def _ray_table(rays: int):
-    table = _RAY_TABLE.get(rays)
+def _ray_table(rays: int, start: float = 0.0):
+    """Направления лучей: первый луч — на ``start``, дальше шаг 2π/rays."""
+    key = (rays, round(start, 6))
+    table = _RAY_TABLE.get(key)
     if table is None:
-        table = tuple((math.cos(2.0 * math.pi * i / rays), math.sin(2.0 * math.pi * i / rays))
+        step = 2.0 * math.pi / rays
+        table = tuple((math.cos(start + i * step), math.sin(start + i * step))
                       for i in range(rays))
-        _RAY_TABLE[rays] = table
+        _RAY_TABLE[key] = table
     return table
 
 
@@ -203,45 +211,46 @@ class RoomMap:
         self.cells[idx] = value
         return True
 
-    def scan(self, x: float, y: float, heading: float, rays: int = 72, max_range: float = 3.0) -> bool:
-        """Круговой обзор: свободное по пути луча, препятствие на попадании.
+    def apply_scan(self, scan, pose) -> bool:
+        """Разметка карты по сообщению /scan — как на борту, а не по миру.
 
-        Луч идёт не шагами по 0,04 м с косинусом в каждой точке, а по клеткам
-        (целые индексы, шаг в соседнюю клетку). Занятость мира лежит готовой
-        таблицей — по клетке на байт, без перебора прямоугольников. Урок:
-        обзор 72 лучей был самой дорогой операцией такта; теперь такт целиком
-        укладывается в бюджет отклика 5 мс.
+        Луч идёт по клеткам (целые индексы, шаг в соседнюю клетку): свободное
+        отмечается по пути, препятствие — на эхе. Мир карте не виден: она
+        знает только дальности, углы развёртки и позу из /odom.
         """
+        ranges = (scan or {}).get("ranges") or ()
+        if not ranges:
+            return False
+        x, y = float(pose["x"]), float(pose["y"])
+        heading = float(pose.get("th", 0.0))
+        angle_min = float(scan.get("angle_min", -math.pi))
+        angle_inc = float(scan.get("angle_inc", 2.0 * math.pi / len(ranges)))
+        max_range = float(scan.get("range_max", LIDAR_RANGE))
         changed = False
         cells = self.cells
-        truth = WORLD_TRUTH
         inv = 1.0 / MAP_RES
-        cos_h, sin_h = math.cos(heading), math.sin(heading)
         inf = float("inf")
-        for ux, uy in _ray_table(rays):
-            dx = ux * cos_h - uy * sin_h               # луч, повёрнутый на курс
-            dy = ux * sin_h + uy * cos_h
+        for i, dist in enumerate(ranges):
+            dist = float(dist)
+            angle = heading + angle_min + i * angle_inc
+            dx, dy = math.cos(angle), math.sin(angle)
+            reach = min(dist, max_range)
+            echo = dist < max_range - 1e-6                # есть отражение: препятствие
             cx, cy = int(x * inv), int(y * inv)
             if not (0 <= cx < MAP_W and 0 <= cy < MAP_H):
                 continue
             step_x = 1 if dx > 0.0 else -1
             step_y = 1 if dy > 0.0 else -1
-            # до какой дистанции луч идёт до следующих границ клетки по осям
-            t_x = ((cx + 1) * MAP_RES - x) / dx if dx else inf
-            t_y = ((cy + 1) * MAP_RES - y) / dy if dy else inf
+            t_x = (((cx + 1) * MAP_RES if dx > 0.0 else cx * MAP_RES) - x) / dx if dx else inf
+            t_y = (((cy + 1) * MAP_RES if dy > 0.0 else cy * MAP_RES) - y) / dy if dy else inf
             d_x = MAP_RES / abs(dx) if dx else inf
             d_y = MAP_RES / abs(dy) if dy else inf
             travel = 0.0
             while True:
                 idx = cy * MAP_W + cx
-                if truth[idx]:                          # клетка занята: попадание
-                    if travel > 0.0 and cells[idx] != OCCUPIED:
-                        if cells[idx] == UNKNOWN:
-                            self.scanned += 1
-                        cells[idx] = OCCUPIED
-                        changed = True
-                    break
-                if travel > 0.12:                       # корпус не размечаем
+                # корпус не размечаем, и последнюю клетку перед эхом — тоже:
+                # там стоит препятствие, и «свободно» на нём было бы враньём
+                if 0.12 < travel and travel + 0.5 * MAP_RES < reach:
                     if cells[idx] == UNKNOWN:
                         cells[idx] = FREE
                         self.scanned += 1
@@ -249,15 +258,33 @@ class RoomMap:
                     elif cells[idx] != FREE:
                         cells[idx] = FREE
                         changed = True
-                if t_x < t_y:                            # шаг в соседнюю клетку
+                if t_x < t_y:                          # шаг в соседнюю клетку
                     travel, cx, t_x = t_x, cx + step_x, t_x + d_x
                 else:
                     travel, cy, t_y = t_y, cy + step_y, t_y + d_y
-                if travel >= max_range or not (0 <= cx < MAP_W and 0 <= cy < MAP_H):
+                if travel >= reach or not (0 <= cx < MAP_W and 0 <= cy < MAP_H):
                     break
+            if echo and reach > 0.12:
+                # клетку эха берём по точке попадания, а не по концу обхода.
+                # Миллиметр вглубь: точка попадания лежит ровно на границе
+                # клетки, и округление вниз записывало бы эхо в свободную клетку
+                hx = int((x + dx * (reach + 1e-3)) * inv)
+                hy = int((y + dy * (reach + 1e-3)) * inv)
+                if 0 <= hx < MAP_W and 0 <= hy < MAP_H:
+                    idx = hy * MAP_W + hx
+                    if cells[idx] != OCCUPIED:
+                        if cells[idx] == UNKNOWN:
+                            self.scanned += 1
+                        cells[idx] = OCCUPIED
+                        changed = True
         if changed:
             self.version += 1
         return changed
+
+    def scan(self, x: float, y: float, heading: float, rays: int = 72, max_range: float = 3.0) -> bool:
+        """Обзор из точки для тестов и отладки: то же, что дальномер, без шума."""
+        return self.apply_scan(Lidar(rays=rays, max_range=max_range, noise=0.0).scan(x, y, heading),
+                               {"x": x, "y": y, "th": heading})
 
     def percent(self) -> int:
         """Доля разведанной площади — по ней на экране видно, как идёт съёмка."""
@@ -313,6 +340,50 @@ def decode_rle(text: str, expect: int = MAP_AREA) -> bytes:
 
 def _clampf(v: float, lo: float, hi: float) -> float:
     return lo if v < lo else hi if v > hi else v
+
+
+def _norm_angle(a: float) -> float:
+    """Угол в (−π, π]: так его отдаёт и курс, и рассогласование."""
+    return math.atan2(math.sin(a), math.cos(a))
+
+
+def _free(x: float, y: float) -> bool:
+    """Место свободно для центра машины (с запасом от стен)."""
+    return (not RoomMap.blocked(x, y)) and 0.09 <= x <= WORLD_W - 0.09 \
+        and 0.09 <= y <= WORLD_H - 0.09
+
+
+def _cast_truth(x: float, y: float, dx: float, dy: float, max_range: float) -> float:
+    """Луч дальномера по цеху: расстояние до препятствия (обход клеток, DDA).
+
+    Мир читается таблицей занятости — по клетке на байт. Это самая частая
+    операция борта (72 луча × 10 Гц), поэтому здесь всё на целых индексах и без
+    тригонометрии в цикле.
+    """
+    inv = 1.0 / MAP_RES
+    cx, cy = int(x * inv), int(y * inv)
+    if not (0 <= cx < MAP_W and 0 <= cy < MAP_H):
+        return 0.0
+    inf = float("inf")
+    step_x = 1 if dx > 0.0 else -1
+    step_y = 1 if dy > 0.0 else -1
+    # до границы клетки по каждой оси: она ближайшая по ходу луча, поэтому
+    # для отрицательного направления берётся нижняя граница, а не верхняя
+    t_x = (((cx + 1) * MAP_RES if dx > 0.0 else cx * MAP_RES) - x) / dx if dx else inf
+    t_y = (((cy + 1) * MAP_RES if dy > 0.0 else cy * MAP_RES) - y) / dy if dy else inf
+    d_x = MAP_RES / abs(dx) if dx else inf
+    d_y = MAP_RES / abs(dy) if dy else inf
+    travel = 0.0
+    truth = WORLD_TRUTH
+    while True:
+        if truth[cy * MAP_W + cx]:
+            return travel
+        if t_x < t_y:
+            travel, cx, t_x = t_x, cx + step_x, t_x + d_x
+        else:
+            travel, cy, t_y = t_y, cy + step_y, t_y + d_y
+        if travel >= max_range or not (0 <= cx < MAP_W and 0 <= cy < MAP_H):
+            return max_range
 
 
 # --- АКБ 12S3P LiFePO4 (совпадает с gui/console-core.js) --------------------
@@ -451,60 +522,371 @@ def pack_state(pack_v, pack_a, soc=None, temp_c=28.0):
 # ============================================================================
 # 3. Источники данных
 # ============================================================================
-class SimSource:
-    """Стенд: ИИ ведёт робота по заданиям, дальномер размечает карту.
+# ============================================================================
+# 4. Стенд: дальномер → ROS → ИИ → ROS → привод
+# ============================================================================
+SIM_HZ = 100                      # такт контура: модель робота и сеть, 100 Гц
+SIM_DT = 1.0 / SIM_HZ
+LIDAR_HZ = 10                     # дальномер: 72 луча по 3 м, 10 Гц
+SLAM_HZ = 20                      # разметка карты по /scan, 20 Гц
+MOTORS_HZ = 20                    # телеметрия модулей, 20 Гц
+BATTERY_HZ = 5                    # телеметрия АКБ, 5 Гц
+SIM_CATCHUP = 30                  # максимум 0,3 с догона за одно чтение экрана
+LIDAR_RAYS = 72
+LIDAR_RANGE = 3.0
+LIDAR_NOISE = 0.01                # м: шум дальномера, иначе карта «слишком ровная»
 
-    Манёвры больше не сценарий: сеть на 32 нейрона (gui/ai_driver.py) решает
-    на каждом такте, как встать колёсами, и учится на ходу, повторяя
-    геометрического учителя. Те же скорости уходят в ROS, если рядом rclpy.
+
+class Topics:
+    """Темы стенда: имена, типы и счётчики — как у настоящего ROS-графа.
+
+    Пока rclpy нет, темы живут в процессе: тот же путь сообщения, те же имена.
+    Если rclpy рядом и включён ``RC_AI_ROS``, те же сообщения уходят в ROS 2
+    (:class:`ai_driver.RosCommandSink`), а панель показывает частоты.
+    """
+
+    def __init__(self):
+        self.last = {}
+        self.count = {}
+        self.times = {}
+        self.subs = {}
+
+    def subscribe(self, topic, callback):
+        self.subs.setdefault(topic, []).append(callback)
+        return callback
+
+    def publish(self, topic, message):
+        self.last[topic] = message
+        self.count[topic] = self.count.get(topic, 0) + 1
+        stamps = self.times.get(topic)
+        if stamps is None:
+            stamps = self.times[topic] = collections.deque(maxlen=200)
+        stamps.append(time.time())
+        for callback in self.subs.get(topic, ()):
+            callback(message)
+        return message
+
+    def hz(self, topic):
+        """Частота темы по последним сообщениям — честное число для панели."""
+        stamps = self.times.get(topic)
+        if not stamps or len(stamps) < 2:
+            return 0.0
+        span = stamps[-1] - stamps[0]
+        if span <= 0.0:
+            return 0.0
+        return round((len(stamps) - 1) / span, 1)
+
+    def report(self, *topics):
+        out = {}
+        for topic in topics:
+            out[topic] = {"hz": self.hz(topic), "msgs": self.count.get(topic, 0)}
+        return out
+
+
+class Lidar:
+    """Дальномер стенда: 72 луча по кругу, 3 м, шум 1 см, 10 Гц.
+
+    Отдаёт ровно то, что отдаёт настоящий лидар: дальности и углы. И карта, и
+    ИИ работают только с этим сообщением — в мир они не подглядывают.
+    """
+
+    def __init__(self, rays=LIDAR_RAYS, max_range=LIDAR_RANGE,
+                 noise=LIDAR_NOISE, seed=3):
+        self.rays = rays
+        self.max_range = max_range
+        self.noise = noise
+        self.rnd = random.Random(seed)
+        self.angle_min = -math.pi
+        self.table = _ray_table(rays, self.angle_min)
+        self.angle_inc = 2.0 * math.pi / rays
+
+    def scan(self, x, y, heading):
+        """Один оборот: список дальностей (м) и параметры развёртки."""
+        cos_h, sin_h = math.cos(heading), math.sin(heading)
+        rows = []
+        for ux, uy in self.table:
+            dx = ux * cos_h - uy * sin_h
+            dy = ux * sin_h + uy * cos_h
+            dist = _cast_truth(x, y, dx, dy, self.max_range)
+            if dist < self.max_range:                  # шум только на настоящем эхе
+                dist = min(self.max_range, max(0.05, dist + self.rnd.gauss(0.0, self.noise)))
+            rows.append(round(dist, 3))
+        return {
+            "topic": "/scan", "frame_id": "laser", "stamp": time.time(),
+            "rays": self.rays, "angle_min": self.angle_min, "angle_inc": self.angle_inc,
+            "range_max": self.max_range, "ranges": rows,
+        }
+
+    def sectors(self, scan, half=math.radians(90.0), middle=math.radians(25.0)):
+        """Близость препятствий (слева, по центру, справа) — входы сети.
+
+        Секторы берутся из /scan: ИИ не знает, что за препятствие и где оно,
+        он видит только дальности, как на настоящей машине.
+        """
+        ranges = (scan or {}).get("ranges")
+        if not ranges:
+            return (0.0, 0.0, 0.0)
+        angle_min = scan.get("angle_min", -math.pi)
+        angle_inc = scan.get("angle_inc", 2.0 * math.pi / len(ranges))
+        best = [self.max_range, self.max_range, self.max_range]
+        for i, dist in enumerate(ranges):
+            a = angle_min + i * angle_inc
+            a = math.atan2(math.sin(a), math.cos(a))     # в (−π, π]
+            if abs(a) <= middle:
+                side = 1
+            elif middle < a <= half:
+                side = 0                                 # слева от носа
+            elif -half <= a < -middle:
+                side = 2                                 # справа
+            else:
+                continue
+            if dist < best[side]:
+                best[side] = dist
+        return tuple(round(max(0.0, 1.0 - d / self.max_range), 3) for d in best)
+
+
+class Plant:
+    """Ходовая 4WIS: исполняет /wheel_cmd и /cmd_vel, отдаёт /odom.
+
+    Ни цели, ни сети здесь нет — только машина: модули доворачиваются со
+    скоростью 110 °/с, тяга проходит через фильтр привода, корпус скользит
+    вдоль препятствия вместо «упёрлись — стоим», АКБ считается по тяге.
+    """
+
+    def __init__(self, x, y, th=0.0, soc=78.0):
+        self.x, self.y, self.th = x, y, th
+        self.vx = self.vy = self.wz = 0.0
+        self.soc = soc
+        self.throttle = 0.0                    # тяга после фильтра привода
+        self.want = {"angles": {}, "throttle": 0.0}
+        self.stuck_s = 0.0                     # стоим, упёршись
+        self.motors = [{"id": mid, "title": MODULE_TITLES[mid], "angle": 0.0,
+                        "rpm": 0.0, "temp": 36.0, "homed": True}
+                       for mid in MODULE_NAMES.values()]
+
+    def pose(self):
+        return {"x": self.x, "y": self.y, "th": self.th,
+                "vx": self.vx, "vy": self.vy, "wz": self.wz}
+
+    def command(self, wheel_cmd):
+        """Приняли уставку от ИИ (/wheel_cmd): углы модулей и тягу."""
+        self.want = {"angles": dict(wheel_cmd.get("angles") or {}),
+                     "throttle": float(wheel_cmd.get("throttle") or 0.0)}
+
+    def step(self, dt, t):
+        """Один такт машины: модули, тяга, ход, скольжение, АКБ."""
+        rate = DEMO_STEER_RATE * dt
+        actual = {}
+        for i, motor in enumerate(self.motors):
+            want = float(self.want["angles"].get(motor["id"], 0.0))
+            diff = want - motor["angle"]
+            motor["angle"] = want if abs(diff) <= rate else motor["angle"] + math.copysign(rate, diff)
+            actual[motor["id"]] = motor["angle"]
+            target_rpm = self.want["throttle"] * 240.0
+            motor["rpm"] += (target_rpm - motor["rpm"]) * min(1.0, dt * 2.0)
+            motor["temp"] = 34.0 + abs(motor["rpm"]) / 40.0 + math.sin(t / 5 + i) * 1.4
+        k = min(1.0, dt * 3.0)                 # фильтр привода по тяге
+        self.throttle += (self.want["throttle"] - self.throttle) * k
+
+        self.vx, self.vy, self.wz = ai_driver.body_velocity(actual, self.throttle)
+        cos_t, sin_t = math.cos(self.th), math.sin(self.th)
+        nx = self.x + (self.vx * cos_t - self.vy * sin_t) * dt
+        ny = self.y + (self.vy * cos_t + self.vx * sin_t) * dt
+        if not _free(nx, ny):
+            if _free(nx, self.y):              # задели препятствие — скользим вдоль него
+                ny = self.y
+            elif _free(self.x, ny):
+                nx = self.x
+            else:
+                nx, ny = self.x, self.y
+                self.stuck_s += dt
+        moved = math.hypot(nx - self.x, ny - self.y)
+        turned = abs(self.wz * dt)
+        self.x, self.y = nx, ny
+        self.th = (self.th + self.wz * dt) % (2.0 * math.pi)
+        if moved >= 0.002 or turned >= 0.001:
+            self.stuck_s = 0.0
+        amps = 4.0 + 16.0 * abs(self.throttle) + 3.0 * abs(self.wz)
+        self.soc = max(4.0, self.soc - amps * dt / 3600.0 * 100.0 / PACK["capacityAh"])
+        volts = voltage_from_soc(self.soc) - amps * PACK["internalR"]
+        return {"topic": "/odom", "stamp": time.time(), "x": round(self.x, 3),
+                "y": round(self.y, 3), "th": round(self.th, 4),
+                "vx": round(self.vx, 3), "vy": round(self.vy, 3), "wz": round(self.wz, 3),
+                "moved": moved, "amps": amps, "volts": volts}
+
+
+class Mission:
+    """Задания стенда: маршрут по цеху, контроль выполнения и «осмотреться».
+
+    Это место оператора: он ставит цель, а не крутит колёсами. Маршрут обходит
+    цех по проходам — вдоль стеллажей и по кромке, чтобы карта размечалась
+    целиком, а не пятачком у базы.
+    """
+
+    #: Предел на задание: дальше цель бросаем, чтобы стенд не застыл.
+    time_limit = 10.0
+    #: Стоим на месте столько — задание не идёт, идём к следующей точке.
+    stall_limit = 1.5
+    #: Пауза у точки: машина осматривается (или ждёт груз).
+    hold_s = 0.6
+
+    def __init__(self):
+        self.index = 0
+        self.reached = 0
+        self.skipped = 0
+        self.entered = time.time()
+        self.hold_until = 0.0
+        self.turn_target = None
+
+    def goal(self):
+        return DEMO_GOALS[self.index % len(DEMO_GOALS)]
+
+    def error(self, goal, pose):
+        """Задание в системе робота: (dx, dy) в метрах и рассогласование курса."""
+        x, y, th = pose["x"], pose["y"], pose["th"]
+        if goal.get("turn") is not None:
+            if self.turn_target is None:
+                self.turn_target = math.radians(goal["turn"])
+            return 0.0, 0.0, _norm_angle(self.turn_target - th)
+        gx, gy = float(goal["x"]) - x, float(goal["y"]) - y
+        cos_t, sin_t = math.cos(th), math.sin(th)
+        dx = gx * cos_t + gy * sin_t
+        dy = -gx * sin_t + gy * cos_t
+        if goal.get("crab"):
+            return dx, dy, 0.0
+        return dx, dy, _norm_angle(math.atan2(gy, gx) - th)
+
+    def done(self, goal, dx, dy, dth, pose, now, stall_s=0.0):
+        """Пора к следующей точке? (дошли, зависли или вышло время)"""
+        if now < self.hold_until:
+            return None
+        if self.turn_target is not None or goal.get("turn") is not None:
+            if abs(math.degrees(dth)) < 6.0:
+                return "reached"
+        elif goal.get("crab"):
+            if math.hypot(dx, dy) < 0.18:
+                return "reached"
+        elif math.hypot(dx, dy) < 0.32:
+            return "reached"
+        if max(pose.get("stuck_s", 0.0), stall_s) > self.stall_limit:
+            return "skipped"
+        if (now - self.entered) > self.time_limit:
+            return "skipped"
+        return None
+
+    def next(self, now):
+        self.index = (self.index + 1) % len(DEMO_GOALS)
+        self.entered = now
+        self.hold_until = now + self.hold_s
+        self.turn_target = None
+
+
+class SimSource:
+    """Стенд как настоящий робот: дальномер → ROS → ИИ → ROS → привод.
+
+    Цепочка ровно как на машине::
+
+        Lidar (72 луча, 10 Гц) ──/scan──► SlamMap (20 Гц) ── карта на экран
+                               └─/scan──► AiNode (100 Гц) ──/cmd_vel, /wheel_cmd──►
+                                          Plant (100 Гц) ──/odom, /screen/motors,
+                                          /battery/*──► экран и обратно в ИИ
+
+    Роли разведены: ИИ видит только /scan и /odom и не подглядывает в мир;
+    привод не знает о цели — он исполняет уставку; карта строится из /scan.
+    Контур идёт 100 Гц по часам (экран только читает последнее состояние),
+    поэтому машина едет плавно, как настоящая, а не рывками по кадрам экрана.
     """
 
     name = "sim"
 
     def __init__(self, ai_ros=None):
-        self.t0 = time.time()
-        self.soc = 78.0
-        self.last = time.time()
+        self.t0 = self.last = time.time()
+        self.pending = 0.0                     # недобранное время такта
+        self.tick = 0
         self.frames_ok = 0
-        self.motors = [{"id": mid, "title": MODULE_TITLES[mid], "angle": 0.0,
-                        "rpm": 0.0, "temp": 36.0, "homed": True} for mid in MODULE_NAMES.values()]
+        self.scan = None
+        self.last_read_ms = 0.0
+        self.step_ms = 0.0                     # отклик такта контура (мс)
+        self.odom = None                       # последнее /odom
+        self.stall_s = 0.0                     # стоим, не выполняя задание
 
-        # --- водитель и его связь с ROS ---
+        # --- аппаратура: дальномер, ходовая, темы ---
+        self.topics = Topics()
+        self.lidar = Lidar()
+        self.plant = Plant(*WORLD_PADS[2][:2])
+        self.map = RoomMap()
+        self.trail = [[round(self.plant.x, 2), round(self.plant.y, 2)]]
+        self.mission = Mission()
+
+        # --- ИИ и его связь с ROS ---
         if ai_ros is None:
             ai_ros = os.environ.get("RC_AI_ROS", "0").strip().lower() in {"1", "true", "yes", "on"}
         self.driver = ai_driver.NeuralDriver()
         self.pretrain_loss = self.driver.pretrain()      # урок перед выездом
         self.sink = ai_driver.RosCommandSink(enabled=ai_ros)
-
-        # --- цех: место робота, карта, след ---
-        self.map = RoomMap()
-        self.x, self.y, self.th = WORLD_PADS[2][0], WORLD_PADS[2][1], 0.0
-        self.trail = [[round(self.x, 2), round(self.y, 2)]]
-        self.goal_index = 0
-        self.goal_entered = time.time()
-        self.goal_hold_until = 0.0
-        self.turn_target = None
-        self.turn_start = 0.0
-
-        self.target_vec = None            # цель обучения, сглаженная по тактам
-        self.throttle = 0.0               # тяга после привода (фильтр)
+        self.target_vec = None                 # цель обучения, сглаженная по тактам
         self.last_inputs = {}
         self.last_target = {}
         self.last_command = {"label": "—", "mode": "—", "steer": "прямо", "angles": {},
                              "throttle": 0.0, "speed": 0.0}
         self.command_log = []
-        self.vx = self.vy = self.wz = 0.0
-        self.stuck_s = 0.0                            # стоим, упёршись в препятствие
-        self.stall_s = 0.0                            # стоим, не выполняя задание
 
-    # --- обмен ------------------------------------------------------------
+        # сами себя слушаем теми же темами: /scan идёт в карту, /odom — в ИИ
+        self.topics.subscribe("/scan", self._on_scan)
+        self.topics.subscribe("/odom", self._on_odom)
+        self.topics.subscribe("/wheel_cmd", self._on_wheel_cmd)
+        self._step(self.t0)                    # первый оборот дальномера и карта
+        self.pending = 0.0
+
+    # --- подписки (как на настоящем борту) --------------------------------
+    def _on_scan(self, scan):
+        self.scan = scan
+
+    def _on_odom(self, odom):
+        self.odom = odom
+
+    def _on_wheel_cmd(self, wheel_cmd):
+        self.plant.command(wheel_cmd)
+
+    # --- состояние наружу (совместимость с прежним стендом) ---------------
+    @property
+    def x(self):
+        return self.plant.x
+
+    @property
+    def y(self):
+        return self.plant.y
+
+    @property
+    def th(self):
+        return self.plant.th
+
+    @property
+    def vx(self):
+        return self.plant.vx
+
+    @property
+    def vy(self):
+        return self.plant.vy
+
+    @property
+    def wz(self):
+        return self.plant.wz
+
+    @property
+    def soc(self):
+        return self.plant.soc
+
+    @property
+    def motors(self):
+        return self.plant.motors
+
+    @property
+    def stuck_s(self):
+        return self.plant.stuck_s
+
     def bus(self):
-        """Счётчики обмена для экрана диагностики.
-
-        У демонстрационного источника кадров на линии нет, поэтому счётчики
-        помечены ``simulated``: панель диагностики не должна выдавать модель
-        за реальный обмен с модулями.
-        """
+        """Счётчики обмена для экрана диагностики: кадров на линии нет."""
         return {
             "simulated": True,
             "framesOk": self.frames_ok,
@@ -514,171 +896,135 @@ class SimSource:
             "modules": sorted(MODULE_NAMES),
         }
 
-    # --- задания ----------------------------------------------------------
-    def _goal(self):
-        return DEMO_GOALS[self.goal_index % len(DEMO_GOALS)]
-
-    def _goal_error(self, goal):
-        """Задание в системе робота: (dx, dy) в метрах и рассогласование курса."""
-        if goal.get("turn") is not None:
-            if self.turn_target is None:                  # курс задания, ° от оси x
-                self.turn_target = math.radians(goal["turn"])
-            dth = self.turn_target - self.th
-            while dth > math.pi:
-                dth -= 2 * math.pi
-            while dth <= -math.pi:
-                dth += 2 * math.pi
-            return 0.0, 0.0, dth
-        gx, gy = float(goal["x"]) - self.x, float(goal["y"]) - self.y
-        cos_t, sin_t = math.cos(self.th), math.sin(self.th)
-        dx = gx * cos_t + gy * sin_t                  # вперёд
-        dy = -gx * sin_t + gy * cos_t                 # влево
-        if goal.get("crab"):
-            return dx, dy, 0.0                        # боком: курс держим, не доворачиваем
-        dth = math.atan2(gy, gx) - self.th
-        while dth > math.pi:
-            dth -= 2 * math.pi
-        while dth <= -math.pi:
-            dth += 2 * math.pi
-        return dx, dy, dth
-
-    def _goal_reached(self, goal, dx, dy, dth, now) -> bool:
-        if now < self.goal_hold_until:
-            return False
-        if (now - self.goal_entered) > 8.0:           # задание зависло — идём дальше
-            return True
-        if self.stall_s > 2.5:                        # робот встал: задание не идёт
-            return True
-        if goal.get("turn") is not None:
-            return abs(math.degrees(dth)) < 6.0
-        if goal.get("crab"):
-            return math.hypot(dx, dy) < 0.18
-        return math.hypot(dx, dy) < 0.22
-
-    def _next_goal(self, now):
-        self.goal_index = (self.goal_index + 1) % len(DEMO_GOALS)
-        self.goal_entered = now
-        self.goal_hold_until = now + 0.5              # пауза: робот осматривается
-        self.turn_target = None
-
-    @staticmethod
-    def _free(x: float, y: float) -> bool:
-        """Место свободно для центра машины (с запасом от стен)."""
-        return (not RoomMap.blocked(x, y)) and 0.09 <= x <= WORLD_W - 0.09 and 0.09 <= y <= WORLD_H - 0.09
-
-    def _obstacles(self):
-        """Близость препятствий слева/по центру/справа — входы дальномера."""
-        out = []
-        for offset in (math.radians(-35), 0.0, math.radians(35)):
-            dist, _ = RoomMap.cast(self.x, self.y, self.th + offset, 1.6)
-            out.append(round(max(0.0, 1.0 - dist / 1.6), 3))
-        return out
-
-    def _inputs(self, goal, dx, dy, dth, obst):
-        data = ai_driver.scenario_inputs(dx, dy, dth, bool(goal.get("crab")), obst,
-                                         soc=self.soc / 100.0,
-                                         speed=abs(self.vx) / ai_driver.V_MAX)
-        self.last_inputs = data
-        return [data[name] for name in ai_driver.INPUTS]
-
-    # --- такт -------------------------------------------------------------
-    def read(self):
-        now = time.time()
-        dt = max(0.001, min(0.5, now - self.last))
+    # --- такт контура ------------------------------------------------------
+    def _advance(self, now):
+        """Догоняет реальное время фиксированными тактами по 10 мс."""
+        self.pending += now - self.last
         self.last = now
-        t = now - self.t0
+        steps = int(self.pending / SIM_DT)
+        if steps <= 0:
+            return
+        steps = min(steps, SIM_CATCHUP)
+        self.pending -= steps * SIM_DT
+        began = time.perf_counter()
+        for _ in range(steps):
+            self.tick += 1
+            self._step(now)
+        spent = (time.perf_counter() - began) * 1000.0 / steps
+        self.step_ms = spent if not self.step_ms else self.step_ms * 0.8 + spent * 0.2
 
-        goal = self._goal()
-        dx, dy, dth = self._goal_error(goal)
-        obst = self._obstacles()
+    def _step(self, now):
+        """Один такт: 10 Гц дальномер, 20 Гц карта, 20/5 Гц телеметрия, 100 Гц ИИ и привод."""
+        t = now - self.t0
+        plant = self.plant
+        goal = self.mission.goal()
+        pose = plant.pose()
+        pose["stuck_s"] = plant.stuck_s
+        dx, dy, dth = self.mission.error(goal, pose)
+
+        # 1. дальномер → /scan (10 Гц)
+        if self.tick % (SIM_HZ // LIDAR_HZ) == 0:
+            self.topics.publish("/scan", self.lidar.scan(plant.x, plant.y, plant.th))
+            self.sink.publish_scan(self.scan)
+
+        # 2. карта из /scan (20 Гц): экран видит только версию и процент
+        if self.scan is not None and self.tick % (SIM_HZ // SLAM_HZ) == 0:
+            self.map.apply_scan(self.scan, pose)
+            self.topics.publish("/map", {"version": self.map.version,
+                                         "scanPct": self.map.percent()})
+
+        # 3. ИИ ← /scan и /odom → /cmd_vel и /wheel_cmd (каждый такт, 100 Гц)
+        obst = self.lidar.sectors(self.scan)
         vector = self._inputs(goal, dx, dy, dth, obst)
-        # краб разрешён только на заданиях с пометкой «crab»: там машина идёт
-        # боком, а на остальных доворачивается и едет — так манёвры не хлопают
         target = ai_driver.geometric_target(dx, dy, dth, crab=bool(goal.get("crab")), obst=obst)
         wanted = list(target["vector"])
         if self.target_vec is None:
             self.target_vec = wanted
         else:
-            k = min(1.0, dt * 3.0)                    # сглаживание цели, ~0,3 с
+            k = min(1.0, SIM_DT * 12.0)        # сглаживание уставки (~90 мс)
             self.target_vec = [p + (w - p) * k for p, w in zip(self.target_vec, wanted)]
         self.last_target = {"mode": target["mode"]}
-
         out = self.driver.step(vector, self.target_vec)
-        # тяга проходит через привод: фильтр сглаживает дрожь выходов сети
-        raw = ai_driver.command_from_outputs(out["y"])
-        k = min(1.0, dt * 3.0)
-        self.throttle = self.throttle + (raw["throttle"] - self.throttle) * k
         cmd = ai_driver.command_from_outputs(out["y"])
-        cmd["throttle"] = self.throttle
         cmd["label"] = cmd["label"].rsplit(" · ", 1)[0] + " · " + \
-            ("%.1f м/с" % (abs(self.throttle) * ai_driver.V_MAX)).replace(".", ",")
+            ("%.1f м/с" % (abs(cmd["throttle"]) * ai_driver.V_MAX)).replace(".", ",")
         self.last_command = cmd
+        self._log_command()
+        intent = ai_driver.body_velocity(cmd["angles"], cmd["throttle"])
+        self.topics.publish("/cmd_vel", {"topic": "/cmd_vel", "stamp": time.time(),
+                                         "vx": round(intent[0], 3), "vy": round(intent[1], 3),
+                                         "wz": round(intent[2], 3)})
+        self.sink.publish(intent[0], intent[1], intent[2])
+        self.topics.publish("/wheel_cmd", {"topic": "/wheel_cmd", "stamp": time.time(),
+                                           "angles": cmd["angles"],
+                                           "throttle": round(cmd["throttle"], 3),
+                                           "mode": cmd["mode"], "label": cmd["label"]})
 
-        # рулевые модули перекладываются с ограниченной скоростью, как настоящие
-        step = DEMO_STEER_RATE * dt
-        actual = {}
-        for i, m in enumerate(self.motors):
-            want = float(cmd["angles"].get(m["id"], 0.0))
-            diff = want - m["angle"]
-            m["angle"] = want if abs(diff) <= step else m["angle"] + math.copysign(step, diff)
-            actual[m["id"]] = m["angle"]
-            target_rpm = cmd["throttle"] * 240.0
-            m["rpm"] += (target_rpm - m["rpm"]) * min(1.0, dt * 2.0)
-            m["temp"] = 34.0 + abs(m["rpm"]) / 40.0 + math.sin(t / 5 + i) * 1.4
+        # 4. привод исполняет уставку и едет (100 Гц)
+        odom = plant.step(SIM_DT, t)
+        self.odom = self.topics.publish("/odom", odom)
+        self.sink.publish_odom(odom)
+        if self.tick % (SIM_HZ // MOTORS_HZ) == 0:
+            self.topics.publish("/screen/motors", {"motors": plant.motors})
+        if self.tick % (SIM_HZ // BATTERY_HZ) == 0:
+            self.topics.publish("/battery/state", {"soc": plant.soc, "volts": odom["volts"],
+                                                   "amps": odom["amps"]})
 
-        # движение: та же модель, что уходит в ROS
-        self.vx, self.vy, self.wz = ai_driver.body_velocity(actual, cmd["throttle"])
-        cos_t, sin_t = math.cos(self.th), math.sin(self.th)
-        nx = self.x + (self.vx * cos_t - self.vy * sin_t) * dt
-        ny = self.y + (self.vx * sin_t + self.vy * cos_t) * dt
-        if not self._free(nx, ny):
-            if self._free(nx, self.y):          # задели препятствие — скользим вдоль него
-                ny = self.y
-            elif self._free(self.x, ny):
-                nx = self.x
-            else:
-                nx, ny, self.stuck_s = self.x, self.y, self.stuck_s + dt
-        moved = math.hypot(nx - self.x, ny - self.y)
-        turned = abs(self.wz * dt)
-        self.x, self.y = nx, ny
-        self.th = (self.th + self.wz * dt) % (2 * math.pi)
-        # «стоим» — когда почти не двигаемся и не разворачиваемся: задание не
-        # выполняется, и киоск не должен смотреть в замершего робота
-        self.stall_s = self.stall_s + dt if (moved < 0.02 and turned < 0.01) else 0.0
-
-        if moved:
+        # 6. след и задания
+        if odom["moved"] > 1e-6:
             last_pt = self.trail[-1]
-            if math.hypot(self.x - last_pt[0], self.y - last_pt[1]) >= 0.12:
-                self.trail.append([round(self.x, 2), round(self.y, 2)])
+            if math.hypot(plant.x - last_pt[0], plant.y - last_pt[1]) >= 0.12:
+                self.trail.append([round(plant.x, 2), round(plant.y, 2)])
                 del self.trail[:-200]
+        if odom["moved"] < 0.002 and abs(odom["wz"]) * SIM_DT < 0.0005:
+            self.stall_s += SIM_DT             # стоим: задание не идёт
+        else:
+            self.stall_s = 0.0
+        verdict = self.mission.done(goal, dx, dy, dth, pose, now, self.stall_s)
+        if verdict:
+            if verdict == "reached":
+                self.mission.reached += 1
+            else:
+                self.mission.skipped += 1
+            self.mission.next(now)
 
-        self.map.scan(self.x, self.y, self.th)
-        self.sink.publish(self.vx, self.vy, self.wz)      # ROS 2: /cmd_vel
-
-        if self._goal_reached(goal, dx, dy, dth, now):
-            self._next_goal(now)
-
-        speed = math.hypot(self.vx, self.vy)
-        amps = 4.0 + 16.0 * abs(cmd["throttle"]) + 3.0 * abs(self.wz)
-        self.soc = max(4.0, self.soc - amps * dt / 3600.0 * 100.0 / PACK["capacityAh"])
-        volts = voltage_from_soc(self.soc) - amps * PACK["internalR"]
-        return self._payload(self.motors, volts, amps, speed, cmd["label"])
+    # --- входы сети из /scan и /odom --------------------------------------
+    def _inputs(self, goal, dx, dy, dth, obst):
+        odom = getattr(self, "odom", None) or {}
+        speed = math.hypot(odom.get("vx", 0.0), odom.get("vy", 0.0))
+        values = ai_driver.scenario_inputs(dx, dy, dth, bool(goal.get("crab")), obst,
+                                           soc=self.plant.soc / 100.0,
+                                           speed=speed / ai_driver.V_MAX)
+        self.last_inputs = values
+        return [values[name] for name in ai_driver.INPUTS]
 
     # --- данные наружу ----------------------------------------------------
+    def read(self):
+        now = time.time()
+        began = time.perf_counter()
+        self._advance(now)
+        goal = self.mission.goal()
+        pose = self.plant.pose()
+        dx, dy, dth = self.mission.error(goal, pose)
+        odom = getattr(self, "odom", None) or {}
+        speed = math.hypot(odom.get("vx", 0.0), odom.get("vy", 0.0))
+        self.last_read_ms = (time.perf_counter() - began) * 1000.0
+        return self._payload(self.plant.motors, odom.get("volts", voltage_from_soc(self.plant.soc)),
+                             odom.get("amps", 4.0), speed, self.last_command.get("label"))
+
     def _payload(self, motors, volts, amps, speed, drive_mode=None):
         # 4 модуля × 1 кадр телеметрии за выборку — как на реальной шине.
         self.frames_ok += len(MODULE_NAMES)
-        battery = pack_state(volts, amps, self.soc)
-        goal = self._goal()
-        dx, dy, dth = self._goal_error(goal)
-        self._log_command()
+        battery = pack_state(volts, amps, self.plant.soc)
+        goal = self.mission.goal()
+        dx, dy, dth = self.mission.error(goal, self.plant.pose())
         return {
             "motors": motors,
             "battery": battery,
             "cargo": {"kg": 80, "closed": True},
             "mode": "АВТОНОМНЫЙ РЕЖИМ",
             "driveMode": drive_mode,
-            "route": "склад → зона выгрузки",
+            "route": "обход цеха по проходам",
             "speedMps": round(speed, 2),
             "powerKw": round(battery["watts"] / 1000.0, 2),
             "linkOk": True,
@@ -700,8 +1046,25 @@ class SimSource:
         })
         del self.command_log[:-12]
 
+    def pipeline_state(self):
+        """Что видно про контур: частоты тем, задержки, мост в ROS 2."""
+        topics = self.topics.report("/scan", "/odom", "/cmd_vel", "/wheel_cmd",
+                                    "/screen/motors", "/battery/state", "/map")
+        return {
+            "loopHz": SIM_HZ,
+            "lidarHz": LIDAR_HZ,
+            "slamHz": SLAM_HZ,
+            "rays": LIDAR_RAYS,
+            "range": LIDAR_RANGE,
+            "topics": topics,
+            "stepMs": round(self.step_ms, 3),
+            "readMs": round(self.last_read_ms, 3),
+            "ros": self.sink.status(),
+        }
+
     def ai_state(self, goal, dx, dy, dth):
         cmd = self.last_command
+        odom = getattr(self, "odom", None) or {}
         return {
             "available": True,
             "neurons": self.driver.neurons,
@@ -726,23 +1089,27 @@ class SimSource:
             },
             "log": list(self.command_log[-6:]),
             "ros": self.sink.status(),
-            "stuckSec": round(self.stuck_s, 1),
+            "pipeline": self.pipeline_state(),
+            "stuckSec": round(self.plant.stuck_s, 1),
             "stallSec": round(self.stall_s, 1),
+            "goalsReached": self.mission.reached,
+            "goalsSkipped": self.mission.skipped,
         }
 
     def map_state(self, goal=None):
-        goal = goal or self._goal()
+        goal = goal or self.mission.goal()
         return {
             "ok": True,
             "w": MAP_W, "h": MAP_H, "res": MAP_RES,
             "world": {"w": WORLD_W, "h": WORLD_H},
             "version": self.map.version,
             "scanPct": self.map.percent(),
-            "pose": {"x": round(self.x, 3), "y": round(self.y, 3), "th": round(self.th, 4)},
+            "pose": {"x": round(self.plant.x, 3), "y": round(self.plant.y, 3),
+                     "th": round(self.plant.th, 4)},
             "trail": self.trail[-160:],
             "pads": [{"x": p[0], "y": p[1], "label": p[2]} for p in WORLD_PADS],
             "goal": {"x": goal.get("x"), "y": goal.get("y"), "label": goal["label"]},
-            "source": "sim",
+            "source": "sim · /scan",
         }
 
 
