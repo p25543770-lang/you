@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import re
+
 from conftest import login
 
 DEFAULT_PIN = "2580"  # заводской PIN грузового отсека из backend.py
@@ -136,6 +138,39 @@ def test_assets_are_served(client, operator):
         response = client.get(f"/{name}")
         assert response.status_code == 200, name
         assert len(response.data) > 100, name
+
+
+def test_assets_are_public_without_login(client):
+    """CSS/JS отдаются без входа: в iframe-предпросмотре cookie нет, и подзапросы
+    не могут передать сессию — иначе страница приезжает сломанной."""
+    for name in ("main.css", "main.js", "styles.css", "app.js",
+                 "console.js", "console-core.js", "vision.js", "slam_auth.js"):
+        assert client.get(f"/{name}").status_code == 200, name
+
+
+def test_data_endpoints_still_closed_without_login(client):
+    assert client.get("/api/state").status_code == 302
+    assert client.get("/").status_code == 302
+    assert client.get("/console").status_code == 302
+
+
+def test_auth_shim_is_loaded_before_page_scripts(client, operator):
+    """Скрипт, пробрасывающий токен st в fetch, должен подключаться первым.
+
+    Сравниваем именно теги <script src=…>: слова вроде "main.js" встречаются
+    в тексте страницы и в комментариях.
+    """
+    def order_of(text: str) -> list[str]:
+        return re.findall(r'<script src="([^"]+)"', text)
+
+    login(client)
+    main_scripts = order_of(client.get("/").get_data(as_text=True))
+    assert "/slam_auth.js" in main_scripts
+    assert main_scripts.index("/slam_auth.js") < main_scripts.index("main.js")
+
+    console_scripts = order_of(client.get("/console").get_data(as_text=True))
+    assert "/slam_auth.js" in console_scripts
+    assert console_scripts.index("/slam_auth.js") < console_scripts.index("console-core.js")
 
 
 def test_unknown_asset_is_404(client, operator):

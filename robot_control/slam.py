@@ -45,6 +45,8 @@ ASSETS = {
     "console.js": "console_js",
     "console-core.js": "console_core_js",
     "vision.js": "vision_js",
+    # наш скрипт: пробрасывает токен сессии в подзапросы (нужен в iframe без cookie)
+    "slam_auth.js": "slam_auth_js",
 }
 
 #: Порты, которые проверяем в режиме ``auto``, если список не задан явно.
@@ -227,11 +229,14 @@ def create_blueprint(state, guard=None) -> Blueprint:
         return jsonify(result), 200 if result.get("ok") else 403
 
     # ------------------------------- статика ------------------------------ #
+    # Без авторизации намеренно: в средах без cookie (iframe-предпросмотр)
+    # подзапросы не могут передать сессию, и страница приезжала сломанной.
+    # Секретов в CSS/JS нет; данные и страницы по-прежнему закрыты.
     for filename, endpoint in ASSETS.items():
         bp.add_url_rule(
             f"/{filename}",
             endpoint=endpoint,
-            view_func=guard(lambda name=filename: _send(name)),
+            view_func=lambda name=filename: _send(name),
         )
 
     return bp
