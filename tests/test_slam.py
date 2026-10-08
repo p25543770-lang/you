@@ -256,3 +256,39 @@ def test_console_state_toggles_have_style_rules():
     assert toggled, "не найдено ни одного переключателя классов на <body>"
     missing = sorted(c for c in toggled if f"body.{c}" not in css)
     assert not missing, f"у состояний нет правил в styles.css: {missing}"
+
+
+def test_main_screen_has_no_blind_lock_controls():
+    """С киоска отсек нельзя открыть «вслепую».
+
+    Регрессия: обработчик физической клавиатуры вызывал открытие отсека по
+    Enter безусловно. Убери панель с экрана, но оставь обработчик — и замок
+    открывался бы набором цифр без единого органа управления на виду.
+    Поэтому: панели на киоске нет, а обработчик клавиш подключается только
+    при наличии клавиатуры набора, и открытие остаётся на инженерном пульте.
+    """
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent / "slam_gui"
+    main_html = (root / "main.html").read_text(encoding="utf-8")
+
+    # на основном экране нет ни клавиатуры набора, ни кнопки отсека
+    assert 'id="sc-keypad"' not in main_html
+    assert 'id="sc-btn-open"' not in main_html
+    assert 'id="sc-pin-dots"' not in main_html
+
+    # обработчик клавиш живёт внутри проверки наличия клавиатуры
+    script = (root / "main.js").read_text(encoding="utf-8")
+    guarded = re.search(
+        r"getElementById\('sc-keypad'\);\s*\n\s*if \(keypad\) \{(.+?)\n    \}",
+        script,
+        re.S,
+    )
+    assert guarded, "обработчик набора PIN не привязан к наличию клавиатуры"
+    assert "press(e.key)" in guarded.group(1)
+    assert "toggleCargo()" in guarded.group(1)
+
+    # сама возможность открыть отсек сохранена — на инженерном пульте
+    console = (root / "index.html").read_text(encoding="utf-8")
+    assert 'id="csl-keypad"' in console
+    assert 'id="csl-pin-open"' in console

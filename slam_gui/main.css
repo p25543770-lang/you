@@ -180,8 +180,6 @@ body.sc-dark {
   box-shadow: 0 0 7px var(--sc-gr);
 }
 
-.sc-dot.bad { background: var(--sc-rd); box-shadow: 0 0 7px var(--sc-rd); }
-.sc-dot.warn { background: var(--sc-am); box-shadow: 0 0 7px var(--sc-am); }
 
 .sc-clock {
   font: 500 20px/1 var(--sc-mono);
@@ -259,7 +257,9 @@ body.sc-dark {
 /* --- Сетка панелей -------------------------------------------------------- */
 .sc-grid {
   display: grid;
-  grid-template-columns: minmax(0, 1.5fr) minmax(280px, 0.85fr) minmax(300px, 0.95fr);
+  /* Двигатели (широкая колонка) + АКБ. Панель отсека убрана с киоска:
+     замок открывают с инженерного пульта. */
+  grid-template-columns: minmax(0, 1.6fr) minmax(320px, 0.9fr);
   gap: var(--sc-gap);
   flex: 1;
   min-height: 0;
@@ -474,104 +474,6 @@ body.sc-dark {
   letter-spacing: 0.05em;
 }
 
-/* --- Грузовой отсек ------------------------------------------------------- */
-.sc-lock { min-width: 0; }
-
-.sc-pin {
-  padding: 16px 14px 10px;
-  text-align: center;
-  font: 500 38px/1 var(--sc-mono);
-  letter-spacing: 0.4em;
-  color: var(--sc-cy);
-}
-
-.sc-pin-msg {
-  padding: 0 14px 12px;
-  text-align: center;
-  font-size: 11px;
-  color: var(--sc-tx-2);
-  min-height: 18px;
-}
-
-.sc-pin-msg.err { color: var(--sc-rd); }
-.sc-pin-msg.ok { color: var(--sc-gr); }
-
-@keyframes sc-shake {
-  0%, 100% { transform: translateX(0); }
-  20%, 60% { transform: translateX(-6px); }
-  40%, 80% { transform: translateX(6px); }
-}
-
-.sc-shake { animation: sc-shake 0.35s; }
-
-.sc-keypad {
-  display: grid;
-  grid-template-columns: repeat(3, 1fr);
-  gap: 7px;
-  padding: 0 14px 12px;
-}
-
-.sc-keypad button {
-  height: 58px;
-  border: 1px solid var(--sc-line-2);
-  border-radius: var(--sc-r);
-  background: var(--sc-panel-2);
-  color: var(--sc-tx);
-  font: 500 22px/1 var(--sc-mono);
-  cursor: pointer;
-  transition: background 0.1s, border-color 0.1s;
-}
-
-.sc-keypad button:hover { border-color: var(--sc-cy); }
-.sc-keypad button:active { background: var(--sc-cy); color: #fff; }
-.sc-keypad button.sc-key-muted { font-size: 13px; letter-spacing: 0.06em; }
-
-.sc-lock-buttons { padding: 0 14px 12px; }
-
-.sc-btn {
-  width: 100%;
-  height: 58px;
-  border: 1px solid var(--sc-line-2);
-  border-radius: var(--sc-r);
-  background: var(--sc-panel-2);
-  color: var(--sc-tx);
-  font: 600 15px/1 var(--sc-sans);
-  letter-spacing: 0.09em;
-  text-transform: uppercase;
-  cursor: pointer;
-  transition: background 0.12s, border-color 0.12s;
-}
-
-.sc-btn:hover { border-color: var(--sc-line-2); background: var(--sc-panel); }
-
-.sc-btn-primary {
-  border-color: var(--sc-gr);
-  background: var(--sc-gr);
-  color: #fff;
-}
-
-.sc-btn-primary:hover { background: var(--sc-gr); filter: brightness(1.08); }
-
-.sc-btn-danger { border-color: var(--sc-rd); background: var(--sc-rd); color: #fff; }
-
-.sc-cargo {
-  display: flex;
-  align-items: center;
-  gap: 12px;
-  flex-wrap: wrap;
-  margin-top: auto;
-  padding: 9px 14px;
-  border-top: 1px solid var(--sc-line);
-  background: var(--sc-panel-2);
-  font-size: 11px;
-  color: var(--sc-tx-2);
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-}
-
-.sc-cargo b { color: var(--sc-tx); font-family: var(--sc-mono); font-size: 13px; }
-.sc-cargo span:last-child { margin-left: auto; color: var(--sc-tx-3); }
-
 /* --- Подвал --------------------------------------------------------------- */
 .sc-foot {
   display: flex;
@@ -605,20 +507,16 @@ body.sc-dark {
 
 /* --- Адаптив -------------------------------------------------------------- */
 @media (max-width: 1280px) {
-  .sc-grid { grid-template-columns: minmax(0, 1.3fr) minmax(260px, 1fr); }
-  .sc-lock { grid-column: 1 / -1; }
+  .sc-grid { grid-template-columns: minmax(0, 1.3fr) minmax(280px, 1fr); }
 }
 
 @media (max-width: 900px) {
   body { overflow: auto; }
   .sc { height: auto; }
   .sc-grid { grid-template-columns: 1fr; }
-  .sc-lock { grid-column: auto; }
-  .sc-pin { font-size: 30px; }
-  .sc-keypad button { height: 52px; }
 }
 
-/* --- Состояния модулей и клавиатуры (классы ставит main.js) --------------- */
+/* --- Состояния модулей (классы ставит main.js) --------------------------- */
 .sc-chip-ok { border-color: var(--sc-gr); color: var(--sc-gr); }
 .sc-chip-move { border-color: var(--sc-cy); color: var(--sc-cy); }
 .sc-chip-warn { border-color: var(--sc-am); color: var(--sc-am); }
@@ -627,13 +525,6 @@ body.sc-dark {
 .sc-chip-closed { border-color: var(--sc-gr); color: var(--sc-gr); }
 .sc-chip-open { border-color: var(--sc-rd); color: var(--sc-rd); }
 .sc-chip-blocked { border-color: var(--sc-rd); color: var(--sc-rd); }
-
-/* Служебные клавиши набора PIN («⌫», «СБРОС») — надпись, а не цифра. */
-.sc-keypad button.sc-key-mode {
-  font-size: 13px;
-  letter-spacing: 0.07em;
-  color: var(--sc-tx-2);
-}
 
 /* --- Карточка модуля: стрелочный указатель угла + показания --------------- */
 .mcard-body {

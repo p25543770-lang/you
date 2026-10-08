@@ -501,13 +501,19 @@
     const openBtn = $('sc-btn-open');
     if (openBtn) openBtn.addEventListener('click', toggleCargo);
 
-    // Физическая клавиатура (дубликатов органов управления не создаёт)
-    document.addEventListener('keydown', (e) => {
-      if (/^[0-9]$/.test(e.key)) press(e.key);
-      else if (e.key === 'Backspace') press('⌫');
-      else if (e.key === 'Escape') press('СБРОС');
-      else if (e.key === 'Enter') toggleCargo();
-    });
+    /* Физическая клавиатура (дубликатов органов управления не создаёт).
+       Привязываем её только тогда, когда на экране есть клавиатура набора:
+       иначе цифры и Enter открывали бы отсек «вслепую» — без индикации и
+       без единого органа управления на виду. */
+    const keypad = document.getElementById('sc-keypad');
+    if (keypad) {
+      document.addEventListener('keydown', (e) => {
+        if (/^[0-9]$/.test(e.key)) press(e.key);
+        else if (e.key === 'Backspace') press('⌫');
+        else if (e.key === 'Escape') press('СБРОС');
+        else if (e.key === 'Enter') toggleCargo();
+      });
+    }
 
     // Опрос бэкенда
     if (hasFetch) {
