@@ -24,9 +24,10 @@
     wheel: '#c4453a', text: '#93a6b6', text2: '#62727f',
   };
 
+  const PULL_MS = 800;                 // чаще этого клетки не запрашиваем
   let canvas = null, ctx = null;
   let cells = null, cellsVersion = -1, cellsSize = [0, 0];
-  let last = null, started = false, timer = null, busy = false;
+  let last = null, started = false, timer = null, busy = false, pulledAt = 0;
 
   function el(id) { return document.getElementById(id); }
 
@@ -57,7 +58,12 @@
   async function pull(room) {
     if (!room || !room.ok || busy) return;
     if (cells && room.version === cellsVersion) return;
+    // Пока цех разведуется, версия меняется каждый такт. Клетки весят больше
+    // состояния, поэтому берём их не чаще PULL_MS: поза и след рисуются
+    // каждым тактом, а сама карта догоняет за доли секунды.
+    if (cells && Date.now() - pulledAt < PULL_MS) return;
     busy = true;
+    pulledAt = Date.now();
     try {
       const res = await fetch('api/map', { cache: 'no-store' });
       const data = await res.json();
