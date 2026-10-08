@@ -418,6 +418,15 @@ def test_motor_panel_shows_the_robot_with_wheels_around():
     )
     assert result.returncode == 0, result.stdout + result.stderr
 
+    # панель держит схему и карточки сверху: на киоске взгляд падает наверх,
+    # а не в середину высокой панели (просьба «это надо выше»)
+    css = (root / "slam_gui" / "main.css").read_text(encoding="utf-8")
+    grid_rule = re.search(r"\.sc-motor-grid \{([^}]*)\}", css, re.S)
+    assert grid_rule, "не найдено правило .sc-motor-grid"
+    assert "align-content: start" in grid_rule.group(1), (
+        "содержимое панели двигателей снова выравнивается не по верху"
+    )
+
 
 def test_demo_drive_modes_are_coherent():
     """Демонстрация едет по режимам, а не крутит колёсами вразнобой.
