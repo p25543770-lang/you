@@ -69,12 +69,48 @@ body.sc-dark {
 }
 
 .sc {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  /* Столбик слева — вход в инженерный пульт; справа столбец киоска.
+     Строка 1 — шапка, 2 — приборная линейка, 3 — панели. */
+  grid-template-columns: 46px minmax(0, 1fr);
+  grid-template-rows: auto auto minmax(0, 1fr);
   height: 100vh;
   padding: var(--sc-gap);
   gap: var(--sc-gap);
 }
+
+/* --- Столбик слева: инженерный пульт -------------------------------------- */
+.sc-nav {
+  grid-column: 1;
+  grid-row: 1 / -1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+  padding: 16px 0;
+  background: var(--sc-panel);
+  border: 1px solid var(--sc-line);
+  border-radius: var(--sc-r);
+  color: var(--sc-tx-3);
+  text-decoration: none;
+  transition: border-color 0.15s, color 0.15s;
+}
+
+.sc-nav-mark { display: grid; place-items: center; color: var(--sc-cy); }
+
+.sc-nav-label {
+  writing-mode: vertical-rl;
+  font-size: 11px;
+  letter-spacing: 0.18em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.sc-nav:hover { border-color: var(--sc-cy); color: var(--sc-tx); }
+.sc-nav:focus-visible { outline: 2px solid var(--sc-cy); outline-offset: 2px; }
+
+.sc > .sc-head { grid-column: 2; grid-row: 1; }
+.sc > .sc-rail { grid-column: 2; grid-row: 2; }
 
 /* --- Шапка ---------------------------------------------------------------- */
 .sc-head {
@@ -261,7 +297,8 @@ body.sc-dark {
      замок открывают с инженерного пульта. */
   grid-template-columns: minmax(0, 1.6fr) minmax(320px, 0.9fr);
   gap: var(--sc-gap);
-  flex: 1;
+  grid-column: 2;
+  grid-row: 3;
   min-height: 0;
 }
 
@@ -473,37 +510,6 @@ body.sc-dark {
   color: var(--sc-tx-3);
   letter-spacing: 0.05em;
 }
-
-/* --- Подвал --------------------------------------------------------------- */
-.sc-foot {
-  display: flex;
-  align-items: center;
-  gap: 18px;
-  flex-wrap: wrap;
-  padding: 8px 14px;
-  background: var(--sc-panel);
-  border: 1px solid var(--sc-line);
-  border-radius: var(--sc-r);
-  font-size: 11px;
-  color: var(--sc-tx-2);
-  letter-spacing: 0.05em;
-  text-transform: uppercase;
-}
-
-.sc-foot span { white-space: nowrap; }
-
-.sc-foot-link {
-  margin-left: auto;
-  padding: 4px 10px;
-  border: 1px solid var(--sc-line-2);
-  border-radius: var(--sc-r);
-  color: var(--sc-cy);
-  text-decoration: none;
-  letter-spacing: 0.07em;
-  white-space: nowrap;
-}
-
-.sc-foot-link:hover { border-color: var(--sc-cy); }
 
 /* --- Адаптив -------------------------------------------------------------- */
 @media (max-width: 1280px) {

@@ -328,3 +328,63 @@ def test_lock_panel_keeps_only_the_pin():
     # лампа «отсек» на основном экране осталась — состояние видно
     main = (root / "main.html").read_text(encoding="utf-8")
     assert 'id="ins-lamp-cargo"' in main
+
+
+def test_main_screen_footer_gone_and_console_is_a_left_column():
+    """Подвал со скриншота убран, вход в инженерный пульт — столбик слева."""
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent / "slam_gui"
+    main = (root / "main.html").read_text(encoding="utf-8")
+
+    # подвала нет — ни разметки, ни строк, которые в нём показывались
+    assert "sc-foot" not in main
+    assert 'id="sc-foot-route"' not in main
+    assert 'id="sc-foot-power"' not in main
+    assert 'id="sc-foot-event"' not in main
+
+    # вход в пульт — вертикальный столбик в первой колонке, а не ссылка внизу
+    assert 'class="sc-nav" id="sc-console-link"' in main
+    assert 'class="sc-nav-label"' in main
+
+    css = (root / "main.css").read_text(encoding="utf-8")
+    assert ".sc-foot" not in css
+    assert "grid-template-columns: 46px minmax(0, 1fr)" in css
+    assert "writing-mode: vertical-rl" in css
+
+    # код киоска больше не пишет в удалённые элементы
+    script = (root / "main.js").read_text(encoding="utf-8")
+    for gone in ("sc-foot-route", "sc-foot-power", "sc-foot-event", "lastAudit"):
+        assert gone not in script, f"main.js всё ещё ссылается на {gone}"
+
+
+def test_kiosk_js_survives_without_removed_blocks():
+    """Скрипты киоска переживают отсутствие удалённых блоков.
+
+    Прогоняем main.js и instrument.js в пустом DOM (tests/js_smoke.js): если код
+    дёрнет удалённый элемент или вызовет несуществующую функцию, экран киоска в
+    браузере останется пустым. Тест ловит именно такие поломки.
+    """
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    node = shutil.which("node")
+    if node is None:
+        import pytest
+
+        pytest.skip("node не установлен — проверка JS пропущена")
+
+    root = Path(__file__).resolve().parent.parent
+    result = subprocess.run(
+        [
+            node,
+            str(root / "tests" / "js_smoke.js"),
+            str(root / "slam_gui" / "main.js"),
+            str(root / "slam_gui" / "instrument.js"),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr

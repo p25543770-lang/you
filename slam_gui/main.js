@@ -3,7 +3,7 @@
  *
  * Источник данных:
  *   1) бэкенд `gui/backend.py` — GET /api/state каждые 300 мс (двигатели, АКБ,
- *      груз, замок, связь), POST /api/lock/open|close, GET /api/audit;
+ *      связь), POST /api/lock/open|close;
  *   2) если сервера нет (страница открыта как файл или обычным static-сервером)
  *      — локальная демонстрация, чтобы экран не оставался пустым.
  *
@@ -11,20 +11,17 @@
  *   • одно действие — один орган управления. Очистка ввода PIN — только клавиша
  *     «СБРОС» на клавиатуре; открытие/закрытие отсека — одна кнопка, её надпись
  *     меняется по состоянию. Второй кнопки сброса нет;
- *   • одно состояние показывается в одном месте: замок — чип в шапке панели
- *     «Грузовой отсек»; груз — строка под клавиатурой; заряд — кольцо АКБ;
- *     связь с модулями — подвал панели «Двигатели»; канал данных — чип в шапке;
- *   • сообщение под PIN-кодом — только отклик на последнее действие
- *     (доступ разрешён / неверный PIN / блокировка), оно не повторяет состояние.
+ *   • одно состояние показывается в одном месте: заряд — кольцо АКБ,
+ *     связь с модулями — подвал панели «Двигатели», канал данных — чип в шапке.
  *
- * Переход на инженерный пульт: одна ссылка в подвале экрана.
+ * Строка состояния в подвале (маршрут, тяга, журнал) убрана — вместе с ней
+ * ушёл и опрос /api/audit. Переход на инженерный пульт — столбик слева.
  * ========================================================================== */
 (function () {
   'use strict';
 
   const $ = (id) => document.getElementById(id);
   const POLL_MS = 300;
-  const AUDIT_MS = 5000;
   const PROMPT = 'Введите PIN-код и нажмите «Открыть»';
 
   /* ======================================================================
@@ -75,9 +72,7 @@
     at: 0,              // когда получен последний снимок
     source: '—',
     error: '',
-    lastAudit: null,
     timer: null,
-    auditTimer: null,
   };
 
   const hasFetch = typeof fetch === 'function';
@@ -104,16 +99,6 @@
       api.ok = false;
       api.error = String(err && err.message ? err.message : err);
     }
-  }
-
-  async function apiAudit() {
-    if (!hasFetch) return;
-    try {
-      const res = await fetch(apiUrl('api/audit?limit=1'), { cache: 'no-store' });
-      if (!res.ok) return;
-      const body = await res.json();
-      api.lastAudit = body && body.audit && body.audit.length ? body.audit[0] : null;
-    } catch (err) { /* журнал не критичен */ }
   }
 
   async function apiLock(path, payload) {
@@ -350,7 +335,6 @@
   function render() {
     const d = read();
     const fresh = apiFresh();
-    const lv = lockView();
 
     /* двигатели: карточки + сводка */
     let moving = 0;
@@ -413,20 +397,9 @@
       hint.style.color = v && v < 33.5 ? 'var(--err)' : v && v < 35.5 ? 'var(--warn)' : '';
     }
 
-    /* груз: только про груз, состояние замка показывает чип панели */
-    const cargo = d.cargo || {};
-    const kg = $('sc-cargo-kg');
-    if (kg) kg.textContent = (cargo.kg === undefined ? '—' : cargo.kg) + ' кг';
-    const cst = $('sc-cargo-state');
-    if (cst) cst.textContent = lv.open ? 'доступен для погрузки/выгрузки' : 'закреплён и заперт';
-
-    /* шапка и подвал */
+    /* шапка */
     const mode = $('sc-mode');
     if (mode) mode.textContent = d.mode || '—';
-    const route = $('sc-foot-route');
-    if (route) route.textContent = 'маршрут: ' + (d.route || '—');
-    const power = $('sc-foot-power');
-    if (power) power.textContent = 'тяга: ' + fmt(d.powerKw, 2) + ' кВт · КПД 0,86';
     const dot = $('sc-link-dot');
     if (dot) dot.classList.toggle('off', !d.linkOk);
     const txt = $('sc-link-text');
@@ -443,31 +416,7 @@
         chip.className = 'sc-chip sc-chip-warn';
       }
     }
-    const ev = $('sc-foot-event');
-    if (ev) {
-      const e = api.lastAudit;
-      ev.textContent = 'журнал: ' + (e ? (e.ok ? 'доступ разрешён' : 'отказ в доступе') : '—');
-    }
 
-    /* замок: чип и единственная кнопка действия */
-    const chipLock = $('sc-lock-state');
-    if (chipLock) {
-      if (lv.blocked) {
-        chipLock.textContent = 'БЛОКИРОВКА ' + Math.ceil(lv.remainingMs / 1000) + ' с';
-        chipLock.className = 'sc-chip sc-chip-blocked';
-      } else if (lv.open) {
-        chipLock.textContent = 'ОТКРЫТО';
-        chipLock.className = 'sc-chip sc-chip-open';
-      } else {
-        chipLock.textContent = 'ЗАКРЫТО';
-        chipLock.className = 'sc-chip sc-chip-closed';
-      }
-    }
-    const openBtn = $('sc-btn-open');
-    if (openBtn) {
-      openBtn.disabled = lv.blocked || lock.busy;
-      openBtn.textContent = lv.open ? 'Закрыть отсек' : 'Открыть отсек';
-    }
   }
 
   function clock() {
@@ -497,10 +446,6 @@
     clock();
     setInterval(clock, 1000);
 
-    // Единственная кнопка отсека: открыть по PIN либо закрыть
-    const openBtn = $('sc-btn-open');
-    if (openBtn) openBtn.addEventListener('click', toggleCargo);
-
     /* Физическая клавиатура (дубликатов органов управления не создаёт).
        Привязываем её только тогда, когда на экране есть клавиатура набора:
        иначе цифры и Enter открывали бы отсек «вслепую» — без индикации и
@@ -519,8 +464,6 @@
     if (hasFetch) {
       apiPoll().then(render);
       api.timer = setInterval(apiPoll, POLL_MS);
-      api.auditTimer = setInterval(apiAudit, AUDIT_MS);
-      apiAudit();
     }
 
     // Отрисовка; локальная анимация — только когда данных сервера нет
@@ -535,7 +478,6 @@
 
     window.addEventListener('beforeunload', () => {
       if (api.timer) clearInterval(api.timer);
-      if (api.auditTimer) clearInterval(api.auditTimer);
     });
   }
 
