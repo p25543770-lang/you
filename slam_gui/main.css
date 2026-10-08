@@ -344,59 +344,103 @@ body.sc-dark {
 
 .sc-panel-head .sc-chip { margin-left: auto; }
 
-/* --- Двигатели ------------------------------------------------------------ */
+/* --- Двигатели: вид робота сверху ---------------------------------------- */
+/* Корпус в центре, четыре колёсных модуля по углам. Карточки по бокам —
+   показания; само колесо поворачивается на свой угол (разметка main.js). */
 .sc-motor-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
-  gap: 1px;
-  background: var(--sc-line);
-  flex: 1;
-  overflow-y: auto;
-}
-
-/* Карточка модуля (разметку собирает main.js). */
-.sc-motor-grid .mcard {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
+  grid-template-columns: minmax(190px, 1fr) auto minmax(190px, 1fr);
+  gap: var(--sc-gap);
   padding: 12px;
-  background: var(--sc-panel);
+  flex: 1;
+  min-height: 0;
+  overflow: auto;
 }
 
-.sc-motor-grid .mcard-top {
+.rmap-col {
+  display: grid;
+  gap: 10px;
+  align-content: space-between;
+  min-width: 0;
+}
+
+.rmap-left { grid-column: 1; }
+.rmap-right { grid-column: 3; }
+
+/* Карточка модуля: подпись, показания, направление, полоса оборотов. */
+.rnode {
+  display: grid;
+  gap: 6px;
+  padding: 9px 11px;
+  background: var(--sc-panel-2);
+  border: 1px solid var(--sc-line);
+  border-radius: var(--sc-r);
+  min-width: 0;
+}
+
+.rnode-top {
   display: flex;
   align-items: baseline;
-  gap: 8px;
+  gap: 7px;
+  flex-wrap: wrap;
 }
 
-.sc-motor-grid .mcard-name {
-  font-size: 12px;
+.rnode-id {
+  font: 600 13px/1 var(--sc-mono);
+  letter-spacing: 0.09em;
+  color: var(--sc-cy);
+}
+
+.rnode-name {
+  font-size: 11px;
   font-weight: 600;
   letter-spacing: 0.09em;
   text-transform: uppercase;
 }
 
-.sc-motor-grid .mstat {
-  display: flex;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 8px;
+.rnode-top .sc-chip { margin-left: auto; }
+
+/* Показания: подпись сверху, число снизу — цифры не режутся по краю. */
+.rnode-body {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 4px 12px;
+}
+
+.rstat { display: grid; gap: 2px; min-width: 0; }
+
+.rstat span {
+  font-size: 9px;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--sc-tx-3);
+}
+
+.rstat b {
+  font: 500 19px/1 var(--sc-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--sc-tx);
+  white-space: nowrap;
+}
+
+.rstat b small { margin-left: 2px; font-size: 10px; color: var(--sc-tx-3); }
+
+/* Направление словами: «прямо» приглушено, поворот — цветом. */
+.rnode-foot { display: flex; align-items: baseline; gap: 8px; }
+
+.rnode-dir {
   font-size: 11px;
-  color: var(--sc-tx-2);
-  letter-spacing: 0.05em;
+  letter-spacing: 0.08em;
   text-transform: uppercase;
 }
 
-.sc-motor-grid .mstat b {
-  font: 500 20px/1 var(--sc-mono);
-  font-variant-numeric: tabular-nums;
-  color: var(--sc-tx);
-  letter-spacing: 0;
-}
+.rnode-dir.straight { color: var(--sc-tx-3); }
+.rnode-dir.left, .rnode-dir.right { color: var(--sc-cy); }
 
-.sc-motor-grid .mstat small {
-  font-size: 10px;
-  color: var(--sc-tx-3);
+.rnode-deg {
+  margin-left: auto;
+  font: 500 15px/1 var(--sc-mono);
+  color: var(--sc-tx);
 }
 
 .sc-motor-foot {
@@ -514,12 +558,20 @@ body.sc-dark {
 /* --- Адаптив -------------------------------------------------------------- */
 @media (max-width: 1280px) {
   .sc-grid { grid-template-columns: minmax(0, 1.3fr) minmax(280px, 1fr); }
+  .sc-motor-grid { grid-template-columns: minmax(160px, 1fr) auto minmax(160px, 1fr); }
 }
 
 @media (max-width: 900px) {
   body { overflow: auto; }
-  .sc { height: auto; }
+  .sc { height: auto; grid-template-columns: 1fr; grid-template-rows: none; }
+  .sc-nav { grid-column: 1; grid-row: auto; }
+  .sc > .sc-head, .sc > .sc-rail, .sc-grid { grid-column: 1; grid-row: auto; }
   .sc-grid { grid-template-columns: 1fr; }
+  /* схема робота уходит наверх, карточки — двумя колонками под ней */
+  .sc-motor-grid { grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .robot { grid-column: 1 / -1; grid-row: 1; justify-self: center; }
+  .rmap-left { grid-column: 1; grid-row: 2; }
+  .rmap-right { grid-column: 2; grid-row: 2; }
 }
 
 /* --- Состояния модулей (классы ставит main.js) --------------------------- */
@@ -532,51 +584,78 @@ body.sc-dark {
 .sc-chip-open { border-color: var(--sc-rd); color: var(--sc-rd); }
 .sc-chip-blocked { border-color: var(--sc-rd); color: var(--sc-rd); }
 
-/* --- Карточка модуля: стрелочный указатель угла + показания --------------- */
-.mcard-body {
-  display: grid;
-  grid-template-columns: 104px minmax(0, 1fr);
-  gap: 12px;
-  align-items: center;
-}
-
-.dial {
+/* --- Схема робота сверху: корпус и колёса в центре панели ---------------- */
+.robot {
   position: relative;
+  grid-column: 2;
+  width: 208px;
+  height: 292px;
   display: grid;
   place-items: center;
 }
 
-.dial svg {
-  width: 104px;
-  height: 104px;
-  display: block;
+.robot-front,
+.robot-rear {
+  position: absolute;
+  left: 0;
+  right: 0;
+  text-align: center;
+  font-size: 9px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--sc-tx-3);
 }
 
-.dial-bg { fill: none; stroke: var(--sc-line); stroke-width: 3; }
-.dial-tick { stroke: var(--sc-line-2); stroke-width: 1.6; }
-.dial-hub { fill: var(--sc-tx-3); }
-.dial-needle {
-  stroke: var(--sc-cy);
-  stroke-width: 2.4;
-  stroke-linecap: round;
-  transform-origin: 50px 50px;
+.robot-front { top: 0; color: var(--sc-cy); }
+
+/* Указатель носа: по нему видно, где у машины перед. */
+.robot-front i {
+  display: block;
+  width: 0;
+  height: 0;
+  margin: 3px auto 0;
+  border-left: 7px solid transparent;
+  border-right: 7px solid transparent;
+  border-bottom: 9px solid var(--sc-cy);
+}
+
+.robot-rear { bottom: 0; }
+
+.robot-chassis {
+  position: relative;
+  width: 100px;
+  height: 192px;
+  background: var(--sc-panel-2);
+  border: 1px solid var(--sc-line-2);
+  border-radius: 22px;
+}
+
+.robot-chassis::before {
+  content: "";
+  position: absolute;
+  top: -1px;
+  left: 20px;
+  right: 20px;
+  height: 3px;
+  border-radius: 0 0 2px 2px;
+  background: var(--sc-cy);
+}
+
+/* Колесо: корпус колеса и линия его качения. Поворот задаёт main.js. */
+.rwheel {
+  position: absolute;
+  width: 40px;
+  height: 60px;
   transition: transform 0.35s cubic-bezier(0.3, 1.4, 0.5, 1);
 }
 
-.dial-val {
-  position: absolute;
-  bottom: 2px;
-  font: 500 14px/1 var(--sc-mono);
-  font-variant-numeric: tabular-nums;
-  color: var(--sc-tx);
-}
+.rwheel-tyre { fill: var(--sc-panel); stroke: var(--sc-tx-2); stroke-width: 2.5; }
+.rwheel-dir { stroke: var(--sc-cy); stroke-width: 2; stroke-linecap: round; }
 
-.mcard-stats {
-  display: flex;
-  flex-direction: column;
-  gap: 7px;
-  min-width: 0;
-}
+.rwheel-fl { top: 44px; left: 12px; }
+.rwheel-fr { top: 44px; right: 12px; }
+.rwheel-rl { bottom: 44px; left: 12px; }
+.rwheel-rr { bottom: 44px; right: 12px; }
 
 /* Полоса оборотов: двусторонняя — реверс отличается цветом. */
 .pbar {
@@ -595,15 +674,6 @@ body.sc-dark {
 }
 
 .pbar > i.neg { background: var(--sc-am); }
-
-/* Карточка целиком: имя модуля и стрелка состояния в одну строку. */
-.sc-motor-grid .mcard-top > b {
-  font: 600 13px/1 var(--sc-mono);
-  letter-spacing: 0.09em;
-  color: var(--sc-cy);
-}
-
-.sc-motor-grid .mcard-top .sc-chip { margin-left: auto; }
 
 /* Маркеры секций: вид задаёт .sc-panel и внутренние классы панели. */
 .sc-batt, .sc-motors { /* намеренно без правил */ }

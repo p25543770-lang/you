@@ -388,3 +388,80 @@ def test_kiosk_js_survives_without_removed_blocks():
         timeout=60,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_motor_panel_shows_the_robot_with_wheels_around():
+    """Панель двигателей — схема робота сверху, направление словами.
+
+    Регрессия к просьбе «переделать направление моторов, робота поставь и
+    вокруг него»: вместо четырёх одинаковых стрелочных приборов со знаком
+    минус — корпус робота в центре, колёса по углам, поворот колеса и подпись
+    «влево/прямо/вправо». Проверяется прогоном отрисовки в заглушке DOM
+    (tests/js_motors.js).
+    """
+    import shutil
+    import subprocess
+    from pathlib import Path
+
+    node = shutil.which("node")
+    if node is None:
+        import pytest
+
+        pytest.skip("node не установлен — проверка JS пропущена")
+
+    root = Path(__file__).resolve().parent.parent
+    result = subprocess.run(
+        [node, str(root / "tests" / "js_motors.js")],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_demo_drive_modes_are_coherent():
+    """Демонстрация едет по режимам, а не крутит колёсами вразнобой.
+
+    Прежде каждое колесо ходило своей синусоидой: углы четырёх модулей не
+    были связаны, и по экрану нельзя было понять, куда едет робот.
+    """
+    import importlib.util
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    spec = importlib.util.spec_from_file_location("slam_backend", root / "slam_gui" / "backend.py")
+    backend = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(backend)
+
+    modes = {m["title"]: m["angles"] for m in backend.DEMO_DRIVE_MODES}
+    assert modes["поворот вправо"]["FL"] > 0 and modes["поворот вправо"]["FR"] > 0
+    assert modes["поворот вправо"]["FR"] > modes["поворот вправо"]["FL"]   # внутреннее колесо
+    assert set(modes["краб вправо"].values()) == {20}                       # все параллельно
+    assert modes["разворот на месте"]["FL"] == 90                           # передние в одну сторону
+    assert modes["разворот на месте"]["RL"] == -90                          # задние в другую
+    assert set(modes["прямо"].values()) == {0}
+
+    # режим выбирается по времени и цикл повторяется
+    first = backend.demo_drive_mode(1.0)
+    assert first["title"] == "прямо"
+    cycle = sum(m["sec"] for m in backend.DEMO_DRIVE_MODES)
+    assert backend.demo_drive_mode(1.0 + cycle)["title"] == "прямо"
+    assert backend.demo_drive_mode(cycle / 2)["title"] != "прямо"
+
+    # источник отдаёт согласованные углы и название манёвра.
+    # Часы подменяем: 12 тактов по 0,3 с — как реальный опрос экрана,
+    # а фаза «краб вправо» удерживается той же (иначе время уезжает дальше).
+    import time
+    from unittest import mock
+
+    clock = [2000.0]
+    with mock.patch("time.time", side_effect=lambda: clock[0]):
+        source = backend.SimSource()
+        source.t0 = clock[0] - 14.0
+        for _ in range(12):
+            clock[0] += 0.3
+            source.t0 += 0.3
+            payload = source.read()
+    assert payload["driveMode"] == "краб вправо"
+    angles = [round(m["angle"]) for m in payload["motors"]]
+    assert angles == [20, 20, 20, 20], angles

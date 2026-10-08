@@ -40,18 +40,48 @@
     route: 'склад → зона выгрузки',
     powerKw: 2.4,
     linkOk: true,
+    driveMode: 'прямо',        // какой манёвр показывает демонстрация
     localPin: '2580',          // только для демо-режима
     maxAttempts: 5,
     lockMs: 30000,
   };
 
+  /* Демонстрационные режимы езды — та же логика, что в gui/backend.py.
+     Раньше каждое колесо крутилось своей синусоидой, и по углам четырёх
+     модулей нельзя было понять, куда едет робот. Теперь углы согласованы,
+     как у настоящей 4WIS-машины: поворот (передние в одну сторону), краб
+     (все четыре параллельно), разворот на месте (передние +90°, задние −90°)
+     и задний ход. */
+  const DRIVE_MODES = [
+    { sec: 8, angles: { FL: 0, FR: 0, RL: 0, RR: 0 }, spin: 1, title: 'прямо' },
+    { sec: 4, angles: { FL: 26, FR: 34, RL: 0, RR: 0 }, spin: 1, title: 'поворот вправо' },
+    { sec: 4, angles: { FL: 20, FR: 20, RL: 20, RR: 20 }, spin: 1, title: 'краб вправо' },
+    { sec: 5, angles: { FL: 90, FR: 90, RL: -90, RR: -90 }, spin: 1, title: 'разворот на месте' },
+    { sec: 4, angles: { FL: 0, FR: 0, RL: 0, RR: 0 }, spin: -1, title: 'назад' },
+  ];
+  const STEER_RATE = 70;                       // °/с — рулевой модуль не скачет
+
+  function driveMode(t) {
+    const cycle = DRIVE_MODES.reduce((sum, m) => sum + m.sec, 0);
+    let x = t % cycle;
+    for (const mode of DRIVE_MODES) {
+      if (x < mode.sec) return mode;
+      x -= mode.sec;
+    }
+    return DRIVE_MODES[0];
+  }
+
   function demoStep(dt) {
     const b = DEMO.battery;
+    const mode = driveMode(Date.now() / 1000);
+    DEMO.driveMode = mode.title;
+    const targetRpm = (b.amps / 12) * 260 * mode.spin;
     DEMO.motors.forEach((m, i) => {
-      const target = Math.sin(Date.now() / (2600 + i * 400)) * 34;
-      m.angle += (target - m.angle) * Math.min(1, dt * 3.2);
-      const rpm = (b.amps / 12) * 260;
-      m.rpm += (rpm - m.rpm) * Math.min(1, dt * 1.4);
+      const want = mode.angles[m.id] || 0;
+      const step = STEER_RATE * dt;
+      const diff = want - m.angle;
+      m.angle = Math.abs(diff) <= step ? want : m.angle + (diff < 0 ? -step : step);
+      m.rpm += (targetRpm - m.rpm) * Math.min(1, dt * 2);
       m.temp = 34 + Math.abs(m.rpm) / 40 + Math.sin(Date.now() / 5000 + i) * 1.4;
     });
     b.amps += ((6 + 12 * Math.abs(Math.sin(Date.now() / 9000))) - b.amps) * Math.min(1, dt * 0.6);
@@ -118,6 +148,7 @@
       battery: DEMO.battery,
       cargo: DEMO.cargo,
       mode: DEMO.mode,
+      driveMode: DEMO.driveMode,
       route: DEMO.route,
       powerKw: DEMO.powerKw,
       linkOk: DEMO.linkOk,
@@ -161,36 +192,51 @@
   const KEYPAD = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '⌫', '0', 'СБРОС'];
   const KEY_LABEL = { '⌫': '⌫', 'СБРОС': 'СБРОС' };
 
+  /* Панель двигателей — вид робота сверху: корпус в центре, колёсные модули
+     по углам. Направление колеса показывают сразу двумя способами: само
+     колесо повёрнуто на свой угол и рядом написано словами «влево/вправо/
+     прямо». Знак минус в интерфейсе не показывается — по нему нельзя было
+     понять, куда смотрит колесо. */
   function mountMotors() {
     const grid = $('sc-motor-grid');
     if (!grid) return;
-    grid.innerHTML = DEMO.motors.map((m) => `
-      <article class="mcard" id="mc-${m.id}">
-        <div class="mcard-top">
-          <b>${m.id}</b>
-          <span class="mcard-name">${m.title}</span>
+
+    const card = (m) => `
+      <article class="rnode" id="mc-${m.id}">
+        <div class="rnode-top">
+          <b class="rnode-id">${m.id}</b>
+          <span class="rnode-name">${m.title}</span>
           <span class="sc-chip sc-chip-idle" id="mc-state-${m.id}">ожидание</span>
         </div>
-        <div class="mcard-body">
-          <div class="dial">
-            <svg viewBox="0 0 100 100" aria-hidden="true">
-              <circle class="dial-bg" cx="50" cy="50" r="38"></circle>
-              <g>
-                ${[-60, -30, 0, 30, 60, 90, 120, 150, 180, 210, 240].map((a) =>
-                  `<line class="dial-tick" x1="50" y1="12" x2="50" y2="19" transform="rotate(${a} 50 50)"></line>`).join('')}
-              </g>
-              <line class="dial-needle" id="mc-needle-${m.id}" x1="50" y1="50" x2="50" y2="18"></line>
-              <circle class="dial-hub" cx="50" cy="50" r="4.5"></circle>
-            </svg>
-            <span class="dial-val" id="mc-angle-${m.id}">0°</span>
-          </div>
-          <div class="mcard-stats">
-            <div class="mstat"><span>об/мин</span><b id="mc-rpm-${m.id}">0</b></div>
-            <div class="mstat"><span>температура</span><b id="mc-temp-${m.id}">36<small>°C</small></b></div>
-            <div class="pbar"><i id="mc-bar-${m.id}"></i></div>
-          </div>
+        <div class="rnode-body">
+          <div class="rstat"><span>об/мин</span><b id="mc-rpm-${m.id}">0</b></div>
+          <div class="rstat"><span>температура</span><b id="mc-temp-${m.id}">36<small>°C</small></b></div>
         </div>
-      </article>`).join('');
+        <div class="rnode-foot">
+          <span class="rnode-dir straight" id="mc-dir-${m.id}">прямо</span>
+          <span class="rnode-deg" id="mc-angle-${m.id}">0°</span>
+        </div>
+        <div class="pbar" title="обороты модуля"><i id="mc-bar-${m.id}"></i></div>
+      </article>`;
+
+    const wheel = (m) => `
+      <svg class="rwheel rwheel-${m.id.toLowerCase()}" id="mc-wheel-${m.id}"
+           viewBox="0 0 40 60" role="img" aria-label="${m.id}: колесо прямо">
+        <rect class="rwheel-tyre" x="13" y="4" width="14" height="52" rx="7"></rect>
+        <line class="rwheel-dir" x1="20" y1="11" x2="20" y2="49"></line>
+      </svg>`;
+
+    const side = (ids) => DEMO.motors.filter((m) => ids.indexOf(m.id) >= 0).map(card).join('');
+
+    grid.innerHTML = `
+      <div class="rmap-col rmap-left">${side(['FL', 'RL'])}</div>
+      <div class="robot" id="sc-robot">
+        <span class="robot-front">перед<i aria-hidden="true"></i></span>
+        <div class="robot-chassis" aria-hidden="true"></div>
+        ${DEMO.motors.map(wheel).join('')}
+        <span class="robot-rear">корма</span>
+      </div>
+      <div class="rmap-col rmap-right">${side(['FR', 'RR'])}</div>`;
   }
 
   function mountKeypad() {
@@ -341,10 +387,21 @@
     let online = 0;
     const motors = d.motors || [];
     motors.forEach((m) => {
-      const needle = $('mc-needle-' + m.id);
-      if (needle) needle.style.transform = 'rotate(' + Number(m.angle || 0).toFixed(1) + 'deg)';
+      const a = Number(m.angle || 0);
+      const word = Math.abs(a) < 3 ? 'прямо' : (a > 0 ? 'вправо' : 'влево');
+      const wheel = $('mc-wheel-' + m.id);
+      if (wheel) {
+        wheel.style.transform = 'rotate(' + a.toFixed(1) + 'deg)';
+        wheel.setAttribute('aria-label', m.id + ': колесо ' + word
+          + (word === 'прямо' ? '' : ' ' + Math.abs(Math.round(a)) + ' градусов'));
+      }
+      const dir = $('mc-dir-' + m.id);
+      if (dir) {
+        dir.textContent = word;
+        dir.className = 'rnode-dir ' + (word === 'прямо' ? 'straight' : word === 'влево' ? 'left' : 'right');
+      }
       const ang = $('mc-angle-' + m.id);
-      if (ang) ang.textContent = Math.round(m.angle || 0) + '°';
+      if (ang) ang.textContent = (word === 'прямо' ? 0 : Math.abs(Math.round(a))) + '°';
       const rpm = $('mc-rpm-' + m.id);
       if (rpm) rpm.textContent = String(Math.round(m.rpm || 0));
       const temp = $('mc-temp-' + m.id);
@@ -364,8 +421,12 @@
       if (m.online !== false) online += 1;
     });
     const sum = $('sc-motors-sum');
-    if (sum) sum.textContent = 'в движении: ' + moving + ' из ' + motors.length
-      + ' · модули на связи: ' + online + ' из ' + motors.length;
+    if (sum) {
+      // манёвр сообщает только демонстрация: реальные модули его не знают
+      const manoeuvre = d.driveMode ? 'манёвр: ' + d.driveMode + ' · ' : '';
+      sum.textContent = manoeuvre + 'в движении: ' + moving + ' из ' + motors.length
+        + ' · модули на связи: ' + online + ' из ' + motors.length;
+    }
 
     /* АКБ: кольцо (заряд и уровень), строки, подсказка о порогах */
     const b = d.battery || {};

@@ -81,6 +81,36 @@ MODULE_TITLES = {
 }
 WHEEL_R_M = 0.127            # радиус колеса Xiaomi M365 Pro, м
 
+#: Демонстрационные режимы езды: сколько секунд держать, куда повёрнуты колёса
+#: и в какую сторону крутятся (знак оборотов). Режимы сменяют друг друга по
+#: кругу. Прежде каждое колесо крутилось своей синусоидой, и углы четырёх
+#: модулей не были связаны между собой — по экрану нельзя было понять, куда
+#: едет робот. Здесь углы согласованы, как у настоящей 4WIS-машины:
+#:   • поворот — передние колёса в одну сторону (внутреннее больше);
+#:   • краб    — все четыре параллельно, корпус едет боком;
+#:   • разворот — передние +90°, задние −90°: машина крутится вокруг центра.
+DEMO_DRIVE_MODES = (
+    {"sec": 8.0, "angles": {"FL": 0, "FR": 0, "RL": 0, "RR": 0}, "spin": 1, "title": "прямо"},
+    {"sec": 4.0, "angles": {"FL": 26, "FR": 34, "RL": 0, "RR": 0}, "spin": 1, "title": "поворот вправо"},
+    {"sec": 4.0, "angles": {"FL": 20, "FR": 20, "RL": 20, "RR": 20}, "spin": 1, "title": "краб вправо"},
+    {"sec": 5.0, "angles": {"FL": 90, "FR": 90, "RL": -90, "RR": -90}, "spin": 1, "title": "разворот на месте"},
+    {"sec": 4.0, "angles": {"FL": 0, "FR": 0, "RL": 0, "RR": 0}, "spin": -1, "title": "назад"},
+)
+
+#: Скорость рулевого модуля, °/с — колесо не перескакивает мгновенно.
+DEMO_STEER_RATE = 70.0
+
+
+def demo_drive_mode(t: float):
+    """Режим демонстрационной езды на момент ``t`` (цикл повторяется)."""
+    cycle = sum(mode["sec"] for mode in DEMO_DRIVE_MODES)
+    x = t % cycle
+    for mode in DEMO_DRIVE_MODES:
+        if x < mode["sec"]:
+            return mode
+        x -= mode["sec"]
+    return DEMO_DRIVE_MODES[0]
+
 # --- АКБ 12S3P LiFePO4 (совпадает с gui/console-core.js) --------------------
 PACK = {
     "series": 12, "parallel": 3, "cellAh": 6.2,
@@ -253,16 +283,24 @@ class SimSource:
         t = now - self.t0
 
         speed = 0.55 + 0.45 * math.sin(t / 9.0)          # условная скорость 0,1…1,0
+        drive = demo_drive_mode(t)
+        target_rpm = speed * 260.0 * drive["spin"]
         for i, m in enumerate(self.motors):
-            m["angle"] = math.sin(t / (2.6 + i * 0.4)) * 34.0
-            m["rpm"] = speed * 260.0 + math.sin(t * 2 + i) * 3.0
+            want = float(drive["angles"].get(m["id"], 0.0))
+            step = DEMO_STEER_RATE * dt
+            diff = want - m["angle"]
+            if abs(diff) <= step:
+                m["angle"] = want
+            else:
+                m["angle"] += math.copysign(step, diff)
+            m["rpm"] += (target_rpm - m["rpm"]) * min(1.0, dt * 2.0)
             m["temp"] = 34.0 + abs(m["rpm"]) / 40.0 + math.sin(t / 5 + i) * 1.4
         amps = 6.0 + 12.0 * abs(math.sin(t / 9.0))
         self.soc = max(4.0, self.soc - amps * dt / 3600.0 * 100.0 / PACK["capacityAh"])
         volts = voltage_from_soc(self.soc) - amps * PACK["internalR"]
-        return self._payload(self.motors, volts, amps, speed)
+        return self._payload(self.motors, volts, amps, speed, drive["title"])
 
-    def _payload(self, motors, volts, amps, speed):
+    def _payload(self, motors, volts, amps, speed, drive_mode=None):
         # 4 модуля × 1 кадр телеметрии за выборку — как на реальной шине.
         self.frames_ok += len(MODULE_NAMES)
         battery = pack_state(volts, amps, self.soc)
@@ -271,6 +309,8 @@ class SimSource:
             "battery": battery,
             "cargo": {"kg": 80, "closed": True},
             "mode": "АВТОНОМНЫЙ РЕЖИМ",
+            # манёвр есть только у демонстрации: реальные модули его не сообщают
+            "driveMode": drive_mode,
             "route": "склад → зона выгрузки",
             "speedMps": round(speed, 2),
             "powerKw": round(battery["watts"] / 1000.0, 2),
