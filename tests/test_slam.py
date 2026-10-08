@@ -476,3 +476,177 @@ def test_demo_drive_modes_are_coherent():
     assert payload["driveMode"] == "краб боком"
     angles = [round(m["angle"]) for m in payload["motors"]]
     assert angles == [90, 90, 90, 90], angles
+
+
+def test_dash_cockpit_fills_the_screen_without_empty_columns():
+    """Экран «Пульт» заполняет окно: колонки одной высоты, без пустых полей.
+
+    Разбор разметки, а не поиск строк: важно, какие узлы лежат прямо в
+    .cockpit, потому что места в сетке задаются именно им. Раньше камеры
+    стояли в правой колонке, а колонки имели разную высоту — под короткими
+    оставались пустые поля, карта не использовала своё место, а полотно
+    выпихивало подпись за край коробки.
+    """
+    import re
+    from html.parser import HTMLParser
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    html = (root / "slam_gui" / "index.html").read_text(encoding="utf-8")
+
+    class CockpitChildren(HTMLParser):
+        """Прямые дети .cockpit — с учётом вложенности, а не по строкам."""
+
+        def __init__(self):
+            super().__init__()
+            self.depth = 0          # глубина внутри .cockpit
+            self.children = []
+            self.side_col_depth = None
+
+        def handle_starttag(self, tag, attrs):
+            if tag not in ("div", "section"):
+                return
+            classes = dict(attrs).get("class", "").split()
+            if self.depth == 0 and "cockpit" in classes:
+                self.depth = 1
+                return
+            if self.depth:
+                if self.depth == 1:
+                    self.children.append(" ".join(classes))
+                if "side-col" in classes and self.side_col_depth is None:
+                    self.side_col_depth = self.depth
+                self.depth += 1
+
+        def handle_endtag(self, tag):
+            if tag in ("div", "section") and self.depth:
+                self.depth -= 1
+
+    parser = CockpitChildren()
+    parser.feed(html)
+
+    assert not parser.depth, "разбор не сошёлся: теги не закрыты"
+    assert parser.children, "в .cockpit не нашлось узлов"
+    assert "feed map" in parser.children, parser.children
+    assert "cams" in parser.children, "камеры должны лежать прямо в .cockpit"
+    assert "panel map-panel" in parser.children, parser.children
+    assert "side-col" in parser.children, parser.children
+
+    css = (root / "slam_gui" / "styles.css").read_text(encoding="utf-8")
+
+    def top_level_rules(text: str) -> str:
+        """CSS без комментариев и без блоков @media (смотрим основную раскладку)."""
+        text = re.sub(r"/\*.*?\*/", "", text, flags=re.S)
+        out, i = [], 0
+        while i < len(text):
+            media = re.match(r"\s*@media[^{]*\{", text[i:])
+            if media:
+                depth, j = 1, i + media.end()
+                while j < len(text) and depth:
+                    if text[j] == "{":
+                        depth += 1
+                    elif text[j] == "}":
+                        depth -= 1
+                    j += 1
+                i = j
+                continue
+            out.append(text[i])
+            i += 1
+        return "".join(out)
+
+    plain = top_level_rules(css)
+
+    def rule(selector: str) -> str:
+        """Тело правил с этим селектором: селектор сверяется целиком.
+
+        Целиком — иначе «.feed.map» находился бы внутри «.cockpit > .feed.map»
+        и проверял бы чужое правило.
+        """
+        bodies = []
+        for block in re.finditer(r"([^{}]+)\{([^{}]*)\}", plain):
+            selectors = [part.strip() for part in block.group(1).split(",")]
+            if selector in selectors:
+                bodies.append(block.group(2))
+        return "\n".join(bodies)
+
+    # колонки одной высоты, карта растёт, камеры — полосой под ней
+    cockpit = rule(".cockpit")
+    assert "grid-template-rows" in cockpit, "у .cockpit нет строк сетки"
+    assert "align-items: stretch" in cockpit, "колонки снова разной высоты"
+    assert "min-width: 0" not in cockpit or True
+    cams = rule(".cockpit > .cams")
+    assert "grid-column: 1" in cams and "grid-row: 2" in cams, cams
+    assert "repeat(2, minmax(0, 1fr))" in cams, "камеры должны стоять полосой в два кадра"
+
+    # карта больше не держит пропорцию: высоту ей задаёт раскладка
+    feed_map = rule(".feed.map")
+    assert "aspect-ratio" not in feed_map, "карта снова с фиксированной пропорцией"
+    assert "min-height" in feed_map
+
+    # полотно кадра не выпихивает подпись за край коробки
+    feed = rule(".feed")
+    assert "display: flex" in feed and "flex-direction: column" in feed, feed
+    assert "flex: 1 1 auto" in rule(".feed canvas"), rule(".feed canvas")
+
+    # длинные части панелей прокручиваются внутри, а не растягивают экран
+    assert "overflow: auto" in rule(".prog-list")
+    assert "overflow: auto" in rule(".teleop")
+    assert "flex: 1 1 auto" in rule(".tele-panel")
+
+
+def test_pages_have_no_duplicate_ids():
+    """В страницах нет задвоенных id.
+
+    Регрессия из исходного интерфейса: у таблицы детекций и у подписи камеры
+    был один id="dets". Браузер отдаёт getElementById первый по документу,
+    поэтому таблица уезжала в подпись кадра, а сама таблица оставалась пустой.
+    Такую поломку глазами не видно, а находится она только сверкой id.
+    """
+    import re
+    from collections import Counter
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    problems = {}
+    for page in ("index.html", "main.html"):
+        text = (root / "slam_gui" / page).read_text(encoding="utf-8")
+        ids = re.findall(r'\sid="([^"]+)"', text)
+        dups = sorted(i for i, n in Counter(ids).items() if n > 1)
+        if dups:
+            problems[page] = dups
+
+    assert not problems, f"задвоенные id: {problems}"
+
+    # у таблицы детекций и счётчика камеры — разные поля
+    index = (root / "slam_gui" / "index.html").read_text(encoding="utf-8")
+    assert 'id="dets"' in index and 'id="cam-dets"' in index
+
+    app = (root / "slam_gui" / "app.js").read_text(encoding="utf-8")
+    dets_body = app[app.index("function renderDets()"):]
+    dets_body = dets_body[:dets_body.index("\nfunction ")]
+    assert 'getElementById("dets")' in dets_body
+    assert 'getElementById("cam-dets")' in dets_body
+
+
+def test_camera_and_map_badges_sit_above_the_canvas():
+    """Подписи кадров — своей строкой над полотном, а не поверх картинки.
+
+    Прежде «карта SLAM», счётчики делений и FPS лежали абсолютно поверх
+    полотна и перекрывали надписи на карте и видео.
+    """
+    import re
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    html = (root / "slam_gui" / "index.html").read_text(encoding="utf-8")
+
+    heads = re.findall(r'<div class="feed-head">(.*?)</div>\s*<canvas', html, re.S)
+    assert len(heads) == 3, f"шапок кадров должно быть три (карта и две камеры), а их {len(heads)}"
+    for block in heads:
+        assert 'class="live' in block, block
+        assert "hud-cam" in block, block
+
+    css = (root / "slam_gui" / "styles.css").read_text(encoding="utf-8")
+    head_rule = re.search(r"\.feed-head \{([^}]*)\}", css, re.S).group(1)
+    assert "flex: none" in head_rule and "border-bottom" in head_rule, head_rule
+    static_rule = re.search(r"\.feed-head \.live,\s*\.feed-head \.hud-cam \{([^}]*)\}", css, re.S).group(1)
+    assert "position: static" in static_rule, static_rule

@@ -125,14 +125,44 @@
         <div class="cockpit">
           <!-- Карта: крупнейший элемент экрана -->
           <div class="feed map">
-            <span class="live maplive">карта SLAM</span>
-            <canvas id="map"></canvas>
-            <div class="hud-cam">
-              <span id="ins-map-scale">0.25 м/дел</span>
-              <span id="ins-map-n">0 обновлений</span>
+            <!-- Подписи кадра — своей строкой над полотном: прежде они
+                 накладывались на карту и перекрывали её надписи. -->
+            <div class="feed-head">
+              <span class="live maplive">карта SLAM</span>
+              <div class="hud-cam">
+                <span id="ins-map-scale">0.25 м/дел</span>
+                <span id="ins-map-n">0 обновлений</span>
+              </div>
             </div>
+            <canvas id="map"></canvas>
             <div class="feed-cap">Occupancy grid · обновление по мере сканирования</div>
           </div>
+
+          <!-- Камеры: под картой, обе половины одной полосы -->
+            <div class="cams">
+              <div class="feed cam">
+                <div class="feed-head">
+                  <span class="live">CAM-01 · перед</span>
+                  <div class="hud-cam">
+                    <span>1280×720</span>
+                    <span id="cam-hud">30.0 FPS</span>
+                  </div>
+                </div>
+                <canvas id="cam"></canvas>
+                <div class="feed-cap">Обзорный канал · детекции: <b id="cam-dets">0</b></div>
+              </div>
+              <div class="feed cam">
+                <div class="feed-head">
+                  <span class="live">CAM-02 · задний</span>
+                  <div class="hud-cam">
+                    <span>1280×720</span>
+                    <span>30.0 FPS</span>
+                  </div>
+                </div>
+                <canvas id="cam-rear"></canvas>
+                <div class="feed-cap">Канал заднего хода</div>
+              </div>
+            </div>
 
           <!-- Органы маршрута и программа доставки -->
           <div class="panel map-panel">
@@ -141,20 +171,32 @@
                 <h3>Маршрут и программа</h3>
                 <p>клик — точка маршрута · ПКМ — убрать последнюю · шаги выполняются сверху вниз</p>
               </div>
-              <div class="route-btns">
-                <button type="button" id="btn-explore" class="primary">Автоскан</button>
-                <button type="button" id="btn-auto">Старт маршрута</button>
-                <button type="button" id="btn-pause">Пауза</button>
-                <button type="button" id="btn-skip">Пропуск точки</button>
-                <button type="button" id="btn-dock">На базу</button>
-                <button type="button" id="btn-loop">Цикл</button>
-                <button type="button" id="btn-reverse">Реверс точек</button>
-                <button type="button" id="btn-from-trail">След → маршрут</button>
-                <button type="button" id="btn-lights">Фары</button>
-                <button type="button" id="btn-clear-route">Сброс точек</button>
-                <button type="button" id="btn-recenter">К роботу</button>
-                <button type="button" id="btn-shot">Снимок карты</button>
-                <button type="button" id="btn-home">Хоминг</button>
+              <!-- Кнопки по смыслу: движение отдельно от служебных —
+                   тринадцать в один ряд читались как сплошная стена. -->
+              <div class="route-groups">
+                <div class="route-row">
+                  <span class="route-tag">ход</span>
+                  <div class="route-btns">
+                    <button type="button" id="btn-explore" class="primary">Автоскан</button>
+                    <button type="button" id="btn-auto">Старт маршрута</button>
+                    <button type="button" id="btn-pause">Пауза</button>
+                    <button type="button" id="btn-skip">Пропуск точки</button>
+                    <button type="button" id="btn-dock">На базу</button>
+                    <button type="button" id="btn-loop">Цикл</button>
+                    <button type="button" id="btn-reverse">Реверс точек</button>
+                    <button type="button" id="btn-from-trail">След → маршрут</button>
+                  </div>
+                </div>
+                <div class="route-row">
+                  <span class="route-tag">сервис</span>
+                  <div class="route-btns">
+                    <button type="button" id="btn-lights">Фары</button>
+                    <button type="button" id="btn-recenter">К роботу</button>
+                    <button type="button" id="btn-shot">Снимок карты</button>
+                    <button type="button" id="btn-home">Хоминг</button>
+                    <button type="button" id="btn-clear-route">Сброс точек</button>
+                  </div>
+                </div>
               </div>
             </div>
 
@@ -216,27 +258,6 @@
 
           <!-- Камеры и телеуправление -->
           <div class="side-col">
-            <div class="cams">
-              <div class="feed cam">
-                <span class="live">CAM-01 · перед</span>
-                <canvas id="cam"></canvas>
-                <div class="hud-cam">
-                  <span>1280×720</span>
-                  <span id="cam-hud">30.0 FPS</span>
-                </div>
-                <div class="feed-cap">Обзорный канал · детекции: <b id="dets">0</b></div>
-              </div>
-              <div class="feed cam">
-                <span class="live">CAM-02 · задний</span>
-                <canvas id="cam-rear"></canvas>
-                <div class="hud-cam">
-                  <span>1280×720</span>
-                  <span>30.0 FPS</span>
-                </div>
-                <div class="feed-cap">Канал заднего хода</div>
-              </div>
-            </div>
-
             <div class="panel tele-panel">
               <div class="pt">
                 <div>

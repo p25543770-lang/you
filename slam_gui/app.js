@@ -341,12 +341,22 @@ function renderFsm() {
 }
 
 function renderDets() {
-  document.getElementById("dets").innerHTML =
-    `<div class="tr th" style="display:grid;grid-template-columns:1.4fr .6fr .6fr;padding:8px 16px;font-size:8px;color:#8e9994;text-transform:uppercase">Класс · conf · источник</div>` +
-    state.detections.map((d) =>
-      `<div style="display:grid;grid-template-columns:1.4fr .6fr .6fr;padding:10px 16px;border-top:1px solid #edf0ee">
-        <b style="font-size:11px">${d.t}</b><span>${(d.conf*100).toFixed(0)}%</span><small>${d.src}</small>
-      </div>`).join("");
+  /* Таблица детекций живёт на экране «Сенсоры», а в шапке камеры — только
+     их счётчик. Прежде у обоих элементов был id="dets", поэтому таблица
+     уезжала в подпись кадра, а сама таблица оставалась пустой.
+     Вид строк задают классы .tr/.th из styles.css — они знают про тёмную
+     тему; жёсткие цвета в разметке больше не нужны. */
+  const box = document.getElementById("dets");
+  if (box) {
+    box.innerHTML =
+      `<div class="tr th" style="display:grid;grid-template-columns:1.4fr .6fr .6fr">Класс · conf · источник</div>` +
+      state.detections.map((d) =>
+        `<div class="tr" style="display:grid;grid-template-columns:1.4fr .6fr .6fr">
+          <b>${d.t}</b><span>${(d.conf * 100).toFixed(0)}%</span><small>${d.src}</small>
+        </div>`).join("");
+  }
+  const cnt = document.getElementById("cam-dets");
+  if (cnt) cnt.textContent = String(state.detections.length);
 }
 
 function renderLogs() {

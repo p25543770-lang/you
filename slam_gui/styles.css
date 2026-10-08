@@ -856,22 +856,66 @@ input[type="range"]::-moz-range-thumb { width: 11px; height: 14px; border: 0; ba
 
 /* --- 7. Экраны ------------------------------------------------------------ */
 
-/* Экран «Пульт»: карта крупно слева, органы маршрута в центре,
-   камеры и телеуправление — справа. Раскладку задаём явно по колонкам,
-   потому что порядок узлов в разметке нужен читаемый для JS и печати. */
+/* Экран «Пульт»: карта крупно слева (под ней — камеры), органы маршрута в
+   центре, телеуправление справа. Раскладка заполняет высоту окна: раньше
+   колонки были разной высоты, и под короткими оставались пустые поля.
+   Порядок узлов в разметке оставлен читаемым для JS и печати, поэтому
+   места задаём явно по колонкам и строкам. */
+.view.dash {
+  display: flex;
+  flex-direction: column;
+}
+
 .cockpit {
   display: grid;
-  grid-template-columns: minmax(280px, 1.5fr) minmax(300px, 1.15fr) minmax(280px, 1fr);
+  /* Правая колонка чуть шире прочих: в ней пульт телеуправления с двумя
+     полотнами и ползунками, им тесно уже на 1440 px. */
+  grid-template-columns: minmax(300px, 1.55fr) minmax(300px, 1.1fr) minmax(340px, 1fr);
+  grid-template-rows: minmax(0, 1fr) auto;   /* карта растёт, полоса камер — по кадру */
   gap: var(--gap);
-  align-items: start;
+  align-items: stretch;
+  flex: 1;
+  min-height: 0;
 }
 
 .cockpit > .feed.map { grid-column: 1; grid-row: 1; }
-.cockpit > .panel.map-panel { grid-column: 2; grid-row: 1; }
-.cockpit > .side-col { grid-column: 3; grid-row: 1; }
 
-/* Панель карты тянется по высоте карты. */
-.cockpit > .panel.map-panel { align-self: stretch; }
+/* Камеры — одной полосой под картой: правой колонке оставлено
+   телеуправление, а карте — контекст обзора. */
+.cockpit > .cams {
+  grid-column: 1;
+  grid-row: 2;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.cockpit > .panel.map-panel { grid-column: 2; grid-row: 1 / -1; }
+.cockpit > .side-col { grid-column: 3; grid-row: 1 / -1; }
+
+/* Панели колонок тянутся на всю высоту и сами распределяют место внутри. */
+.cockpit > .panel.map-panel,
+.cockpit > .side-col { min-height: 0; }
+
+/* Кнопки маршрута по группам: подпись слева, кнопки справа. */
+.route-groups {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.route-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.route-tag {
+  min-width: 46px;
+  font-size: 9px;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--tx-3);
+}
 
 .route-btns {
   display: flex;
@@ -893,8 +937,20 @@ input[type="range"]::-moz-range-thumb { width: 11px; height: 14px; border: 0; ba
 
 /* Программа доставки: последовательность шагов. */
 .prog {
+  /* Очередь — самая длинная часть панели: растягиваем её на свободное место,
+     а список шагов прокручивается внутри, а не удлиняет весь экран. */
+  flex: 1 1 auto;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
   padding: 10px 12px;
   border-bottom: 1px solid var(--line);
+}
+
+.prog-list {
+  flex: 1 1 auto;
+  min-height: 54px;
+  overflow: auto;
 }
 
 .prog-head {
@@ -1004,22 +1060,56 @@ input[type="range"]::-moz-range-thumb { width: 11px; height: 14px; border: 0; ba
   overflow: hidden;
 }
 
-.feed.map {
-  background: var(--bg-0);
-  /* Карта — центр экрана: держим пропорцию 4:3, но не даём ей вытолкнуть
-     органы управления за пределы экрана на низких мониторах. Полотно
-     подстраивается под коробку (vision.js читает clientWidth/clientHeight). */
-  aspect-ratio: 4 / 3;
-  min-height: 340px;
-  max-height: calc(100vh - 290px);
+/* Коробка кадра: полотно занимает всё место, кроме подписи внизу.
+   Полотно подстраивается под коробку (vision.js читает clientWidth/clientHeight),
+   поэтому высоту ему задаёт раскладка, а не пропорция. */
+.feed {
+  display: flex;
+  flex-direction: column;
 }
 
-.feed canvas { display: block; width: 100%; height: 100%; }
+.feed canvas {
+  display: block;
+  width: 100%;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.feed-cap { flex: none; }
+
+.feed.map {
+  background: var(--bg-0);
+  /* Карта — центр экрана: не даём ей сжаться ниже рабочего размера и
+     растягиваем на всю оставшуюся высоту колонки. */
+  min-height: 300px;
+}
 
 /* Карта кликабельна: клик ставит точку маршрута, перетаскивание — сдвиг. */
 .feed.map canvas { cursor: crosshair; }
 
 .cams .feed { aspect-ratio: 16 / 10; }
+
+/* Шапка кадра: подписи строкой над полотном, а не поверх него.
+   Прежде «карта SLAM» и счётчики лежали на карте и перекрывали её. */
+.feed-head {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex: none;
+  padding: 5px 8px;
+  border-bottom: 1px solid var(--line);
+  background: var(--bg-2);
+}
+
+.feed-head .live,
+.feed-head .hud-cam {
+  position: static;
+  padding: 0;
+  border: 0;
+  background: transparent;
+}
+
+.feed-head .hud-cam { margin-left: auto; }
 
 /* Свечение «в эфире». */
 .live {
@@ -1076,9 +1166,16 @@ input[type="range"]::-moz-range-thumb { width: 11px; height: 14px; border: 0; ba
 }
 
 /* Телеуправление. */
-.tele-panel { min-width: 0; }
+.tele-panel { min-width: 0; flex: 1 1 auto; }
 
-.teleop { padding: 10px 12px; }
+
+
+.teleop {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow: auto;   /* длинная панель прокручивается внутри, а не вылезает */
+  padding: 10px 12px;
+}
 
 .stick-wrap {
   display: grid;
@@ -1732,8 +1829,17 @@ input[type="range"]::-moz-range-thumb { width: 11px; height: 14px; border: 0; ba
 
 /* --- 9. Адаптив ----------------------------------------------------------- */
 @media (max-width: 1280px) {
-  .cockpit { grid-template-columns: minmax(0, 1.4fr) minmax(230px, 1fr); }
-  .side-col { grid-column: 1 / -1; flex-direction: row; }
+  /* Две колонки: слева карта с камерами, справа маршрут; телеуправление —
+     отдельной широкой полосой внизу, как и было задумано для планшета. */
+  .cockpit {
+    grid-template-columns: minmax(0, 1.4fr) minmax(280px, 1fr);
+    grid-template-rows: minmax(0, 1fr) auto auto;
+  }
+  .cockpit > .feed.map { grid-column: 1; grid-row: 1; }
+  .cockpit > .cams { grid-column: 1; grid-row: 2; }
+  .cockpit > .panel.map-panel { grid-column: 2; grid-row: 1 / span 2; }
+  .cockpit > .side-col { grid-column: 1 / -1; grid-row: 3; }
+  .side-col { flex-direction: row; }
   .side-col > * { flex: 1; }
   .csl-grid { grid-template-columns: 1fr; }
   .csl-stats-cols { grid-template-columns: 1fr; }
@@ -1750,7 +1856,13 @@ input[type="range"]::-moz-range-thumb { width: 11px; height: 14px; border: 0; ba
   .side-status, .profile { display: none; }
   main { overflow: visible; }
   .view { overflow: visible; }
-  .cockpit { grid-template-columns: 1fr; }
+  /* Одна колонка: порядок карта → камеры → маршрут → телеуправление. */
+  .cockpit { grid-template-columns: 1fr; grid-template-rows: none; }
+  .cockpit > .feed.map,
+  .cockpit > .cams,
+  .cockpit > .panel.map-panel,
+  .cockpit > .side-col { grid-column: 1; grid-row: auto; }
+  .cams { grid-template-columns: 1fr; }
   .side-col { flex-direction: column; }
   .metrics { grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); }
   .logs { height: auto; max-height: 60vh; }
@@ -2066,7 +2178,7 @@ body.dark {
 /* Метки-маркеры: элементам нужен только признак, вид задаёт составной класс. */
 .feed.cam { background: #000; }
 body.light .feed.cam { background: #dfe6ec; }
-#view-dash.dash { display: block; }
+#view-dash.dash { display: flex; flex-direction: column; }
 .csl-stand-toggle { margin-left: auto; }
 
 /* Маркеры без собственного вида — служат якорями для составных селекторов
