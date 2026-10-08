@@ -1,211 +1,351 @@
+/* ============================================================================
+   Пульт оператора: вход, служебная страница, ошибки.
+   Стиль согласован с интерфейсом робота (slam_gui/styles.css) — промышленная
+   АСУ ТП: плотные панели, моноширинные числовые поля, лампы состояния,
+   единицы измерения отдельными колонками. Внешних шрифтов нет: робот
+   работает без интернета.
+   ========================================================================== */
+
 :root {
-  --bg: #0f1418;
-  --panel: #171e24;
-  --panel-2: #1e272f;
-  --text: #e6edf3;
-  --muted: #8b9aa6;
-  --accent: #2f9e6f;
-  --accent-strong: #23805a;
-  --danger: #d64545;
-  --line: #2a343c;
+  --bg-0: #070a0c;
+  --bg-1: #0c1114;
+  --bg-2: #111820;
+  --bg-3: #16202a;
+
+  --line: #1e2b35;
+  --line-2: #2a3d4a;
+
+  --tx-0: #dbe6ef;
+  --tx-1: #93a6b6;
+  --tx-2: #5d7080;
+
+  --cy: #3fc6d8;
+  --cy-dim: #1d6b76;
+  --gr: #46bd7c;
+  --am: #dfa43a;
+  --rd: #e0574b;
+
+  --mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    "Liberation Mono", "Courier New", monospace;
+  --sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+
+  --r: 2px;
 }
 
 * { box-sizing: border-box; }
 
-html, body { height: 100%; }
+html, body { height: 100%; margin: 0; }
 
 body {
-  margin: 0;
-  background: var(--bg);
-  color: var(--text);
-  font: 16px/1.5 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  background: var(--bg-0);
+  color: var(--tx-0);
+  font: 13px/1.5 var(--sans);
+  -webkit-font-smoothing: antialiased;
 }
 
-/* ---------------- Каркас: колонка слева + контент справа ---------------- */
+/* Координатная сетка — визуальный признак инженерного экрана. */
+body::before {
+  content: "";
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background-image:
+    linear-gradient(to right, rgba(63, 198, 216, 0.035) 1px, transparent 1px),
+    linear-gradient(to bottom, rgba(63, 198, 216, 0.035) 1px, transparent 1px);
+  background-size: 32px 32px;
+}
+
 .layout {
-  display: flex;
+  position: relative;
+  z-index: 1;
+  display: grid;
+  grid-template-columns: 232px minmax(0, 1fr);
   min-height: 100vh;
 }
 
+/* --- Левая колонка -------------------------------------------------------- */
 .sidebar {
-  flex: 0 0 250px;
-  width: 250px;
   display: flex;
   flex-direction: column;
-  background: var(--panel);
+  min-height: 100vh;
+  background: var(--bg-1);
   border-right: 1px solid var(--line);
-  padding: 14px 12px;
 }
 
-.sidebar-top { padding: 6px 8px; }
+.sidebar-top {
+  padding: 14px;
+  border-bottom: 1px solid var(--line);
+}
 
 .brand {
-  font-weight: 700;
-  letter-spacing: 0.12em;
-  font-size: 14px;
-  color: var(--accent);
-  white-space: nowrap;
+  display: block;
+  font: 600 13px/1.2 var(--sans);
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--tx-0);
 }
 
-/* пустое пространство выталкивает пользователя вниз */
-.sidebar-space { flex: 1 1 auto; }
+.brand::after {
+  content: "пульт оператора";
+  display: block;
+  margin-top: 4px;
+  font: 400 9px/1.2 var(--sans);
+  letter-spacing: 0.09em;
+  color: var(--tx-2);
+}
 
-.sidebar-bottom { padding: 4px 0 2px; }
+.sidebar-space { flex: 1; }
+
+.sidebar-bottom { border-top: 1px solid var(--line); }
 
 .user-card {
   display: flex;
   align-items: center;
   gap: 10px;
-  padding: 10px;
-  border: 1px solid var(--line);
-  border-radius: 10px;
-  background: var(--panel-2);
+  padding: 12px 14px;
 }
 
 .avatar {
+  display: grid;
+  place-items: center;
+  width: 32px;
+  height: 32px;
   flex: 0 0 auto;
-  width: 34px;
-  height: 34px;
-  border-radius: 50%;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  background: var(--accent);
-  color: #08130e;
-  font-weight: 700;
-  font-size: 15px;
-  text-transform: uppercase;
+  border: 1px solid var(--line-2);
+  background: var(--bg-2);
+  color: var(--cy);
+  border-radius: var(--r);
+  font: 600 12px/1 var(--mono);
 }
 
-.avatar-guest { background: var(--panel); color: var(--muted); border: 1px solid var(--line); }
-
-.user-meta {
-  display: flex;
-  flex-direction: column;
-  line-height: 1.25;
-  min-width: 0;
-  flex: 1 1 auto;
-}
+.user-meta { display: flex; flex-direction: column; min-width: 0; }
 
 .user-name {
-  font-size: 14px;
+  font-size: 12px;
+  font-weight: 600;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.user-role { font-size: 12px; color: var(--muted); }
+.user-role {
+  font-size: 9px;
+  color: var(--tx-2);
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
 
-.user-card-guest .user-name { color: var(--muted); }
+.inline-form { margin-left: auto; }
 
 .icon-btn {
-  flex: 0 0 auto;
-  margin-left: auto;
-  display: inline-flex;
-  align-items: center;
-  justify-content: center;
+  display: grid;
+  place-items: center;
   width: 30px;
   height: 30px;
   border: 1px solid var(--line);
-  border-radius: 8px;
-  background: transparent;
-  color: var(--muted);
+  border-radius: var(--r);
+  background: var(--bg-2);
+  color: var(--tx-1);
   cursor: pointer;
 }
 
-.icon-btn:hover { color: var(--danger); border-color: var(--danger); }
+.icon-btn:hover { border-color: var(--rd); color: var(--rd); }
 
-.inline-form { display: inline; margin: 0; }
-
-/* ----------------------------- Контент ----------------------------- */
+/* --- Рабочая область ------------------------------------------------------ */
 .content {
-  flex: 1 1 auto;
+  display: flex;
+  flex-direction: column;
   min-width: 0;
-  padding: 28px 24px 40px;
+  padding: 16px;
 }
 
-/* До входа колонки нет — центрируем форму на весь экран. */
-.content-full {
+.content-full { justify-content: center; align-items: center; }
+
+.shell-head {
   display: flex;
   align-items: center;
-  justify-content: center;
-}
-
-.content-full .card-narrow { margin: 0 auto; }
-
-.content > .card,
-.content > section { max-width: 860px; }
-
-.card {
-  background: var(--panel);
+  gap: 14px;
+  flex-wrap: wrap;
+  padding: 10px 14px;
+  margin-bottom: 16px;
   border: 1px solid var(--line);
-  border-radius: 12px;
-  padding: 24px;
+  background: var(--bg-1);
+  border-radius: var(--r);
 }
 
-.card-narrow { max-width: 420px; margin: 40px auto; }
+.shell-head h2 {
+  margin: 0;
+  font-size: 12px;
+  letter-spacing: 0.12em;
+  text-transform: uppercase;
+}
 
-.card-title { margin: 0 0 8px; font-size: 22px; }
+.shell-head h2::before { content: "▌"; margin-right: 7px; color: var(--cy); }
 
-.muted { color: var(--muted); }
+.shell-head .meta {
+  margin-left: auto;
+  font: 400 10px/1.4 var(--mono);
+  color: var(--tx-2);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
 
-.field { display: block; margin: 14px 0; }
+/* --- Карточки ------------------------------------------------------------- */
+.card {
+  padding: 18px;
+  border: 1px solid var(--line);
+  background: var(--bg-1);
+  border-radius: var(--r);
+}
 
-.field-label { display: block; margin-bottom: 6px; font-size: 14px; color: var(--muted); }
+.card-narrow { width: min(420px, 100%); }
+
+.card-title {
+  margin: 0 0 4px;
+  font-size: 15px;
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.muted {
+  margin: 0 0 14px;
+  font-size: 12px;
+  color: var(--tx-2);
+}
+
+/* --- Сообщения ------------------------------------------------------------ */
+.alert {
+  padding: 9px 11px;
+  margin-bottom: 14px;
+  border: 1px solid var(--line-2);
+  border-left-width: 2px;
+  background: var(--bg-2);
+  font-size: 12px;
+  line-height: 1.55;
+  color: var(--tx-1);
+}
+
+.alert-ok { border-left-color: var(--gr); color: var(--gr); }
+.alert-error { border-left-color: var(--rd); color: var(--rd); }
+.alert strong { color: inherit; }
+
+/* --- Формы ---------------------------------------------------------------- */
+.field { display: block; margin-bottom: 14px; }
+
+.field-label {
+  display: block;
+  margin-bottom: 5px;
+  font-size: 9px;
+  color: var(--tx-2);
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+}
 
 .input {
   width: 100%;
-  padding: 10px 12px;
-  background: var(--panel-2);
-  border: 1px solid var(--line);
-  border-radius: 8px;
-  color: var(--text);
-  font-size: 16px;
+  height: 36px;
+  padding: 0 10px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r);
+  background: var(--bg-0);
+  color: var(--tx-0);
+  font: 400 13px/1 var(--mono);
 }
 
-.input:focus { outline: 2px solid var(--accent); outline-offset: 1px; }
+.input:focus { border-color: var(--cy); outline: none; }
+.input::placeholder { color: var(--tx-2); }
 
 .btn {
-  appearance: none;
-  border: 1px solid transparent;
-  border-radius: 8px;
-  padding: 10px 18px;
-  font-size: 15px;
-  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  height: 36px;
+  padding: 0 16px;
+  border: 1px solid var(--line-2);
+  border-radius: var(--r);
+  background: var(--bg-2);
+  color: var(--tx-1);
+  font: 500 12px/1 var(--sans);
+  letter-spacing: 0.05em;
   text-decoration: none;
-  display: inline-block;
+  cursor: pointer;
 }
 
-.btn-primary { background: var(--accent); color: #08130e; font-weight: 600; }
-.btn-primary:hover { background: var(--accent-strong); color: #eafff6; }
+.btn:hover { border-color: var(--line-2); background: var(--bg-3); color: var(--tx-0); }
 
-.btn-ghost { background: transparent; border-color: var(--line); color: var(--text); }
-.btn-ghost:hover { border-color: var(--accent); }
-
-.alert { padding: 12px 14px; border-radius: 8px; margin: 12px 0; font-size: 15px; }
-.alert-error { background: rgba(214, 69, 69, 0.14); border: 1px solid var(--danger); }
-.alert-ok { background: rgba(47, 158, 111, 0.14); border: 1px solid var(--accent); }
-
-.placeholder {
-  margin-top: 20px;
-  padding: 20px;
-  border: 1px dashed var(--line);
-  border-radius: 10px;
-  background: var(--panel-2);
+.btn-primary {
+  border-color: var(--cy-dim);
+  background: rgba(63, 198, 216, 0.14);
+  color: var(--cy);
+  width: 100%;
 }
 
-.placeholder-title { margin: 0 0 8px; font-size: 18px; }
+.btn-primary:hover { background: rgba(63, 198, 216, 0.24); border-color: var(--cy); }
 
-.todo { color: var(--muted); padding-left: 20px; }
-.todo li { margin: 4px 0; }
+/* --- Служебная страница --------------------------------------------------- */
+.placeholder { border-top: 1px solid var(--line); padding-top: 14px; }
 
-/* ------------------------- Узкие экраны ------------------------- */
-@media (max-width: 720px) {
-  .sidebar { flex-basis: 64px; width: 64px; padding: 14px 8px; }
-  .sidebar-top { padding: 6px 2px; }
-  .brand { writing-mode: vertical-rl; transform: rotate(180deg); letter-spacing: 0.08em; }
-  .user-meta { display: none; }
-  .user-card { justify-content: center; gap: 6px; padding: 8px 4px; }
-  .icon-btn { margin-left: 0; }
-  .content { padding: 20px 14px 32px; }
+.placeholder-title {
+  margin: 0 0 6px;
+  font-size: 13px;
+  letter-spacing: 0.04em;
+}
+
+.todo {
+  margin: 12px 0 0;
+  padding: 0;
+  list-style: none;
+  border: 1px solid var(--line);
+  background: var(--bg-0);
+}
+
+.todo li {
+  padding: 8px 12px 8px 26px;
+  border-bottom: 1px solid var(--line);
+  font: 400 12px/1.5 var(--mono);
+  color: var(--tx-1);
+  position: relative;
+}
+
+.todo li:last-child { border-bottom: 0; }
+.todo li::before { content: "▸"; position: absolute; left: 10px; color: var(--cy); }
+
+/* Пояснение про ссылки на экраны робота. */
+.links {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 1px;
+  margin-top: 14px;
+  background: var(--line);
+  border: 1px solid var(--line);
+}
+
+.links a {
+  display: block;
+  padding: 12px;
+  background: var(--bg-1);
+  color: var(--tx-1);
+  text-decoration: none;
+  font-size: 12px;
+}
+
+.links a:hover { background: var(--bg-3); color: var(--tx-0); }
+
+.links b { display: block; color: var(--cy); font-family: var(--mono); font-size: 12px; }
+.links small { display: block; margin-top: 3px; color: var(--tx-2); font-size: 10px; }
+
+/* --- Адаптив -------------------------------------------------------------- */
+@media (max-width: 780px) {
+  .layout { grid-template-columns: 1fr; }
+  .sidebar {
+    min-height: 0;
+    flex-direction: column;
+    border-right: 0;
+    border-bottom: 1px solid var(--line);
+  }
+  .sidebar-space { display: none; }
+  .sidebar-top, .sidebar-bottom { border: 0; }
+  .content { padding: 12px; }
 }

@@ -1500,6 +1500,9 @@ renderProg();
 
 function applyTheme(dark) {
   document.body.classList.toggle("dark", !!dark);
+  // `light` — светлое «дневное» оформление (styles.css, раздел 10). Без него
+  // кнопка «Светлая» ничего не меняла: правил для состояния не было.
+  document.body.classList.toggle("light", !dark);
   try { localStorage.setItem("rus_slam_theme", dark ? "dark" : "light"); } catch (_) {}
   const b = document.getElementById("btn-theme");
   if (b) b.textContent = dark ? "Светлая" : "Тёмная";

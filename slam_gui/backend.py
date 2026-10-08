@@ -226,8 +226,25 @@ class SimSource:
         self.t0 = time.time()
         self.soc = 78.0
         self.last = time.time()
+        self.frames_ok = 0
         self.motors = [{"id": mid, "title": MODULE_TITLES[mid], "angle": 0.0,
                         "rpm": 0.0, "temp": 36.0, "homed": True} for mid in MODULE_NAMES.values()]
+
+    def bus(self):
+        """Счётчики обмена для экрана диагностики.
+
+        У демонстрационного источника кадров на линии нет, поэтому счётчики
+        помечены ``simulated``: панель диагностики не должна выдавать модель
+        за реальный обмен с модулями.
+        """
+        return {
+            "simulated": True,
+            "framesOk": self.frames_ok,
+            "discarded": 0,
+            "ageMs": int((time.time() - self.last) * 1000),
+            "online": len(MODULE_NAMES),
+            "modules": sorted(MODULE_NAMES),
+        }
 
     def read(self):
         now = time.time()
@@ -246,6 +263,8 @@ class SimSource:
         return self._payload(self.motors, volts, amps, speed)
 
     def _payload(self, motors, volts, amps, speed):
+        # 4 модуля × 1 кадр телеметрии за выборку — как на реальной шине.
+        self.frames_ok += len(MODULE_NAMES)
         battery = pack_state(volts, amps, self.soc)
         return {
             "motors": motors,
@@ -271,9 +290,28 @@ class SerialSource:
         self.frames = {}                 # id модуля → последний кадр
         self.cargo = {"kg": 80, "closed": True}
         self.seen = 0.0
+        self.frames_ok = 0               # разобрано корректных кадров
+        self.discarded = 0               # байт выброшено при поиске синхрослова/сбое CRC
         self._stop = False
         for idx, port in enumerate(ports):
             threading.Thread(target=self._reader, args=(port, idx + 1), daemon=True).start()
+
+    def bus(self):
+        """Реальные счётчики линии: кадры, отброшенные байты, возраст данных."""
+        with self.lock:
+            seen = self.seen
+            frames_ok = self.frames_ok
+            discarded = self.discarded
+            present = sorted(self.frames)
+        return {
+            "simulated": False,
+            "framesOk": frames_ok,
+            "discarded": discarded,
+            "ageMs": int((time.time() - seen) * 1000) if seen else None,
+            "online": len(present),
+            "modules": present,
+            "ports": list(self.ports),
+        }
 
     def _reader(self, port, default_id):
         try:
@@ -292,6 +330,7 @@ class SerialSource:
                             continue
                         buf += chunk
                         while True:
+                            before = len(buf)
                             frame, buf = pick_telemetry(buf)
                             if not frame:
                                 break
@@ -299,6 +338,12 @@ class SerialSource:
                             with self.lock:
                                 self.frames[mid] = frame
                                 self.seen = time.time()
+                                self.frames_ok += 1
+                                # Всё, что ушло из буфера сверх длины кадра, —
+                                # мусор до синхрослова или отброшенный кадр с
+                                # несошедшимся CRC (pick_telemetry сдвигает буфер
+                                # на байт). Это и есть счётчик ошибок линии.
+                                self.discarded += max(0, before - len(buf) - TLM_LEN)
             except Exception as exc:          # noqa: BLE001 — порт может пропасть
                 print("! serial %s: %s — повтор через 2 с" % (port, exc))
                 time.sleep(2.0)
@@ -345,6 +390,8 @@ class RosSource:
     def __init__(self):
         self.ok = False
         self.data = {}
+        self.frames_ok = 0
+        self.last_msg = 0.0
         try:
             import rclpy                                            # noqa: F401
             from rclpy.node import Node
@@ -354,6 +401,24 @@ class RosSource:
             return
         self.fallback = None
         threading.Thread(target=self._spin_node, daemon=True).start()
+
+    def bus(self):
+        """Счётчики моста ROS 2: сколько сообщений принято и как давно."""
+        if self.fallback:
+            return self.fallback.bus()
+        return {
+            "simulated": False,
+            "transport": "ros2",
+            "framesOk": self.frames_ok,
+            "discarded": 0,
+            "ageMs": int((time.time() - self.last_msg) * 1000) if self.last_msg else None,
+            "online": 1 if self.ok else 0,
+            "modules": [],
+        }
+
+    def _touch(self):
+        self.frames_ok += 1
+        self.last_msg = time.time()
 
     def _spin_node(self):
         import rclpy
@@ -380,18 +445,22 @@ class RosSource:
             pass
 
     def _on_state(self, msg):
+        self._touch()
         try:
             self.data.update(json.loads(msg.data))
         except Exception:                                            # noqa: BLE001
             pass
 
     def _on_volts(self, msg):
+        self._touch()
         self.data.setdefault("battery", {})["volts"] = float(msg.data)
 
     def _on_amps(self, msg):
+        self._touch()
         self.data.setdefault("battery", {})["amps"] = float(msg.data)
 
     def _on_motors(self, msg):
+        self._touch()
         try:
             self.data["motors"] = json.loads(msg.data)
         except Exception:                                            # noqa: BLE001
@@ -592,6 +661,12 @@ class App:
         out["cargo"] = cargo
         out["lock"] = lock_state
         out["source"] = getattr(self.source, "name", "unknown")
+        bus = getattr(self.source, "bus", None)
+        if callable(bus):
+            try:
+                out["bus"] = bus()
+            except Exception:                                        # noqa: BLE001
+                pass
         out["uptimeSec"] = int(time.time() - self.started)
         out["ts"] = time.time()
         return out

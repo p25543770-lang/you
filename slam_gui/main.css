@@ -1,222 +1,718 @@
 /* ============================================================================
- * main.css — основной экран робота (киоск).
- * Тёмная тема ZMK Vision, крупные элементы под сенсорный дисплей 10–15″.
- * Рассчитан на 1024×600 … 1920×1080 без прокрутки страницы.
- * ========================================================================== */
+   Основной экран робота (киоск на дисплее борта).
+   Промышленный стиль: плотные таблицы значений, моноширинные числа, лампы
+   состояния. Светлая схема — как у механического щита днём, тёмная включается
+   классом .sc-dark (переключатель — на инженерном пульте).
+   Без внешних шрифтов: робот работает без интернета.
+   ========================================================================== */
 
-:root{
-  --bg:#0b1411;
-  --panel:#121d18;
-  --panel-2:#16241e;
-  --line:#22322b;
-  --text:#e6f0eb;
-  --muted:#8fa79d;
-  --accent:#d5ff45;
-  --ok:#7ddc52;
-  --warn:#e5a438;
-  --err:#ff6a55;
-  --radius:18px;
+:root {
+  --sc-bg: #e7ebee;
+  --sc-panel: #f6f8f9;
+  --sc-panel-2: #eaEEF1;
+  --sc-line: #c4ced6;
+  --sc-line-2: #a6b4bf;
+  --sc-tx: #0f1519;
+  --sc-tx-2: #4b5a66;
+  --sc-tx-3: #7d8b96;
+  --sc-cy: #0b7285;
+  --sc-gr: #17794a;
+  --sc-am: #8f5f06;
+  --sc-rd: #b02f26;
+  --sc-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+    "Liberation Mono", "Courier New", monospace;
+  --sc-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
+  --sc-r: 3px;
+  --sc-gap: 12px;
+
+  /* Имена, которые читает main.js при отрисовке кольца заряда. */
+  --ok: #17794a;
+  --warn: #8f5f06;
+  --err: #b02f26;
 }
 
-*{box-sizing:border-box}
-
-html,body{height:100%}
-body{
-  margin:0;
-  background:radial-gradient(1200px 700px at 20% -10%, #14231d 0%, transparent 60%);
-  background-color:var(--bg);
-  color:var(--text);
-  font-family:Inter,"Segoe UI",system-ui,Arial,sans-serif;
-  display:grid;
-  grid-template-rows:auto minmax(0,1fr) auto;
-  gap:10px;
-  padding:10px;
-  overflow:hidden;
-  user-select:none;
-  -webkit-tap-highlight-color:transparent;
+body.sc-dark {
+  --ok: #46bd7c;
+  --warn: #dfa43a;
+  --err: #e0574b;
 }
 
-/* ---------- 1. Шапка ---------- */
-.sc-head{
-  display:flex;align-items:center;gap:14px;
-  background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
-  padding:10px 16px;
-}
-.sc-brand{display:flex;align-items:center;gap:11px}
-.sc-logo{
-  width:42px;height:42px;border-radius:12px;display:grid;place-items:center;
-  background:var(--accent);color:#17211d;flex-shrink:0;
-}
-.sc-brand b{display:block;font-size:19px;letter-spacing:.06em}
-.sc-brand small{display:block;color:var(--muted);font-size:11px;margin-top:2px}
+* { box-sizing: border-box; }
 
-.sc-mode{
-  margin-left:auto;
-  font-size:14px;font-weight:800;letter-spacing:.05em;
-  color:var(--accent);border:1px solid #3a4a1f;background:#1a2410;
-  padding:8px 14px;border-radius:999px;white-space:nowrap;
-}
-.sc-head-right{display:flex;align-items:center;gap:16px}
-.sc-link{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:12.5px}
-.sc-dot{width:11px;height:11px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 4px #7ddc5222}
-.sc-dot.off{background:var(--err);box-shadow:0 0 0 4px #ff6a5522}
-.sc-clock{font-size:26px;font-weight:800;font-variant-numeric:tabular-nums;letter-spacing:.02em}
-
-/* ---------- 2. Сетка ---------- */
-.sc-grid{
-  display:grid;
-  grid-template-columns:minmax(0,1.6fr) minmax(230px,0.9fr) minmax(270px,1fr);
-  gap:10px;
-  min-height:0;
-}
-.sc-panel{
-  background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
-  padding:12px 14px;display:flex;flex-direction:column;min-height:0;overflow:hidden;
-}
-.sc-panel-head{display:flex;align-items:baseline;gap:10px;margin-bottom:10px}
-.sc-panel-head h1{margin:0;font-size:15px;text-transform:uppercase;letter-spacing:.08em}
-.sc-note{color:var(--muted);font-size:11px;margin-left:auto;text-align:right}
-
-/* ---------- Двигатели ---------- */
-.sc-motor-grid{
-  flex:1;min-height:0;display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;gap:10px;
-}
-.mcard{
-  background:var(--panel-2);border:1px solid var(--line);border-radius:14px;
-  padding:10px 12px;display:flex;flex-direction:column;gap:8px;min-height:0;
-}
-.mcard-top{display:flex;align-items:center;gap:8px}
-.mcard-top b{font-size:22px;letter-spacing:.04em}
-.mcard-name{color:var(--muted);font-size:11px}
-.mcard-body{flex:1;display:flex;align-items:center;gap:12px;min-height:0}
-
-/* циферблат угла руля */
-.dial{position:relative;width:100%;max-width:130px;flex-shrink:0}
-.dial svg{width:100%;height:auto;display:block}
-.dial-bg{fill:none;stroke:#26382f;stroke-width:7}
-.dial-tick{stroke:#3a5148;stroke-width:2.5}
-.dial-needle{stroke:var(--accent);stroke-width:5;stroke-linecap:round;transform-origin:50px 50px;transition:transform .18s linear}
-.dial-hub{fill:var(--accent)}
-.dial-val{
-  position:absolute;left:0;right:0;bottom:-2px;text-align:center;
-  font-size:17px;font-weight:800;font-variant-numeric:tabular-nums;
+html, body {
+  height: 100%;
+  margin: 0;
 }
 
-.mcard-stats{flex:1;display:flex;flex-direction:column;gap:6px;min-width:0}
-.mstat{display:flex;align-items:baseline;gap:8px;justify-content:space-between}
-.mstat span{color:var(--muted);font-size:11px;white-space:nowrap}
-.mstat b{font-size:21px;font-variant-numeric:tabular-nums}
-.mstat b small{font-size:11px;font-weight:600;color:var(--muted);margin-left:3px}
-.pbar{height:9px;border-radius:6px;background:#0d1714;overflow:hidden;border:1px solid var(--line)}
-.pbar i{display:block;height:100%;width:0;background:linear-gradient(90deg,#7ddc52,#d5ff45);transition:width .25s}
-.pbar i.neg{background:linear-gradient(90deg,#e5a438,#ff6a55)}
-
-.sc-chip{
-  margin-left:auto;font-size:10.5px;font-weight:800;letter-spacing:.05em;
-  padding:5px 9px;border-radius:999px;white-space:nowrap;
-}
-.sc-chip-ok{background:#16301f;color:var(--ok)}
-.sc-chip-move{background:#1a2a22;color:var(--accent)}
-.sc-chip-idle{background:#1b2622;color:var(--muted)}
-.sc-chip-warn{background:#3a3218;color:var(--warn)}
-.sc-chip-err{background:#3a1a17;color:var(--err)}
-
-.sc-motor-foot{
-  display:flex;justify-content:space-between;gap:10px;margin-top:10px;
-  color:var(--muted);font-size:11px;
+body {
+  background: var(--sc-bg);
+  color: var(--sc-tx);
+  font: 15px/1.45 var(--sc-sans);
+  -webkit-font-smoothing: antialiased;
+  overflow: hidden;
 }
 
-/* ---------- Аккумулятор ---------- */
-.sc-batt{align-items:stretch}
-.sc-ring-wrap{position:relative;display:grid;place-items:center;flex:1;min-height:0;padding:4px 0}
-.sc-ring{width:min(100%,260px);height:auto;max-height:100%;transform:rotate(-90deg)}
-.sc-ring-bg{fill:none;stroke:#1d2b25;stroke-width:13}
-.sc-ring-fill{
-  fill:none;stroke:var(--ok);stroke-width:13;stroke-linecap:round;
-  stroke-dasharray:0 999;transition:stroke-dasharray .4s linear,stroke .3s;
-}
-.sc-ring-center{position:absolute;text-align:center}
-.sc-ring-center b{font-size:clamp(38px,7vh,64px);font-weight:800;font-variant-numeric:tabular-nums;line-height:1}
-.sc-ring-center b span{font-size:.45em;color:var(--muted);margin-left:2px}
-.sc-ring-center small{display:block;color:var(--muted);font-size:12px;letter-spacing:.14em;text-transform:uppercase;margin-top:4px}
-.sc-batt-rows{display:grid;grid-template-columns:1fr 1fr;gap:6px 12px}
-.sc-batt-row{display:flex;flex-direction:column;gap:2px;background:var(--panel-2);border:1px solid var(--line);border-radius:11px;padding:7px 10px}
-.sc-batt-row span{color:var(--muted);font-size:10.5px}
-.sc-batt-row b{font-size:17px;font-variant-numeric:tabular-nums}
-.sc-batt-foot{margin-top:8px;color:var(--muted);font-size:11px;text-align:center}
-
-/* ---------- Грузовой отсек ---------- */
-.sc-lock{justify-content:flex-start}
-.sc-chip-closed{background:#1b2622;color:var(--muted)}
-.sc-chip-open{background:#16301f;color:var(--ok)}
-.sc-chip-blocked{background:#3a1a17;color:var(--err)}
-
-.sc-pin{
-  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
-  font-size:clamp(26px,4.4vh,40px);font-weight:800;letter-spacing:.34em;
-  text-align:center;padding:10px 4px;color:var(--accent);min-height:1.2em;
-}
-.sc-pin-msg{text-align:center;color:var(--muted);font-size:12px;min-height:32px;padding:0 4px 8px}
-.sc-pin-msg.ok{color:var(--ok)}
-.sc-pin-msg.err{color:var(--err)}
-.sc-pin-msg.warn{color:var(--warn)}
-
-.sc-keypad{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;flex:1;min-height:0}
-.sc-key{
-  border:1px solid var(--line);background:var(--panel-2);color:var(--text);
-  border-radius:14px;font:inherit;font-size:clamp(20px,3.4vh,30px);font-weight:700;
-  cursor:pointer;min-height:44px;transition:background .1s,transform .06s;
-}
-.sc-key:hover{background:#1d2f28}
-.sc-key:active{transform:translateY(1px);background:#24382f}
-.sc-key.sc-key-mode{color:var(--muted);font-size:clamp(15px,2.4vh,21px)}
-
-.sc-lock-buttons{display:grid;grid-template-columns:1fr;gap:8px;margin-top:10px}
-.sc-btn{
-  border:1px solid var(--line);background:var(--panel-2);color:var(--text);
-  border-radius:14px;font:inherit;font-size:15px;font-weight:700;padding:14px 10px;cursor:pointer;
-}
-.sc-btn:hover{background:#1d2f28}
-.sc-btn-primary{background:var(--accent);color:#17211d;border-color:var(--accent)}
-.sc-btn-primary:hover{background:#c8f43a}
-.sc-btn[disabled]{opacity:.55;cursor:default}
-
-.sc-cargo{
-  display:flex;justify-content:space-between;gap:8px;margin-top:10px;padding-top:9px;
-  border-top:1px solid var(--line);color:var(--muted);font-size:11.5px;
-}
-.sc-cargo b{color:var(--text)}
-
-.sc-shake{animation:scShake .35s ease}
-@keyframes scShake{0%,100%{transform:translateX(0)}20%{transform:translateX(-7px)}40%{transform:translateX(7px)}60%{transform:translateX(-4px)}80%{transform:translateX(4px)}}
-
-/* ---------- 3. Подвал ---------- */
-.sc-foot{
-  display:flex;justify-content:space-between;gap:12px;align-items:center;
-  background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
-  padding:9px 16px;color:var(--muted);font-size:11.5px;
-}
-.sc-foot-hint{margin-left:auto;text-align:right}
-
-/* ---------- Адаптация под узкие/невысокие дисплеи ---------- */
-@media (max-width:1100px){
-  .sc-grid{grid-template-columns:minmax(0,1.4fr) minmax(0,1fr);grid-template-rows:minmax(0,1.2fr) minmax(0,1fr)}
-  .sc-lock{grid-column:2;grid-row:1 / span 2}
-  .sc-motors{grid-column:1;grid-row:1}
-  .sc-batt{grid-column:1;grid-row:2}
-  .sc-batt-rows{grid-template-columns:1fr 1fr}
-}
-@media (max-height:620px){
-  .sc-brand small,.sc-note,.sc-motor-foot,.sc-foot-hint{display:none}
-  .sc-clock{font-size:20px}
-  .sc-pin{font-size:26px}
+/* Тёмное оформление: та же сетка, инвертированные токены. */
+body.sc-dark {
+  --sc-bg: #070a0c;
+  --sc-panel: #0e1418;
+  --sc-panel-2: #131c22;
+  --sc-line: #1f2b34;
+  --sc-line-2: #2c3f4c;
+  --sc-tx: #dde7ef;
+  --sc-tx-2: #93a6b6;
+  --sc-tx-3: #62727f;
+  --sc-cy: #3fc6d8;
+  --sc-gr: #46bd7c;
+  --sc-am: #dfa43a;
+  --sc-rd: #e0574b;
 }
 
-/* Ссылка на инженерный пульт в подвале (переход между экранами) */
-.sc-foot-link{
-  min-height:44px;display:inline-flex;align-items:center;
-  margin-left:14px;color:var(--accent);text-decoration:none;font-weight:700;
-  border:1px solid #3a4a1f;border-radius:999px;padding:6px 12px;white-space:nowrap;
+.sc {
+  display: flex;
+  flex-direction: column;
+  height: 100vh;
+  padding: var(--sc-gap);
+  gap: var(--sc-gap);
 }
-.sc-foot-link:hover{background:#1a2410}
-#sc-data{cursor:default}
+
+/* --- Шапка ---------------------------------------------------------------- */
+.sc-head {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  flex-wrap: wrap;
+  padding: 10px 14px;
+  background: var(--sc-panel);
+  border: 1px solid var(--sc-line);
+  border-radius: var(--sc-r);
+}
+
+.sc-brand {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.sc-logo {
+  display: grid;
+  place-items: center;
+  width: 34px;
+  height: 34px;
+  border: 1px solid var(--sc-line-2);
+  background: var(--sc-panel-2);
+  color: var(--sc-cy);
+  border-radius: var(--sc-r);
+}
+
+.sc-brand b {
+  display: block;
+  font-size: 16px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.sc-brand small {
+  display: block;
+  font-size: 10px;
+  color: var(--sc-tx-3);
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.sc-mode {
+  padding: 5px 12px;
+  border: 1px solid var(--sc-line-2);
+  border-left: 3px solid var(--sc-cy);
+  background: var(--sc-panel-2);
+  font: 500 13px/1.3 var(--sc-sans);
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+.sc-head-right {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-left: auto;
+}
+
+.sc-container-when-narrow { min-width: 0; }
+
+.sc-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  padding: 4px 9px;
+  border: 1px solid var(--sc-line-2);
+  border-radius: var(--sc-r);
+  background: var(--sc-panel-2);
+  color: var(--sc-tx-2);
+  font: 500 10px/1.5 var(--sc-sans);
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  text-decoration: none;
+  white-space: nowrap;
+}
+
+.sc-chip-ok { border-color: var(--sc-gr); color: var(--sc-gr); }
+.sc-chip-warn { border-color: var(--sc-am); color: var(--sc-am); }
+.sc-chip-blocked { border-color: var(--sc-rd); color: var(--sc-rd); }
+.sc-chip-open { border-color: var(--sc-rd); color: var(--sc-rd); }
+.sc-chip-closed { border-color: var(--sc-gr); color: var(--sc-gr); }
+.sc-chip-idle { border-color: var(--sc-line-2); color: var(--sc-tx-3); }
+
+.sc-link {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  font-size: 11px;
+  color: var(--sc-tx-2);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.sc-dot {
+  width: 9px;
+  height: 9px;
+  background: var(--sc-gr);
+  box-shadow: 0 0 7px var(--sc-gr);
+}
+
+.sc-dot.bad { background: var(--sc-rd); box-shadow: 0 0 7px var(--sc-rd); }
+.sc-dot.warn { background: var(--sc-am); box-shadow: 0 0 7px var(--sc-am); }
+
+.sc-clock {
+  font: 500 20px/1 var(--sc-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--sc-tx);
+  letter-spacing: 0.04em;
+}
+
+/* --- Приборная линейка ---------------------------------------------------- */
+.sc-rail {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  flex-wrap: wrap;
+  padding: 8px 14px;
+  background: var(--sc-panel);
+  border: 1px solid var(--sc-line);
+  border-radius: var(--sc-r);
+}
+
+.sc-lamps {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.sc-lamp {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  color: var(--sc-tx-2);
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.sc-lamp i {
+  width: 9px;
+  height: 9px;
+  background: var(--sc-tx-3);
+  flex: 0 0 auto;
+}
+
+.sc-counters {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  flex-wrap: wrap;
+  margin-left: auto;
+  font-size: 10px;
+  color: var(--sc-tx-2);
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+.sc-counters b {
+  margin-left: 5px;
+  font-family: var(--sc-mono);
+  font-size: 13px;
+  font-weight: 500;
+  letter-spacing: 0;
+  color: var(--sc-tx);
+}
+
+#ins-trend-soc {
+  width: 220px;
+  height: 34px;
+  border: 1px solid var(--sc-line);
+  background: var(--sc-bg);
+  border-radius: var(--sc-r);
+}
+
+/* --- Сетка панелей -------------------------------------------------------- */
+.sc-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.5fr) minmax(280px, 0.85fr) minmax(300px, 0.95fr);
+  gap: var(--sc-gap);
+  flex: 1;
+  min-height: 0;
+}
+
+.sc-panel {
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  background: var(--sc-panel);
+  border: 1px solid var(--sc-line);
+  border-radius: var(--sc-r);
+  overflow: hidden;
+}
+
+.sc-panel-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  padding: 9px 14px;
+  border-bottom: 1px solid var(--sc-line);
+  background: var(--sc-panel-2);
+}
+
+.sc-panel-head h1 {
+  margin: 0;
+  font-size: 13px;
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+}
+
+.sc-panel-head h1::before {
+  content: "▌";
+  margin-right: 7px;
+  color: var(--sc-cy);
+}
+
+.sc-note {
+  font-size: 10px;
+  color: var(--sc-tx-3);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.sc-panel-head .sc-chip { margin-left: auto; }
+
+/* --- Двигатели ------------------------------------------------------------ */
+.sc-motor-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+  gap: 1px;
+  background: var(--sc-line);
+  flex: 1;
+  overflow-y: auto;
+}
+
+/* Карточка модуля (разметку собирает main.js). */
+.sc-motor-grid .mcard {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 12px;
+  background: var(--sc-panel);
+}
+
+.sc-motor-grid .mcard-top {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.sc-motor-grid .mcard-name {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+}
+
+.sc-motor-grid .mstat {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  font-size: 11px;
+  color: var(--sc-tx-2);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.sc-motor-grid .mstat b {
+  font: 500 20px/1 var(--sc-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--sc-tx);
+  letter-spacing: 0;
+}
+
+.sc-motor-grid .mstat small {
+  font-size: 10px;
+  color: var(--sc-tx-3);
+}
+
+.sc-motor-foot {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  flex-wrap: wrap;
+  padding: 8px 14px;
+  border-top: 1px solid var(--sc-line);
+  background: var(--sc-panel-2);
+  font-size: 10px;
+  color: var(--sc-tx-3);
+  letter-spacing: 0.06em;
+  text-transform: uppercase;
+}
+
+.sc-motor-foot span:last-child { margin-left: auto; color: var(--sc-tx-2); }
+
+/* --- АКБ ------------------------------------------------------------------ */
+.sc-ring-wrap {
+  position: relative;
+  display: grid;
+  place-items: center;
+  padding: 14px 0 6px;
+}
+
+.sc-ring {
+  width: 172px;
+  height: 172px;
+  transform: rotate(-90deg);
+}
+
+.sc-ring-bg {
+  fill: none;
+  stroke: var(--sc-line);
+  stroke-width: 12;
+}
+
+.sc-ring-fill {
+  fill: none;
+  stroke: var(--sc-cy);
+  stroke-width: 12;
+  stroke-linecap: butt;
+  stroke-dasharray: 377;
+  stroke-dashoffset: 83;
+  transition: stroke-dashoffset 0.4s, stroke 0.3s;
+}
+
+.sc-ring-center {
+  position: absolute;
+  display: grid;
+  place-items: center;
+  text-align: center;
+}
+
+.sc-ring-center b {
+  font: 500 40px/1 var(--sc-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--sc-tx);
+}
+
+.sc-ring-center b span {
+  font-size: 18px;
+  color: var(--sc-tx-3);
+  margin-left: 2px;
+}
+
+.sc-ring-center small {
+  margin-top: 3px;
+  font-size: 10px;
+  color: var(--sc-tx-3);
+  letter-spacing: 0.11em;
+  text-transform: uppercase;
+}
+
+.sc-batt-rows {
+  display: flex;
+  flex-direction: column;
+  padding: 4px 14px 0;
+}
+
+.sc-batt-row {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding: 7px 0;
+  border-bottom: 1px dotted var(--sc-line-2);
+  font-size: 11px;
+  color: var(--sc-tx-2);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.sc-batt-row:last-child { border-bottom: 0; }
+
+.sc-batt-row b {
+  margin-left: auto;
+  font: 500 18px/1 var(--sc-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--sc-tx);
+  letter-spacing: 0;
+  text-transform: none;
+}
+
+.sc-batt-foot {
+  margin-top: auto;
+  padding: 8px 14px;
+  border-top: 1px solid var(--sc-line);
+  background: var(--sc-panel-2);
+  font-size: 10px;
+  color: var(--sc-tx-3);
+  letter-spacing: 0.05em;
+}
+
+/* --- Грузовой отсек ------------------------------------------------------- */
+.sc-lock { min-width: 0; }
+
+.sc-pin {
+  padding: 16px 14px 10px;
+  text-align: center;
+  font: 500 38px/1 var(--sc-mono);
+  letter-spacing: 0.4em;
+  color: var(--sc-cy);
+}
+
+.sc-pin-msg {
+  padding: 0 14px 12px;
+  text-align: center;
+  font-size: 11px;
+  color: var(--sc-tx-2);
+  min-height: 18px;
+}
+
+.sc-pin-msg.err { color: var(--sc-rd); }
+.sc-pin-msg.ok { color: var(--sc-gr); }
+
+@keyframes sc-shake {
+  0%, 100% { transform: translateX(0); }
+  20%, 60% { transform: translateX(-6px); }
+  40%, 80% { transform: translateX(6px); }
+}
+
+.sc-shake { animation: sc-shake 0.35s; }
+
+.sc-keypad {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 7px;
+  padding: 0 14px 12px;
+}
+
+.sc-keypad button {
+  height: 58px;
+  border: 1px solid var(--sc-line-2);
+  border-radius: var(--sc-r);
+  background: var(--sc-panel-2);
+  color: var(--sc-tx);
+  font: 500 22px/1 var(--sc-mono);
+  cursor: pointer;
+  transition: background 0.1s, border-color 0.1s;
+}
+
+.sc-keypad button:hover { border-color: var(--sc-cy); }
+.sc-keypad button:active { background: var(--sc-cy); color: #fff; }
+.sc-keypad button.sc-key-muted { font-size: 13px; letter-spacing: 0.06em; }
+
+.sc-lock-buttons { padding: 0 14px 12px; }
+
+.sc-btn {
+  width: 100%;
+  height: 58px;
+  border: 1px solid var(--sc-line-2);
+  border-radius: var(--sc-r);
+  background: var(--sc-panel-2);
+  color: var(--sc-tx);
+  font: 600 15px/1 var(--sc-sans);
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  cursor: pointer;
+  transition: background 0.12s, border-color 0.12s;
+}
+
+.sc-btn:hover { border-color: var(--sc-line-2); background: var(--sc-panel); }
+
+.sc-btn-primary {
+  border-color: var(--sc-gr);
+  background: var(--sc-gr);
+  color: #fff;
+}
+
+.sc-btn-primary:hover { background: var(--sc-gr); filter: brightness(1.08); }
+
+.sc-btn-danger { border-color: var(--sc-rd); background: var(--sc-rd); color: #fff; }
+
+.sc-cargo {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  margin-top: auto;
+  padding: 9px 14px;
+  border-top: 1px solid var(--sc-line);
+  background: var(--sc-panel-2);
+  font-size: 11px;
+  color: var(--sc-tx-2);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.sc-cargo b { color: var(--sc-tx); font-family: var(--sc-mono); font-size: 13px; }
+.sc-cargo span:last-child { margin-left: auto; color: var(--sc-tx-3); }
+
+/* --- Подвал --------------------------------------------------------------- */
+.sc-foot {
+  display: flex;
+  align-items: center;
+  gap: 18px;
+  flex-wrap: wrap;
+  padding: 8px 14px;
+  background: var(--sc-panel);
+  border: 1px solid var(--sc-line);
+  border-radius: var(--sc-r);
+  font-size: 11px;
+  color: var(--sc-tx-2);
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.sc-foot span { white-space: nowrap; }
+
+.sc-foot-link {
+  margin-left: auto;
+  padding: 4px 10px;
+  border: 1px solid var(--sc-line-2);
+  border-radius: var(--sc-r);
+  color: var(--sc-cy);
+  text-decoration: none;
+  letter-spacing: 0.07em;
+  white-space: nowrap;
+}
+
+.sc-foot-link:hover { border-color: var(--sc-cy); }
+
+/* --- Адаптив -------------------------------------------------------------- */
+@media (max-width: 1280px) {
+  .sc-grid { grid-template-columns: minmax(0, 1.3fr) minmax(260px, 1fr); }
+  .sc-lock { grid-column: 1 / -1; }
+}
+
+@media (max-width: 900px) {
+  body { overflow: auto; }
+  .sc { height: auto; }
+  .sc-grid { grid-template-columns: 1fr; }
+  .sc-lock { grid-column: auto; }
+  .sc-pin { font-size: 30px; }
+  .sc-keypad button { height: 52px; }
+}
+
+/* --- Состояния модулей и клавиатуры (классы ставит main.js) --------------- */
+.sc-chip-ok { border-color: var(--sc-gr); color: var(--sc-gr); }
+.sc-chip-move { border-color: var(--sc-cy); color: var(--sc-cy); }
+.sc-chip-warn { border-color: var(--sc-am); color: var(--sc-am); }
+.sc-chip-err { border-color: var(--sc-rd); color: var(--sc-rd); }
+.sc-chip-idle { border-color: var(--sc-line-2); color: var(--sc-tx-3); }
+.sc-chip-closed { border-color: var(--sc-gr); color: var(--sc-gr); }
+.sc-chip-open { border-color: var(--sc-rd); color: var(--sc-rd); }
+.sc-chip-blocked { border-color: var(--sc-rd); color: var(--sc-rd); }
+
+/* Служебные клавиши набора PIN («⌫», «СБРОС») — надпись, а не цифра. */
+.sc-keypad button.sc-key-mode {
+  font-size: 13px;
+  letter-spacing: 0.07em;
+  color: var(--sc-tx-2);
+}
+
+/* --- Карточка модуля: стрелочный указатель угла + показания --------------- */
+.mcard-body {
+  display: grid;
+  grid-template-columns: 104px minmax(0, 1fr);
+  gap: 12px;
+  align-items: center;
+}
+
+.dial {
+  position: relative;
+  display: grid;
+  place-items: center;
+}
+
+.dial svg {
+  width: 104px;
+  height: 104px;
+  display: block;
+}
+
+.dial-bg { fill: none; stroke: var(--sc-line); stroke-width: 3; }
+.dial-tick { stroke: var(--sc-line-2); stroke-width: 1.6; }
+.dial-hub { fill: var(--sc-tx-3); }
+.dial-needle {
+  stroke: var(--sc-cy);
+  stroke-width: 2.4;
+  stroke-linecap: round;
+  transform-origin: 50px 50px;
+  transition: transform 0.35s cubic-bezier(0.3, 1.4, 0.5, 1);
+}
+
+.dial-val {
+  position: absolute;
+  bottom: 2px;
+  font: 500 14px/1 var(--sc-mono);
+  font-variant-numeric: tabular-nums;
+  color: var(--sc-tx);
+}
+
+.mcard-stats {
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+  min-width: 0;
+}
+
+/* Полоса оборотов: двусторонняя — реверс отличается цветом. */
+.pbar {
+  height: 6px;
+  background: var(--sc-panel-2);
+  border: 1px solid var(--sc-line);
+  overflow: hidden;
+}
+
+.pbar > i {
+  display: block;
+  height: 100%;
+  width: 0;
+  background: var(--sc-cy);
+  transition: width 0.25s, background 0.25s;
+}
+
+.pbar > i.neg { background: var(--sc-am); }
+
+/* Карточка целиком: имя модуля и стрелка состояния в одну строку. */
+.sc-motor-grid .mcard-top > b {
+  font: 600 13px/1 var(--sc-mono);
+  letter-spacing: 0.09em;
+  color: var(--sc-cy);
+}
+
+.sc-motor-grid .mcard-top .sc-chip { margin-left: auto; }
+
+/* Маркеры секций: вид задаёт .sc-panel и внутренние классы панели. */
+.sc-batt, .sc-motors { /* намеренно без правил */ }
+
+/* Потеря связи: лампа гаснет, а не притворяется рабочей. */
+.sc-dot.off {
+  background: var(--sc-rd);
+  box-shadow: 0 0 7px var(--sc-rd);
+}

@@ -20,5 +20,20 @@
       <li>Телеметрия: заряд, скорость, состояние связи</li>
     </ul>
   </div>
+
+  <div class="links">
+    <a href="{{ u('slam.main') }}">
+      <b>/</b>
+      <small>Основной экран робота: двигатели, АКБ, грузовой отсек</small>
+    </a>
+    <a href="{{ u('slam.console') }}">
+      <b>/console</b>
+      <small>Инженерный пульт: карта SLAM, сервис приводов, диагностика обмена</small>
+    </a>
+    <a href="/healthz">
+      <b>/healthz</b>
+      <small>Проверка живости: источник данных и время работы</small>
+    </a>
+  </div>
 </section>
 {% endblock %}

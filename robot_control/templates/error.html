@@ -2,8 +2,8 @@
 {% block title %}Ошибка {{ code }}{% endblock %}
 {% block content %}
 <section class="card card-narrow">
-  <h1 class="card-title">{{ code }}</h1>
-  <p class="muted">{{ message }}</p>
-  <p><a class="btn btn-primary" href="{{ u('panel.dashboard') }}">На главную</a></p>
+  <h1 class="card-title">Ошибка {{ code }}</h1>
+  <div class="alert alert-error" role="alert">{{ message }}</div>
+  <p><a class="btn" href="{{ u('panel.dashboard') }}">На главную</a></p>
 </section>
 {% endblock %}

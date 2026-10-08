@@ -45,6 +45,8 @@ ASSETS = {
     "console.js": "console_js",
     "console-core.js": "console_core_js",
     "vision.js": "vision_js",
+    # наша приборная оснастка: частота опроса, тренды, диагностика обмена
+    "instrument.js": "instrument_js",
     # наш скрипт: пробрасывает токен сессии в подзапросы (нужен в iframe без cookie)
     "slam_auth.js": "slam_auth_js",
 }

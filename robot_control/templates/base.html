@@ -10,8 +10,8 @@
 <body>
   <div class="layout">
 
-    {# Левая колонка появляется только после входа: намеренно пустая,
-       внизу — только пользователь. До входа страницы без колонки. #}
+    {# Левая колонка появляется только после входа: вверху бренд, внизу —
+       только пользователь. До входа колонки нет, форма занимает весь экран. #}
     {% if session_user %}
     <aside class="sidebar">
       <div class="sidebar-top">
@@ -45,6 +45,13 @@
     {% endif %}
 
     <main class="content{% if not session_user %} content-full{% endif %}">
+      {% if session_user %}
+      <header class="shell-head">
+        <h2>{{ self.title() }}</h2>
+        <span class="meta">сеанс оператора активен · доступ только по сети робота</span>
+      </header>
+      {% endif %}
+
       {% block content %}{% endblock %}
     </main>
 
