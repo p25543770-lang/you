@@ -24,6 +24,9 @@ def config(tmp_path: Path) -> Config:
     return Config(
         secret_key="test-secret-key",
         operators_file=tmp_path / "operators.json",
+        # Эти тесты проверяют парольный вход — включаем его явно. По умолчанию
+        # пульт открыт без пароля (RC_REQUIRE_LOGIN=0), см. test_web.
+        require_login=True,
         bind_host="127.0.0.1",
         port=8080,
         max_failed_attempts=3,
@@ -51,6 +54,34 @@ def app(config: Config):
     application = create_app(config)
     application.config.update(TESTING=True)
     return application
+
+
+@pytest.fixture
+def open_config(tmp_path: Path) -> Config:
+    """Настройки без пароля — так пульт работает по умолчанию."""
+    return Config(
+        secret_key="test-secret-key",
+        operators_file=tmp_path / "operators.json",
+        bind_host="127.0.0.1",
+        port=8080,
+        pbkdf2_iterations=FAST_ITERATIONS,
+        testing=True,
+        require_login=False,
+        slam_source="sim",
+        slam_lock_file=tmp_path / "lock.json",
+    )
+
+
+@pytest.fixture
+def open_app(open_config: Config):
+    application = create_app(open_config)
+    application.config.update(TESTING=True)
+    return application
+
+
+@pytest.fixture
+def open_client(open_app):
+    return open_app.test_client()
 
 
 @pytest.fixture

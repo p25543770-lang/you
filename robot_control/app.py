@@ -47,6 +47,9 @@ SESSION_ROLE = "role"
 SESSION_LOGIN_AT = "login_at"
 ST_PARAM = "st"
 
+#: Имя, под которым работает режим без пароля (RC_REQUIRE_LOGIN=0).
+ANONYMOUS_OPERATOR = "оператор"
+
 
 def _safe_next(target: str | None) -> str | None:
     """Разрешаем переход только на относительный путь внутри приложения."""
@@ -151,8 +154,17 @@ def create_app(config: Config | None = None) -> Flask:
             g.st_token = token
             g.st_user = user
 
+    #: Пароль на вход включён? По умолчанию нет: пульт открыт (см. Config).
+    auth_required = bool(config.require_login)
+
     def current_user() -> tuple[str | None, bool]:
-        """(имя оператора, пришёл ли вход через URL-токен)."""
+        """(имя оператора, пришёл ли вход через URL-токен).
+
+        Без пароля оператор не анонимный: экран и журналы должны знать, от
+        чьего имени идёт работа, поэтому подставляем имя «оператор».
+        """
+        if not auth_required and not session.get(SESSION_USER):
+            return ANONYMOUS_OPERATOR, False
         if (
             session.get(SESSION_USER)
             and session.get(SESSION_ROLE) == ROLE_OPERATOR
@@ -176,6 +188,8 @@ def create_app(config: Config | None = None) -> Flask:
     def login_required(view):
         @wraps(view)
         def wrapper(*args, **kwargs):
+            if not auth_required:
+                return view(*args, **kwargs)
             user, _via = current_user()
             if user is None:
                 session.clear()
@@ -201,10 +215,13 @@ def create_app(config: Config | None = None) -> Flask:
             "csrf_token": csrf_signer.dumps("csrf"),
             "session_user": user,
             "via_st": via_st,
+            "auth_required": auth_required,
             "u": u,
         }
 
     def csrf_ok() -> bool:
+        if not auth_required:
+            return True
         provided = request.form.get("csrf_token", "")
         if not provided:
             return False
@@ -274,12 +291,15 @@ def create_app(config: Config | None = None) -> Flask:
                 "status": "ok",
                 "operators_configured": store.exists(),
                 "panel": "rus_slam" if slam_state else "unavailable",
+                "auth": "password" if auth_required else "off",
                 "source": getattr(getattr(slam_state, "source", None), "name", None),
             }
         )
 
     @app.route("/login", methods=["GET", "POST"], endpoint="auth.login")
     def login():
+        if not auth_required:
+            return redirect(home_url())
         user, _via = current_user()
         if user is not None:
             return redirect(with_st(home_url()))
@@ -357,7 +377,8 @@ def create_app(config: Config | None = None) -> Flask:
         if user:
             log.info("оператор %s вышел%s", user, " (url-сессия)" if via_st else "")
         # После выхода токен st в ссылку не подставляется — сессия мертва.
-        return redirect(url_for("auth.login"))
+        # Без пароля страницы входа нет — возвращаемся на экран робота.
+        return redirect(home_url() if not auth_required else url_for("auth.login"))
 
     @app.get("/panel", endpoint="panel.dashboard")
     @login_required
@@ -375,7 +396,7 @@ def create_app(config: Config | None = None) -> Flask:
         session.clear()
         if user:
             log.info("оператор %s вышел%s", user, " (url-сессия)" if via_st else "")
-        return redirect(url_for("auth.login"))
+        return redirect(home_url() if not auth_required else url_for("auth.login"))
 
     @app.errorhandler(404)
     def not_found(_error):

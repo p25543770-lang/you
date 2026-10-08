@@ -315,3 +315,58 @@ def test_unknown_page_returns_404(client):
     api = client.get("/api/robot/state")
     assert api.status_code == 404
     assert api.get_json() == {"error": "not_found"}
+
+
+# --------------------------- режим без пароля ---------------------------- #
+# По умолчанию (RC_REQUIRE_LOGIN=0) пульт открыт: пароля нет ни у основного
+# экрана, ни у инженерного пульта, ни у служебной страницы. Парольный режим
+# проверяют тесты выше — они собирают приложение с require_login=True.
+
+
+def test_default_config_has_no_password():
+    from robot_control.config import Config
+
+    assert Config(secret_key="k").require_login is False
+
+
+def test_open_mode_pages_do_not_ask_for_password(open_client):
+    for path in ("/", "/console", "/index.html", "/main.html", "/panel"):
+        response = open_client.get(path)
+        assert response.status_code == 200, f"{path} требует вход"
+        assert 'name="password"' not in response.get_data(as_text=True)
+
+
+def test_open_mode_login_page_leads_to_the_screen(open_client):
+    """/login без пароля не тупик: сразу уводит на экран робота."""
+    response = open_client.get("/login")
+    assert response.status_code == 302
+    assert not response.headers["Location"].startswith("/login")
+
+
+def test_open_mode_healthz_reports_auth_off(open_client):
+    body = open_client.get("/healthz").get_json()
+    assert body["auth"] == "off"
+
+
+def test_open_mode_operator_name_is_visible(open_client):
+    """Даже без пароля видно, от чьего имени идёт работа."""
+    text = open_client.get("/panel").get_data(as_text=True)
+    assert "без пароля" in text
+
+
+def test_open_mode_exit_returns_to_the_screen(open_client):
+    response = open_client.get("/exit")
+    assert response.status_code == 302
+    assert response.headers["Location"].endswith("/")
+
+
+def test_password_mode_is_turned_on_by_env(monkeypatch, tmp_path):
+    from robot_control.config import Config
+
+    monkeypatch.setenv("RC_REQUIRE_LOGIN", "1")
+    monkeypatch.setenv("RC_OPERATORS_FILE", str(tmp_path / "ops.json"))
+    config = Config.from_env(project_root=tmp_path)
+    assert config.require_login is True
+
+    monkeypatch.setenv("RC_REQUIRE_LOGIN", "0")
+    assert Config.from_env(project_root=tmp_path).require_login is False

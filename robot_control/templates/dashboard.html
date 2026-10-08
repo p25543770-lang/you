@@ -3,9 +3,16 @@
 {% block content %}
 <section class="card">
   <h1 class="card-title">Пульт оператора</h1>
+  {% if auth_required %}
   <div class="alert alert-ok" role="status">
     Авторизация пройдена. Вы вошли как <strong>{{ operator }}</strong> с ролью «оператор».
   </div>
+  {% else %}
+  <div class="alert alert-ok" role="status">
+    Пульт открыт без пароля: работа идёт от имени <strong>{{ operator }}</strong>.
+    Вернуть страницу входа — переменная <code>RC_REQUIRE_LOGIN=1</code>.
+  </div>
+  {% endif %}
 
   <div class="placeholder">
     <h2 class="placeholder-title">Управление роботом ещё не подключено</h2>

@@ -25,7 +25,7 @@
           <span class="avatar" aria-hidden="true">{{ session_user[:1] | upper }}</span>
           <span class="user-meta">
             <span class="user-name" title="{{ session_user }}">{{ session_user }}</span>
-            <span class="user-role">оператор</span>
+            <span class="user-role">{{ 'вход без пароля' if not auth_required else 'оператор' }}</span>
           </span>
           <form method="post" action="{{ u('auth.logout') }}" class="inline-form">
             <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
