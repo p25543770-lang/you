@@ -61,11 +61,12 @@ fi
 # --- 4. учётка оператора ------------------------------------------------------ #
 if [[ ! -f data/operators.json ]]; then
   if [[ -t 0 ]]; then
-    log "создаю учётку оператора (придумайте логин и пароль, минимум 8 символов)…"
-    .venv/bin/python scripts/create_operator.py --username "${RC_OPERATOR:-operator}"
+    log "создаю учётку оператора (логин по умолчанию admin)…"
+    .venv/bin/python scripts/create_operator.py \
+      --username "${RC_OPERATOR:-admin}" --min-length "${RC_MIN_PASSWORD_LENGTH:-4}"
   else
     log "терминала для ввода нет — создаю учётку автоматически…"
-    ./scripts/create_default_operator.sh "${RC_OPERATOR:-operator}"
+    ./scripts/create_default_operator.sh "${RC_OPERATOR:-admin}"
   fi
 else
   log "учётки уже созданы — пропускаю"

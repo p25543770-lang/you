@@ -1,4 +1,4 @@
-"""Проверки HTTP-части: вход оператора, доступ к панели, заглушка после входа."""
+"""Проверки HTTP-части: вход оператора, доступ к интерфейсу робота."""
 
 from __future__ import annotations
 
@@ -10,7 +10,8 @@ def test_healthz_is_public(client):
     assert response.status_code == 200
     body = response.get_json()
     assert body["status"] == "ok"
-    assert body["panel"] == "not_implemented"
+    assert body["panel"] == "rus_slam"
+    assert body["source"]  # выбран источник данных (sim, serial или ros)
 
 
 def test_panel_requires_login(client):
@@ -60,8 +61,9 @@ def test_login_success_gives_session_and_redirect(app, client, operator):
 
 
 def test_panel_after_login_is_a_stub(client, operator):
+    """Служебная страница /panel — по-прежнему без органов управления."""
     login(client)
-    text = client.get("/").get_data(as_text=True)
+    text = client.get("/panel").get_data(as_text=True)
     assert OPERATOR in text
     assert "Управление роботом ещё не подключено" in text
     # никаких органов управления в заглушке быть не должно
@@ -72,7 +74,7 @@ def test_panel_after_login_is_a_stub(client, operator):
 def test_sidebar_shows_only_user_at_bottom(client, operator):
     """Левая колонка: сверху бренд, в середине пусто, внизу — только пользователь."""
     login(client)
-    text = client.get("/").get_data(as_text=True)
+    text = client.get("/panel").get_data(as_text=True)
     assert 'class="sidebar"' in text
     assert 'class="user-card"' in text
     assert 'class="user-name" title="operator">operator' in text.replace("\n", "")
@@ -102,7 +104,7 @@ def test_no_sidebar_before_login(client):
 
 def test_sidebar_appears_after_login(client, operator):
     login(client)
-    text = client.get("/").get_data(as_text=True)
+    text = client.get("/panel").get_data(as_text=True)
     assert 'class="sidebar"' in text
     assert "content-full" not in text
 
@@ -111,7 +113,7 @@ def test_logout_clears_session(client, operator):
     login(client)
     assert client.get("/").status_code == 200
 
-    page = client.get("/")
+    page = client.get("/panel")
     response = client.post(
         "/logout", data={"csrf_token": csrf_token(page)}, follow_redirects=False
     )
@@ -211,8 +213,13 @@ def test_url_session_allows_cookieless_dashboard(app, client, operator):
     fresh = app.test_client()  # без cookie вообще
     page = fresh.get(_path_of(location))
     assert page.status_code == 200
-    text = page.get_data(as_text=True)
-    assert "Управление роботом ещё не подключено" in text
+    # по URL-сессии открылся экран робота
+    assert "main.css" in page.get_data(as_text=True)
+
+    token = _path_of(location).split("st=", 1)[1]
+    panel = fresh.get(f"/panel?st={token}")
+    assert panel.status_code == 200
+    text = panel.get_data(as_text=True)
     assert 'class="sidebar"' in text
 
     # Кнопка выхода в ссылке несёт тот же токен st
@@ -220,7 +227,6 @@ def test_url_session_allows_cookieless_dashboard(app, client, operator):
 
     action = re.search(r'action="([^"]+)" class="inline-form"', text).group(1)
     assert "st=" in action
-    token = action.split("st=", 1)[1]
 
     # Выход по токену работает без cookie
     out = fresh.post(f"/logout?st={token}", data={"csrf_token": _csrf_from(text)})

@@ -1,9 +1,12 @@
-"""Flask-приложение: вход оператора и страница-заглушка после входа.
+"""Flask-приложение: вход оператора и веб-интерфейс робота RUS SLAM.
 
 Сессия держится в cookie, но есть резервный механизм для сред, где cookie
 не сохраняются (встроенный cross-site предпросмотр в iframe с opaque-origin):
 подписанный токен ``st`` в URL. Cookie всегда в приоритете; ``st`` используется
 только когда cookie-сессии нет.
+
+После входа открывается интерфейс RUS SLAM (см. :mod:`robot_control.slam`):
+основной экран робота на ``/`` и инженерный пульт на ``/console``.
 """
 
 from __future__ import annotations
@@ -36,6 +39,7 @@ from .auth import (
     hash_password,
 )
 from .config import Config
+from .slam import build_state, create_blueprint
 
 log = logging.getLogger("robot_control")
 
@@ -165,6 +169,11 @@ def create_app(config: Config | None = None) -> Flask:
             return f"{url}{sep}{ST_PARAM}={g.st_token}"
         return url
 
+    def home_url() -> str:
+        """Куда попадаем после входа: экран робота, а без него — служебный /panel."""
+        endpoint = "slam.main" if app.extensions.get("rc_slam") else "panel.dashboard"
+        return url_for(endpoint)
+
     def login_required(view):
         @wraps(view)
         def wrapper(*args, **kwargs):
@@ -212,22 +221,61 @@ def create_app(config: Config | None = None) -> Flask:
         response.headers.setdefault("X-Frame-Options", "DENY")
         response.headers.setdefault("Referrer-Policy", "no-referrer")
         response.headers.setdefault("X-Robots-Tag", "noindex, nofollow")
+        # 'unsafe-inline' нужен только для стилей: в интерфейсе робота есть
+        # атрибуты style="…" (инженерный пульт). Скрипты — по-прежнему только
+        # свои файлы, инлайн-JS остаётся запрещён.
         response.headers.setdefault(
             "Content-Security-Policy",
-            "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; "
+            "default-src 'self'; img-src 'self' data:; "
+            "style-src 'self' 'unsafe-inline'; script-src 'self'; "
             "frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
         )
         response.headers.setdefault("Cache-Control", "no-store")
         return response
 
+    # --------------------- Интерфейс RUS SLAM ---------------------------- #
+    # Он занимает "/" и "/console"; если подключить не удалось, "/" показывает
+    # внятную ошибку вместо пустого 404.
+    try:
+        slam_state = build_state(
+            mode=config.slam_source,
+            ports=config.slam_ports,
+            lock_file=config.slam_lock_file,
+            pin=config.slam_pin,
+            max_attempts=config.slam_max_attempts,
+            lock_sec=config.slam_lock_seconds,
+        )
+        app.extensions["rc_slam"] = slam_state
+        app.register_blueprint(create_blueprint(slam_state, guard=login_required))
+        log.info(
+            "интерфейс RUS SLAM подключён (источник данных: %s)",
+            getattr(slam_state.source, "name", "?"),
+        )
+    except Exception as exc:  # noqa: BLE001 — пульт должен подняться в любом случае
+        log.error("интерфейс RUS SLAM не подключён: %s", exc)
+
+        @app.get("/", endpoint="slam.broken")
+        @login_required
+        def slam_broken():
+            return (
+                render_template(
+                    "error.html",
+                    code=503,
+                    message="Интерфейс робота не подключён: " + str(exc),
+                ),
+                503,
+            )
+
     # ------------------------------ Маршруты ----------------------------- #
     @app.get("/healthz")
     def healthz():
+        slam_state = app.extensions.get("rc_slam")
         return jsonify(
             {
                 "status": "ok",
                 "operators_configured": store.exists(),
-                "panel": "not_implemented",
+                "panel": "rus_slam" if slam_state else "unavailable",
+                "source": getattr(getattr(slam_state, "source", None), "name", None),
             }
         )
 
@@ -235,7 +283,7 @@ def create_app(config: Config | None = None) -> Flask:
     def login():
         user, _via = current_user()
         if user is not None:
-            return redirect(with_st(url_for("panel.dashboard")))
+            return redirect(with_st(home_url()))
 
         if request.method == "POST":
             if not csrf_ok():
@@ -270,7 +318,7 @@ def create_app(config: Config | None = None) -> Flask:
             session[SESSION_ROLE] = operator.role
             session[SESSION_LOGIN_AT] = int(time.time())
             log.info("оператор %s вошёл с %s", operator.username, ip)
-            target = _safe_next(request.args.get("next")) or url_for("panel.dashboard")
+            target = _safe_next(request.args.get("next")) or home_url()
             sep = "&" if "?" in target else "?"
             # just_logged_in — маркер потери cookie; st — резервная сессия для
             # сред, где cookie не сохраняются (iframe-превью)
@@ -296,12 +344,23 @@ def create_app(config: Config | None = None) -> Flask:
         # После выхода токен st в ссылку не подставляется — сессия мертва.
         return redirect(url_for("auth.login"))
 
-    @app.get("/", endpoint="panel.dashboard")
+    @app.get("/panel", endpoint="panel.dashboard")
     @login_required
     def dashboard():
-        """После входа — заглушка: управление роботом ещё не реализовано."""
+        """Служебная страница пульта: кто вошёл и куда идти дальше."""
         user, _via = current_user()
         return render_template("dashboard.html", operator=user)
+
+    @app.get("/exit", endpoint="auth.exit")
+    def exit_get():
+        """Выход по ссылке (для кнопок «Выход» в интерфейсе робота)."""
+        user, via_st = current_user()
+        if via_st and g.st_token:
+            revoke_token(g.st_token)
+        session.clear()
+        if user:
+            log.info("оператор %s вышел%s", user, " (url-сессия)" if via_st else "")
+        return redirect(url_for("auth.login"))
 
     @app.errorhandler(404)
     def not_found(_error):

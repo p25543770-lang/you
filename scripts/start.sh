@@ -69,7 +69,7 @@ if [[ ! -f data/operators.json ]]; then
   fi
   if [[ ! -f data/operators.json ]]; then
     log "спросить пароль негде — создаю учётку автоматически…"
-    ./scripts/create_default_operator.sh operator
+    ./scripts/create_default_operator.sh "${RC_OPERATOR:-admin}"
   fi
 fi
 

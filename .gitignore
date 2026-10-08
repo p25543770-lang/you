@@ -12,3 +12,6 @@ venv/
 data/
 var/
 *.log
+
+# --- Состояние интерфейса RUS SLAM (PIN отсека, журнал) ---
+slam_gui/state/

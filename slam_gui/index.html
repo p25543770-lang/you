@@ -1,0 +1,505 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>RUS SLAM — пульт робота-курьера</title>
+  <!-- Шрифты Google убраны: робот работает без интернета, страницы не должны
+       ничего запрашивать наружу. Интерфейс использует системные шрифты. -->
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <div class="app">
+    <aside>
+      <div class="brand">
+        <div class="brandmark" aria-hidden="true">
+          <svg width="20" height="20" viewBox="0 0 24 24" fill="none">
+            <path d="M4 14h16M7 10h10M9 6h6" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
+            <circle cx="7" cy="18" r="2.2" fill="currentColor"/>
+            <circle cx="17" cy="18" r="2.2" fill="currentColor"/>
+          </svg>
+        </div>
+        <div>
+          <b>RUS SLAM</b>
+          <small>НТЦ АО «АВТОВАЗ»</small>
+        </div>
+      </div>
+      <nav>
+        <button class="active" data-view="dash">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
+          Пульт
+        </button>
+        <button data-view="drive">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3"/></svg>
+          Ходовая
+        </button>
+        <button data-view="mission">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 20V8l8-4 8 4v12"/><path d="M12 22V10"/></svg>
+          Миссия
+          <em id="mission-badge">IDLE</em>
+        </button>
+        <button data-view="sensors">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3v4M12 17v4M3 12h4M17 12h4"/><circle cx="12" cy="12" r="3"/></svg>
+          Сенсоры
+        </button>
+        <button data-view="safety">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M12 3l8 4v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V7l8-4z"/></svg>
+          Безопасность
+        </button>
+        <button data-view="logs">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 4h12v16H6z"/><path d="M9 8h6M9 12h6M9 16h3"/></svg>
+          Журнал
+        </button>
+        <button data-view="console">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="M7 9h4M7 13h7M15 9h2"/><path d="M8 21h8"/></svg>
+          Сервис
+        </button>
+      </nav>
+      <div class="side-status">
+        <div><span class="pulse" id="link-pulse"></span>Связь с базой</div>
+        <small id="link-meta">UART ×4 · симуляция · 20 Гц</small>
+      </div>
+      <div class="profile">
+        <div class="avatar">РС</div>
+        <div>
+          <b>Оператор смены</b>
+          <small>робот-курьер 4WIS/4WID</small>
+        </div>
+      </div>
+    </aside>
+
+    <main>
+      <header>
+        <div>
+          <h1 id="page-title">Пульт управления</h1>
+          <p id="page-sub">Автономный курьер · крабовый ход · ROS 2 Humble / Jazzy</p>
+        </div>
+        <div class="head-actions">
+          <div class="search">Поиск команд <kbd>/</kbd></div>
+          <button class="icon" title="Уведомления"><span class="dot"></span>
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M6 8a6 6 0 1 1 12 0c0 7 3 9 3 9H3s3-2 3-9"/><path d="M10 21a2 2 0 0 0 4 0"/></svg>
+          </button>
+          <button class="refresh" id="btn-main-screen" title="Основной экран робота (киоск)">Основной экран</button>
+          <button class="refresh" id="btn-theme">Тема</button>
+          <button class="refresh" id="btn-refresh">Обновить</button>
+          <!-- добавлено пультом оператора: выход из сессии -->
+          <a class="refresh" href="/exit" title="Завершить сеанс оператора">Выход</a>
+          <button class="estop" id="btn-estop">E-STOP</button>
+        </div>
+      </header>
+
+      <section id="view-dash" class="view dash">
+        <div class="statusline" id="statusline">
+          <span><b>Режим:</b> <span id="mode-label">TELEOP · симуляция</span></span>
+          <span id="status-hint">WASD / стрелки · пробел — стоп · карта — основной экран</span>
+        </div>
+        <div class="metrics compact">
+          <article class="metric">
+            <div class="metric-top"><span>АКБ</span><b id="bat-v">51.2</b><small>В</small></div>
+            <div class="delta" id="bat-delta">SOC 78%</div>
+          </article>
+          <article class="metric">
+            <div class="metric-top"><span>Путь</span><b id="odom-xy">0.00</b><small>м</small></div>
+            <div class="delta" id="odom-delta">x 0 · y 0</div>
+          </article>
+          <article class="metric">
+            <div class="metric-top"><span>Скорость</span><b id="spd">0.0</b><small>км/ч</small></div>
+            <div class="delta" id="spd-delta">ω 0</div>
+          </article>
+          <article class="metric">
+            <div class="metric-top"><span>Гейт</span><b id="gate">OK</b></div>
+            <div class="delta" id="gate-delta">e-stop выкл</div>
+          </article>
+        </div>
+
+        <div class="cockpit">
+          <div class="panel map-panel">
+            <div class="pt">
+              <div>
+                <h3>Карта SLAM</h3>
+                <p>клик — точка маршрута · ПКМ — убрать последнюю</p>
+              </div>
+              <div class="route-btns">
+                <button type="button" id="btn-explore" class="primary">Автоскан</button>
+                <button type="button" id="btn-auto">Старт маршрута</button>
+                <button type="button" id="btn-pause">Пауза</button>
+                <button type="button" id="btn-skip">Пропуск точки</button>
+                <button type="button" id="btn-dock">На базу</button>
+                <button type="button" id="btn-loop">Цикл</button>
+                <button type="button" id="btn-reverse">Реверс точек</button>
+                <button type="button" id="btn-from-trail">След → маршрут</button>
+                <button type="button" id="btn-lights">Фары</button>
+                <button type="button" id="btn-clear-route">Сброс точек</button>
+                <button type="button" id="btn-recenter">К роботу</button>
+                <button type="button" id="btn-shot">Снимок карты</button>
+                <button type="button" id="btn-home">Хоминг</button>
+              </div>
+            </div>
+            <div class="route-bar">
+              <input id="route-name" placeholder="имя группы, напр. цех-А" />
+              <button type="button" id="btn-save-route">Сохранить группу</button>
+              <select id="route-list"></select>
+              <button type="button" id="btn-load-route">Загрузить</button>
+              <button type="button" id="btn-del-route">Удалить</button>
+            </div>
+            <div class="prog">
+              <div class="prog-head">
+                <div>
+                  <b>Программа доставки</b>
+                  <p class="prog-help">Соберите шаги кнопками ниже — они появятся списком. Потом нажмите зелёную <em>«Запустить мою программу»</em>. Робот пойдёт по списку сверху вниз. Жёлтые кнопки нужны только когда он уже стоит на А или Б.</p>
+                </div>
+                <span id="cargo-state" class="cargo-pill">отсек пустой</span>
+              </div>
+              <div class="prog-sec">1. По желанию отметьте площадки на карте (клик после кнопки)</div>
+              <div class="prog-add place">
+                <button type="button" id="place-A">площадка А — загрузка</button>
+                <button type="button" id="place-B">площадка Б — выгрузка</button>
+                <button type="button" id="place-D">база / зарядка</button>
+                <button type="button" id="place-S">поставить робота сюда</button>
+              </div>
+              <div class="prog-sec">2. Нажмите шаги — они добавятся в список</div>
+              <div class="prog-add">
+                <button type="button" data-blk="goA">+ ехать на А</button>
+                <button type="button" data-blk="load">+ взять груз</button>
+                <button type="button" data-blk="goB">+ ехать на Б</button>
+                <button type="button" data-blk="unload">+ сдать груз</button>
+                <button type="button" data-blk="goP">+ ехать по точкам P</button>
+                <button type="button" data-blk="wait">+ пауза 2 с</button>
+                <button type="button" data-blk="dock">+ на базу</button>
+                <button type="button" data-blk="charge">+ зарядиться</button>
+                <button type="button" data-blk="loop">+ повторять сначала</button>
+              </div>
+              <div class="prog-sec">3. Ваша программа <span id="prog-now"></span></div>
+              <ol class="prog-list" id="prog-list"></ol>
+              <div class="prog-run">
+                <button type="button" class="primary" id="btn-prog-run">Пуск</button>
+                <button type="button" id="btn-prog-stop">Стоп</button>
+                <button type="button" id="btn-prog-clear">Сбросить очередь</button>
+                <button type="button" id="btn-load-act" class="confirm">Подтвердить: груз взят на А</button>
+                <button type="button" id="btn-unload-act" class="confirm">Подтвердить: груз сдан на Б</button>
+              </div>
+            </div>
+            <div class="events" id="events"></div>
+            <div class="feed map">
+              <span class="live maplive">MAPPING</span>
+              <canvas id="map" width="960" height="720"></canvas>
+              <div class="hud-cam">
+                <span>карта неизвестна</span>
+                <span>лидар 360°</span>
+              </div>
+              <div class="feed-cap">перетащите карту · колесо — масштаб · клик — точка</div>
+            </div>
+          </div>
+          <div class="side-col">
+            <div class="cams">
+            <div class="feed cam">
+              <span class="live">CAM-F</span>
+              <canvas id="cam" width="480" height="160"></canvas>
+              <div class="hud-cam"><span>перед</span><span id="cam-hud">sim</span></div>
+              <div class="feed-cap">камера спереди</div>
+            </div>
+            <div class="feed cam">
+              <span class="live">CAM-R</span>
+              <canvas id="cam-rear" width="480" height="160"></canvas>
+              <div class="hud-cam"><span>зад</span><span>sim</span></div>
+              <div class="feed-cap">камера сзади</div>
+            </div>
+            </div>
+            <div class="panel tele-panel">
+              <div class="pt">
+                <div>
+                  <h3>Телеоперация</h3>
+                  <p>4WIS · стик и WASD</p>
+                </div>
+              </div>
+              <div class="teleop">
+                <div class="stick-wrap">
+                  <canvas id="stick" width="180" height="180"></canvas>
+                  <canvas id="chassis" width="200" height="200"></canvas>
+                  <div class="stick-vals"><span id="cmd-lin">vx 0.00</span><span id="cmd-ang">wz 0.00</span><span id="cmd-lat">vy 0.00</span></div>
+                  <div class="stick-vals" id="crab-hint">4WIS · обычный ход</div>
+                </div>
+                <div class="keys">
+                  <div class="row"><kbd>W</kbd> вперёд</div>
+                  <div class="row"><kbd>A</kbd> ↺ <kbd>S</kbd> <kbd>D</kbd> ↻</div>
+                  <div class="row"><kbd>Q</kbd>/<kbd>E</kbd> стрейф · <kbd>Space</kbd></div>
+                  <label class="toggle"><input type="checkbox" id="crab" /> Краб</label>
+                  <label class="range">до 18 км/ч <input type="range" id="vmax" min="1" max="5" step="0.1" value="5" /></label>
+                  <label class="range">ехать от стены <b id="clr-val">0.70 м</b>
+                    <input type="range" id="clearance" min="0.40" max="1.40" step="0.05" value="0.70" />
+                  </label>
+                  <label class="range">груз <b id="pay-val">80 кг</b>
+                    <input type="range" id="payload" min="0" max="250" step="10" value="80" />
+                  </label>
+                  <label class="toggle"><input type="checkbox" id="beacon" checked /> Янтарный маяк</label>
+                  <label class="toggle"><input type="checkbox" id="cargo" checked /> Замок отсека</label>
+                  <button type="button" id="btn-horn" class="primary" style="margin-top:8px;width:100%">Сигнал 85 дБ</button>
+                  <label class="range">заряд до <b id="chg-val">80%</b>
+                    <input type="range" id="chg-target" min="40" max="100" step="5" value="80" />
+                  </label>
+                  <button type="button" id="btn-charge" style="margin-top:6px;width:100%">На базу · зарядиться</button>
+                </div>
+              </div>
+              <div class="modules" id="modules"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section id="view-drive" class="view hidden">
+        <div class="cards four">
+          <article class="panel pad" id="mod-cards"></article>
+        </div>
+      </section>
+
+      <section id="view-mission" class="view hidden">
+        <div class="panel">
+          <div class="pt"><div><h3>FSM доставки</h3><p>реакции на знаки и светофор</p></div></div>
+          <div class="fsm" id="fsm"></div>
+          <div class="mission-actions">
+            <button class="primary" id="btn-start-mission">Старт миссии</button>
+            <button id="btn-pause-mission">Пауза Nav2</button>
+            <button id="btn-abort">Прервать</button>
+          </div>
+        </div>
+      </section>
+
+      <section id="view-sensors" class="view hidden">
+        <div class="grid">
+          <div class="panel">
+            <div class="pt"><h3>Лидар ЛДС-01</h3></div>
+            <canvas id="lidar" width="720" height="420"></canvas>
+          </div>
+          <div class="panel">
+            <div class="pt"><h3>Детекции</h3></div>
+            <div class="table" id="dets"></div>
+          </div>
+        </div>
+      </section>
+
+      <section id="view-safety" class="view hidden">
+        <div class="metrics">
+          <article class="metric"><div class="mi red"></div><div class="metric-top"><span>E-stop</span><b id="estop-state">ВЫКЛ</b></div></article>
+          <article class="metric"><div class="mi amber"></div><div class="metric-top"><span>Вотчдог связи</span><b id="wd">42 мс</b></div></article>
+          <article class="metric"><div class="mi green"></div><div class="metric-top"><span>Порог АКБ</span><b>44.0 В</b></div></article>
+          <article class="metric"><div class="mi blue"></div><div class="metric-top"><span>CRC ошибок</span><b id="crc">0</b></div></article>
+        </div>
+        <p class="hint">Гейт /cmd_vel: e-stop, вотчдог UART, низкий SOC — публикация Twist блокируется.</p>
+      </section>
+
+      <section id="view-logs" class="view hidden">
+        <div class="panel logpanel">
+          <div class="pt"><h3>Журнал</h3></div>
+          <div class="logs" id="logs"></div>
+        </div>
+      </section>
+
+      <section id="view-console" class="view hidden">
+        <!-- И-1. Панель быстрых действий: всегда на виду, живые состояния -->
+        <div class="csl-toolbar" id="csl-toolbar">
+          <span class="csl-chip csl-chip-closed" id="csl-tb-estop">движение разрешено</span>
+          <span class="csl-chip csl-chip-closed" id="csl-tb-lock">ячейка: закрыта</span>
+          <span class="csl-chip csl-chip-closed" id="csl-tb-stand" title="Нажмите, чтобы переключить сервисный режим">автономия вкл</span>
+          <span class="csl-chip csl-chip-open" id="csl-tb-light">светофор: зелёный</span>
+          <canvas id="csl-tb-ring" width="34" height="34" title="SOC АКБ"></canvas>
+          <span class="csl-tb-text" id="csl-tb-sign">знаки: —</span>
+          <span class="csl-tb-text" id="csl-tb-trip">рейсы: 0</span>
+          <span class="csl-chip csl-chip-open hidden" id="csl-tb-peer">второе окно пульта активно</span>
+          <span class="csl-tb-spacer"></span>
+          <button type="button" id="csl-tb-stop" class="csl-danger" title="Alt+X">Стоп все</button>
+          <button type="button" id="csl-tb-palette" title="Ctrl+K">Команды</button>
+          <button type="button" id="csl-tb-sound" aria-pressed="true" title="Alt+Z">🔊 звук</button>
+          <button type="button" id="csl-tb-ui" aria-pressed="false" title="Alt+A">А+ крупный</button>
+          <button type="button" id="csl-tb-help" title="Горячие клавиши">?</button>
+        </div>
+
+        <div class="csl-grid">
+          <!-- 1. Ячейка хранения -->
+          <div class="panel csl-panel">
+            <div class="pt">
+              <div>
+                <h3>Ячейка хранения · замок</h3>
+                <p>пароль, QR/RFID, журнал доступа</p>
+              </div>
+              <span class="csl-chip csl-chip-closed" id="csl-lock-chip">ЗАКРЫТО</span>
+            </div>
+            <div class="csl-body">
+              <div class="csl-pin-display">
+                <div class="csl-pin-dots" id="csl-pin-dots" aria-live="polite">— — — —</div>
+                <div class="csl-pin-row">
+                  <canvas id="csl-lock-ring" width="30" height="30" title="Автозакрытие"></canvas>
+                  <input class="csl-pin-hidden" id="csl-pin-input" type="password" inputmode="numeric" autocomplete="off" aria-label="PIN ячейки" />
+                  <small id="csl-lock-kind">Последний доступ: —</small>
+                </div>
+              </div>
+              <div class="csl-keypad" id="csl-keypad"></div>
+              <div class="csl-lock-actions">
+                <button type="button" class="primary" id="csl-pin-open">Открыть ячейку</button>
+                <button type="button" id="csl-pin-close">Закрыть</button>
+                <button type="button" id="csl-pin-qr" title="Имитация считывания QR-метки">QR</button>
+                <button type="button" id="csl-pin-rfid" title="Имитация считывания RFID-метки">RFID</button>
+                <button type="button" id="csl-pin-extend" title="Отложить автозакрытие">+30 с</button>
+              </div>
+              <div class="csl-msg" id="csl-pin-msg" aria-live="polite">Введите PIN и нажмите «Открыть ячейку». Заводской PIN — 2580.</div>
+              <div class="csl-timer" id="csl-lock-timer" aria-live="polite"></div>
+
+              <details class="csl-details">
+                <summary>Смена PIN / сброс</summary>
+                <div class="csl-pin-change">
+                  <input id="csl-pin-cur" type="password" placeholder="текущий PIN" inputmode="numeric" autocomplete="off" />
+                  <input id="csl-pin-new" type="password" placeholder="новый PIN (4–8 цифр)" inputmode="numeric" autocomplete="off" />
+                  <input id="csl-pin-rep" type="password" placeholder="повтор нового" inputmode="numeric" autocomplete="off" />
+                  <button type="button" id="csl-pin-change">Сменить PIN</button>
+                  <button type="button" id="csl-pin-reset">Сброс к 2580</button>
+                </div>
+              </details>
+
+              <details class="csl-details" open>
+                <summary>Журнал доступа (аудит)</summary>
+                <table class="csl-table">
+                  <thead><tr><th>Время</th><th>Действие</th><th>Итог</th><th>Примечание</th></tr></thead>
+                  <tbody id="csl-audit"></tbody>
+                </table>
+              </details>
+            </div>
+          </div>
+
+          <!-- 2. Двигатели -->
+          <div class="panel csl-panel csl-wide">
+            <div class="pt">
+              <div>
+                <h3>Двигатели · ручная подача команд</h3>
+                <p>4 модуля × рулевой NEMA 23 + тяговый BLDC · кадр 10 Б, CRC16/Modbus</p>
+              </div>
+              <label class="toggle csl-stand-toggle">
+                <input type="checkbox" id="csl-stand" /> Сервисный режим · стенд
+              </label>
+            </div>
+            <div class="csl-group-ops">
+              <button type="button" data-csl="home-all">Хоминг всех</button>
+              <label class="csl-inline">
+                синхронный угол, °
+                <input type="number" id="csl-steer-all" value="0" min="-180" max="180" step="5" />
+              </label>
+              <button type="button" data-csl="sync-steer">Задать всем</button>
+              <button type="button" data-csl="help">Справка</button>
+              <span class="csl-note">тяга на кнопках «−20 %/+20 %» подаётся только при удержании («мёртвая рука»)</span>
+            </div>
+            <div class="csl-mods" id="csl-mods"></div>
+            <p class="hint">Каждый «Ввод» формирует реальный кадр <code>AA 55 | ID | угол i16BE | ШИМ i16BE | флаги | CRC16</code> и показывает его HEX в карточке и в журнале. Ввод вне диапазона подсвечивается и приводится к границе. Телеметрию модуль отдаёт кадром 16 Б на 20 Гц.</p>
+          </div>
+
+          <!-- 3. АКБ -->
+          <div class="panel csl-panel">
+            <div class="pt">
+              <div>
+                <h3>АКБ 12S3P LiFePO4</h3>
+                <p>36 × 32700 · 38,4 В · 18,6 А·ч · 714,2 Вт·ч</p>
+              </div>
+              <span class="csl-level csl-green" id="csl-bat-level">НОРМА</span>
+            </div>
+            <div class="csl-body">
+              <div class="csl-bat-head">
+                <div><span>Напряжение</span><b id="csl-bat-v">—</b><small id="csl-bat-v-sub">—</small></div>
+                <div><span>SOC</span><b id="csl-bat-soc">—</b><small id="csl-bat-i">—</small></div>
+              </div>
+              <div class="csl-bar"><i class="csl-bar-fill csl-green" id="csl-bat-bar" style="width:0%"></i></div>
+              <div class="csl-bat-grid">
+                <div><span>Мощность / остаток</span><b id="csl-bat-p">—</b></div>
+                <div><span>Температура · циклы</span><b id="csl-bat-temp">—</b></div>
+                <div><span>Запас хода</span><b id="csl-bat-range">—</b></div>
+                <div><span>Счётчик циклов</span><b id="csl-bat-cycles">—</b></div>
+              </div>
+              <canvas id="csl-bat-chart" width="420" height="90"></canvas>
+              <canvas id="csl-speed-chart" width="420" height="70"></canvas>
+              <table class="csl-table">
+                <thead><tr><th>Модуль</th><th>U, В</th><th>I, А</th><th>t, °C</th><th>статус</th></tr></thead>
+                <tbody id="csl-bat-mods"></tbody>
+              </table>
+              <div class="csl-lock-actions">
+                <button type="button" class="primary" data-csl="charge">На базу · зарядиться</button>
+                <button type="button" data-csl="cargo-out">Груз сдан · закрыть отсек</button>
+              </div>
+            </div>
+          </div>
+
+          <!-- 4. Статистика и журнал -->
+          <div class="panel csl-panel csl-wide">
+            <div class="pt">
+              <div>
+                <h3>Статистика работы</h3>
+                <p>рейсы · энергия · события · выгрузка отчёта</p>
+              </div>
+              <span class="csl-note" id="csl-stats-updated">—</span>
+            </div>
+            <div class="csl-body">
+              <div class="csl-kpi" id="csl-kpi"></div>
+              <div class="csl-stats-cols">
+                <div>
+                  <h4>Энергия по последним рейсам</h4>
+                  <canvas id="csl-trip-chart" width="560" height="120"></canvas>
+                  <div class="csl-lock-actions">
+                    <button type="button" data-csl="csv">Отчёт CSV</button>
+                    <button type="button" data-csl="json">Отчёт JSON</button>
+                    <button type="button" class="primary" data-csl="print">Отчёт (печать)</button>
+                    <button type="button" class="csl-danger" data-csl="reset">Сбросить статистику</button>
+                  </div>
+                </div>
+                <div>
+                  <h4>Последние рейсы</h4>
+                  <table class="csl-table">
+                    <thead><tr><th>№</th><th>Начало</th><th>Маршрут</th><th>Путь</th><th>Вт·ч</th><th>Движение</th><th>Груз</th><th>Итог</th></tr></thead>
+                    <tbody id="csl-trips"></tbody>
+                  </table>
+                </div>
+              </div>
+
+              <!-- И-8. Журнал сервисных действий -->
+              <h4 class="csl-jh">Журнал сервисных действий</h4>
+              <div class="csl-jtools">
+                <button type="button" data-jfilter="all" class="on">Все</button>
+                <button type="button" data-jfilter="ok">Успех</button>
+                <button type="button" data-jfilter="warn">Внимание</button>
+                <button type="button" data-jfilter="err">Ошибки</button>
+                <input id="csl-journal-q" type="search" placeholder="поиск по журналу…" />
+                <button type="button" id="csl-copy-frame" title="Скопировать последний кадр UART">Копировать кадр</button>
+                <button type="button" id="csl-journal-clear">Очистить</button>
+              </div>
+              <div class="csl-journal" id="csl-journal-rows" role="log" aria-live="polite"></div>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+  </div>
+  <div class="toast hidden" id="toast"></div>
+
+  <!-- И-2. Палитра команд (Ctrl+K / «/») -->
+  <div class="csl-overlay hidden" id="csl-palette" role="dialog" aria-modal="true" aria-label="Палитра команд">
+    <div class="csl-palette-card">
+      <input id="csl-palette-input" type="text" placeholder="Введите команду: вкладка, стоп, отчёт, стенд…" autocomplete="off" />
+      <div class="csl-palette-list" id="csl-palette-list"></div>
+      <div class="csl-palette-foot">↑↓ выбор · Enter выполнить · Esc закрыть</div>
+    </div>
+  </div>
+
+  <!-- И-7. Модальное окно окна «Сервис» -->
+  <div class="csl-overlay hidden" id="csl-modal" role="dialog" aria-modal="true" aria-hidden="true" aria-labelledby="csl-modal-title">
+    <div class="csl-modal-card" id="csl-modal-card">
+      <div class="csl-modal-head">
+        <b id="csl-modal-title">Подтверждение</b>
+        <button type="button" id="csl-modal-x" aria-label="Закрыть">×</button>
+      </div>
+      <div class="csl-modal-body" id="csl-modal-body"></div>
+      <div class="csl-modal-foot">
+        <button type="button" class="primary" id="csl-modal-ok">Подтвердить</button>
+        <button type="button" id="csl-modal-cancel">Отмена</button>
+      </div>
+    </div>
+  </div>
+  <script src="console-core.js"></script>
+  <script src="vision.js"></script>
+  <script src="app.js"></script>
+  <script src="console.js"></script>
+</body>
+</html>
