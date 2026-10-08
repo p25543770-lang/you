@@ -63,11 +63,11 @@ function makeEl(id) {
 }
 
 const registry = new Map();
-// Разметка киоска: панель двигателей, шапка, подвал карты. Кольцо АКБ с экрана
-// убрано (колонка АКБ заменена картой и панелью ИИ), поэтому его id здесь нет.
+// Разметка киоска: панель двигателей, АКБ, карта, панель ИИ и шапка.
 ['sc-motor-grid', 'sc-motors-sum', 'sc-clock', 'sc-mode', 'sc-data', 'sc-link-dot',
- 'sc-link-text', 'sc-console-link', 'sc-map', 'sc-ai-panel',
- 'sc-map-stats', 'sc-map-pose', 'sc-map-goal'].forEach((id) => {
+ 'sc-link-text', 'sc-console-link', 'sc-ring-fill', 'sc-soc', 'sc-soc-label',
+ 'sc-volts', 'sc-amps', 'sc-range', 'sc-batt-state', 'sc-batt-hint',
+ 'sc-map', 'sc-ai-panel', 'sc-map-stats', 'sc-map-pose', 'sc-map-goal'].forEach((id) => {
   registry.set(id, makeEl(id));
 });
 registry.get('sc-motor-grid').id = 'sc-motor-grid';

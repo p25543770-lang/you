@@ -456,6 +456,37 @@
         + ' · модули на связи: ' + online + ' из ' + motors.length;
     }
 
+    /* АКБ: кольцо (заряд и уровень), строки, подсказка о порогах */
+    const b = d.battery || {};
+    const soc = Number(b.soc || 0);
+    const C = 2 * Math.PI * 60;
+    const fill = $('sc-ring-fill');
+    if (fill) {
+      fill.style.strokeDasharray = (soc / 100 * C).toFixed(1) + ' ' + C.toFixed(1);
+      fill.style.stroke = soc < 20 ? 'var(--err)' : soc < 40 ? 'var(--warn)' : 'var(--ok)';
+    }
+    const socEl = $('sc-soc');
+    if (socEl) socEl.innerHTML = Math.round(soc) + '<span>%</span>';
+    const label = $('sc-soc-label');
+    if (label) label.textContent = String(b.level || '—').toLowerCase();
+    const volts = $('sc-volts');
+    if (volts) volts.textContent = fmt(b.volts, 1) + ' В';
+    const amps = $('sc-amps');
+    if (amps) amps.textContent = fmt(b.amps, 1) + ' А';
+    const range = $('sc-range');
+    if (range) range.textContent = fmt(b.rangeKm, 1) + ' км';
+    const bstate = $('sc-batt-state');
+    if (bstate) bstate.textContent = b.state || '—';
+    const hint = $('sc-batt-hint');
+    if (hint) {
+      const v = Number(b.volts || 0);
+      hint.textContent = v && v < 33.5 ? 'ниже аварийного порога 33,5 В — движение запрещено'
+        : v && v < 35.5 ? 'ниже порога 35,5 В — «ползучий» режим'
+        : 'пороги: 35,5 В предупреждение · 33,5 В авария';
+      hint.style.color = v && v < 33.5 ? 'var(--err)' : v && v < 35.5 ? 'var(--warn)' : '';
+    }
+
+
     /* карта цеха: клетки и поза робота — в модуле map.js */
     if (window.RSMap && RSMap.tick) RSMap.tick(d);
 

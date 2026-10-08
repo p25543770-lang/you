@@ -81,12 +81,13 @@
 
   function fit(state, w, h) {
     const world = (state && state.map && state.map.world) || { w: 4.8, h: 3.2 };
-    const pad = 18;
-    const scale = Math.min((w - pad * 2) / world.w, (h - pad * 2) / world.h);
+    const pad = 12;
+    const padTop = 26;   // полоска под подпись цеха и размера клетки
+    const scale = Math.min((w - pad * 2) / world.w, (h - padTop - pad) / world.h);
     const ox = (w - world.w * scale) / 2;
     // ось y смотрит вверх: на экране она вниз, поэтому переворачиваем
-    const oy = (h + world.h * scale) / 2;
-    return { scale, ox, oy, world };
+    const oy = padTop + (h - padTop - pad + world.h * scale) / 2;
+    return { scale, ox, oy, padTop, world };
   }
 
   function toScreen(f, x, y) {
@@ -101,6 +102,18 @@
     g.arcTo(x, y + h, x, y, r);
     g.arcTo(x, y, x + w, y, r);
     g.closePath();
+  }
+
+/** Подпись цеха у рамки: на широком полотне свободные поля не пустуют. */
+/** Подпись полотна: что нарисовано и в каком масштабе (цифры — с бэкенда). */
+  function drawCaption(g, f, state) {
+    const room = (state && state.map) || {};
+    g.fillStyle = COL.text2;
+    g.font = '11px ui-monospace, monospace';
+    g.fillText('ЦЕХ ' + f.world.w.toFixed(1).replace('.', ',') + ' × ' +
+      f.world.h.toFixed(1).replace('.', ',') + ' М · КЛЕТКА ' +
+      String(room.res || 0.05).replace('.', ',') + ' М · ИСТОЧНИК «' +
+      String(room.source || '—') + '»', f.ox, f.padTop - 9);
   }
 
   function drawGrid(g, f) {
@@ -235,6 +248,7 @@
     ctx.fillStyle = COL.bg;
     ctx.fillRect(0, 0, w, h);
     drawGrid(ctx, f);
+    if (room.ok) drawCaption(ctx, f, state);
     if (room.ok) {
       drawCells(ctx, f, state, room.res);
       drawTrail(ctx, f, state);

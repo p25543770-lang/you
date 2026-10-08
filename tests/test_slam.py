@@ -669,13 +669,12 @@ def test_real_sources_admit_they_have_no_ai_or_map():
     assert payload["map"]["reason"]
 
 
-def test_kiosk_shows_the_map_and_the_ai_instead_of_the_battery_column():
-    """На киоске карта цеха и панель ИИ, колонки АКБ больше нет.
+def test_kiosk_puts_the_map_under_the_motors_and_the_battery_above_the_ai():
+    """Раскладка киоска: карта — под двигателями, АКБ — над панелью ИИ.
 
-    Просьба: «на место правой колонки — карта и ИИ». АКБ при этом не потеряна:
-    заряд видно лампой и графиком в приборной линейке, а панели отдано место
-    под карту и сеть. Панель ИИ держит контейнер #sc-ai-panel — разметку
-    строит модуль gui/ai_panel.js.
+    Просьба: «карта должна быть под двигателями, а где карта от лидара — там
+    состояние АКБ». Широкая колонка отвечает за машину (модули и карта цеха),
+    узкая — за борт (заряд и сеть на 32 нейрона).
     """
     from pathlib import Path
 
@@ -684,22 +683,34 @@ def test_kiosk_shows_the_map_and_the_ai_instead_of_the_battery_column():
     css = (root / "slam_gui" / "main.css").read_text(encoding="utf-8")
     js = (root / "slam_gui" / "main.js").read_text(encoding="utf-8")
 
-    assert 'id="sc-map"' in html and "<canvas" in html[html.index('id="sc-map"') - 60:html.index('id="sc-map"')]
-    assert 'id="sc-ai-panel"' in html
-    assert '<script src="map.js"></script>' in html
-    assert '<script src="ai_panel.js"></script>' in html
+    # широкая колонка: двигатели, под ними карта
+    assert 'class="sc-main"' in html and 'class="sc-side"' in html
+    main_col = html[html.index('class="sc-main"'):html.index('class="sc-side"')]
+    assert "sc-motors" in main_col and "sc-map-panel" in main_col
+    assert main_col.index("sc-motors") < main_col.index("sc-map-panel"), "карта должна быть под двигателями"
+    assert 'id="sc-map"' in main_col and "<canvas" in main_col
+
+    # узкая колонка: состояние АКБ, под ней ИИ
+    side_col = html[html.index('class="sc-side"'):]
+    assert 'class="sc-panel sc-batt"' in side_col
+    assert 'id="sc-ai-panel"' in side_col
+    assert side_col.index("sc-batt") < side_col.index('id="sc-ai-panel"'), "АКБ должна быть над панелью ИИ"
+
+    # АКБ вернулась целиком: кольцо, проценты, напряжение, ток, запас, пороги
+    for element in ("sc-ring-fill", "sc-soc", "sc-soc-label", "sc-volts", "sc-amps",
+                    "sc-range", "sc-batt-state", "sc-batt-hint"):
+        assert element in html, element
+    assert "sc-ring-fill" in js and "sc-batt-hint" in js, "main.js снова рисует АКБ"
+
+    # модули карты и ИИ на месте
+    assert '<script src="map.js"></script>' in html and '<script src="ai_panel.js"></script>' in html
     assert "RSMap.tick" in js and "RSAiPanel.render" in js
 
-    # колонка АКБ с киоска убрана целиком: кольцо, проценты, пороги
-    for gone in ("sc-ring-fill", "sc-soc", "sc-volts", "sc-batt-hint", 'class="sc-panel sc-batt"'):
-        assert gone not in html, gone
-    assert "sc-batt" not in css or ".sc-batt" not in html
-
-    # сетка: слева двигатели, справа столбец карты и ИИ
-    assert ".sc-side" in css and "grid-template-rows" in css[css.index(".sc-side"):css.index(".sc-side") + 200]
-    assert re.search(r"\.sc-ai-neurons \{[^}]*flex-wrap: wrap", css, re.S), "нейроны лентой"
-    assert re.search(r"\.sc-ai-n \{[^}]*width: 18px", css, re.S), "клетка нейрона своего размера"
-    assert ".sc-map-wrap" in css and "#sc-map" in css
+    # сетка: у каждой колонки своя раскладка строк
+    assert re.search(r"\.sc-main \{ grid-template-rows: auto minmax\(0, 1fr\); \}", css)
+    assert re.search(r"\.sc-side \{ grid-template-rows: auto minmax\(0, 1fr\); \}", css)
+    assert re.search(r"\.sc-map-wrap \{[^}]*flex: 1", css, re.S)
+    assert re.search(r"#sc-map \{[^}]*width: 100%", css, re.S)
 
 
 def test_ai_panel_and_map_render_the_board_data():

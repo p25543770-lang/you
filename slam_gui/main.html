@@ -19,7 +19,12 @@
       • Столбик слева — вход в инженерный пульт (вертикальная кнопка);
       • Приборная линейка — источник данных, частота, возраст выборки, лампы;
       • Двигатели    — 4 модуля: угол, об/мин, температура, состояние;
-      • АКБ          — заряд в процентах, напряжение, ток, запас хода.
+      • Карта цеха   — что уже разведал дальномер: клетки, робот, площадки.
+                       Карта идёт под двигателями, в широкой колонке: на неё
+                       смотрят вместе с колёсами, а место того стоит;
+      • АКБ          — заряд в процентах, напряжение, ток, запас хода;
+      • ИИ           — сеть на 32 нейрона (10 → 24 → 8): команда, обучение,
+                       связь с ROS 2 (топик /cmd_vel) — под состоянием АКБ.
   Строка состояния (маршрут, тяга, журнал) в подвале убрана: на дисплее борта
   её дублировала приборная линейка и панели, а место занимала много.
   Доступ к инженерному пульту — вертикальный столбик слева, а не ссылка внизу.
@@ -95,19 +100,20 @@
 
     <!-- ================= Основная сетка ================= -->
     <main class="sc-grid">
-      <section class="sc-panel sc-motors" aria-label="Двигатели">
-        <div class="sc-panel-head">
-          <h1>Двигатели</h1>
-          <span class="sc-note">4 модуля · руль NEMA 23 + тяга BLDC · схема: вид сверху, перед вверху</span>
-        </div>
-        <div class="sc-motor-grid" id="sc-motor-grid"></div>
-        <div class="sc-motor-foot">
-          <span>кадр телеметрии 16 Б · CRC16/Modbus · 20 Гц</span>
-          <span id="sc-motors-sum">в движении: 0 из 4</span>
-        </div>
-      </section>
+      <!-- Левая колонка: двигатели, под ними — карта цеха -->
+      <div class="sc-main">
+        <section class="sc-panel sc-motors" aria-label="Двигатели">
+          <div class="sc-panel-head">
+            <h1>Двигатели</h1>
+            <span class="sc-note">4 модуля · руль NEMA 23 + тяга BLDC · схема: вид сверху, перед вверху</span>
+          </div>
+          <div class="sc-motor-grid" id="sc-motor-grid"></div>
+          <div class="sc-motor-foot">
+            <span>кадр телеметрии 16 Б · CRC16/Modbus · 20 Гц</span>
+            <span id="sc-motors-sum">в движении: 0 из 4</span>
+          </div>
+        </section>
 
-      <div class="sc-side">
         <!-- Карта цеха: клетки размечает дальномер, рисует модуль map.js -->
         <section class="sc-panel sc-map-panel" aria-label="Карта цеха">
           <div class="sc-panel-head">
@@ -129,9 +135,40 @@
             <span id="sc-map-goal">задание —</span>
           </div>
         </section>
+      </div>
 
-        <!-- Искусственный интеллект: сеть 32 нейрона ведёт машину, разметку
-             панели строит модуль ai_panel.js. -->
+      <!-- Правая колонка: состояние АКБ, под ней — искусственный интеллект.
+           Разметку панели ИИ строит модуль ai_panel.js. -->
+      <div class="sc-side">
+        <section class="sc-panel sc-batt" aria-label="Аккумулятор">
+          <div class="sc-panel-head">
+            <h1>Аккумулятор</h1>
+            <span class="sc-note">LiFePO4 12S3P · 714 Вт·ч</span>
+          </div>
+
+          <div class="sc-ring-wrap">
+            <svg class="sc-ring" viewBox="0 0 140 140" role="img" aria-label="Заряд аккумулятора">
+              <circle class="sc-ring-bg" cx="70" cy="70" r="60" />
+              <circle class="sc-ring-fill" id="sc-ring-fill" cx="70" cy="70" r="60" />
+            </svg>
+            <div class="sc-ring-center">
+              <b id="sc-soc">78<span>%</span></b>
+              <small id="sc-soc-label">заряд</small>
+            </div>
+          </div>
+
+          <div class="sc-batt-rows">
+            <div class="sc-batt-row"><span>Напряжение</span><b id="sc-volts">41,2 В</b></div>
+            <div class="sc-batt-row"><span>Ток</span><b id="sc-amps">12,4 А</b></div>
+            <div class="sc-batt-row"><span>Запас хода</span><b id="sc-range">14 км</b></div>
+            <div class="sc-batt-row"><span>Состояние</span><b id="sc-batt-state">разряд</b></div>
+          </div>
+
+          <div class="sc-batt-foot">
+            <span id="sc-batt-hint">пороги: 35,5 В предупреждение · 33,5 В авария</span>
+          </div>
+        </section>
+
         <section class="sc-panel sc-ai" id="sc-ai-panel" aria-label="Искусственный интеллект"></section>
       </div>
     </main>
