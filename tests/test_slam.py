@@ -726,6 +726,25 @@ def test_ai_panel_and_map_render_the_board_data():
     assert "ошибок" not in result.stdout
 
 
+def test_console_map_shows_the_board_map_read_only():
+    """Пульт рисует карту борта и честно не даёт рисовать по ней маршрут.
+
+    Карту размечает дальномер робота, маршрут оператора — отдельная история;
+    по карте борта клик только читает клетку (координаты и состояние).
+    """
+    from pathlib import Path
+
+    root = Path(__file__).resolve().parent.parent
+    app_js = (root / "slam_gui" / "app.js").read_text(encoding="utf-8")
+    map_js = (root / "slam_gui" / "map.js").read_text(encoding="utf-8")
+    index = (root / "slam_gui" / "index.html").read_text(encoding="utf-8")
+
+    assert '<script src="map.js"></script>' in index
+    assert "mapFromBoard" in app_js and "reportBoardCell" in app_js
+    assert app_js.count("if (mapFromBoard()") >= 4, "обработчики карты должны проверять источник"
+    assert "worldAt" in map_js and "cellAt" in map_js
+
+
 def test_dash_cockpit_fills_the_screen_without_empty_columns():
     """Экран «Пульт» заполняет окно: колонки одной высоты, без пустых полей.
 

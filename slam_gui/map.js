@@ -239,6 +239,32 @@
     return !!room.ok;
   }
 
+  /** Состояние клетки по мировым координатам — для подсказок оператору. */
+  function cellAt(x, y) {
+    if (!cells) return null;
+    const res = (last && last.map && last.map.res) || 0.05;
+    const cx = Math.floor(x / res), cy = Math.floor(y / res);
+    if (cx < 0 || cy < 0 || cx >= cellsSize[0] || cy >= cellsSize[1]) return null;
+    const v = cells[cy * cellsSize[0] + cx];
+    return {
+      value: v,
+      text: v === OCCUPIED ? 'препятствие' : v === FREE ? 'свободно' : 'не разведано',
+    };
+  }
+
+  /** Мировые координаты точки канвы (по ней оператор читает обстановку). */
+  function worldAt(clientX, clientY) {
+    if (!canvas || !last || !canvas.getBoundingClientRect) return null;
+    const rect = canvas.getBoundingClientRect();
+    if (!rect.width || !rect.height) return null;
+    const f = fit(last, canvas.width, canvas.height);
+    const u = (clientX - rect.left) * (canvas.width / rect.width);
+    const v = (clientY - rect.top) * (canvas.height / rect.height);
+    const point = { x: (u - f.ox) / f.scale, y: (f.oy - v) / f.scale };
+    point.cell = cellAt(point.x, point.y);
+    return point;
+  }
+
   function updateFoot(state) {
     const room = (state && state.map) || {};
     const set = (id, text) => { const e = el(id); if (e) e.textContent = text; };
@@ -309,7 +335,7 @@
   }
 
   window.RSMap = {
-    tick, start, stop, active, draw, decodeRle, attach, autostart,
+    tick, start, stop, active, draw, decodeRle, attach, autostart, worldAt, cellAt,
     get version() { return cellsVersion; },
     get hasCells() { return !!cells; },
   };

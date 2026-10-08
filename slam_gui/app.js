@@ -241,14 +241,28 @@ document.getElementById("btn-clear-route").addEventListener("click", () => {
 const mapCanvas = document.getElementById("map");
 let mapDrag = null;
 mapCanvas.style.cursor = "grab";
+
+/* Карта борта — только на просмотр: клетки размечает дальномер робота, а не
+   оператор. Рисовать по ней маршрут нельзя, зато клик читает обстановку:
+   координаты точки и что в этой клетке (свободно / препятствие / не разведано). */
+function mapFromBoard() {
+  return !!(window.RSMap && window.RSMap.active && window.RSMap.active());
+}
+
+function reportBoardCell(ev) {
+  const p = window.RSMap && RSMap.worldAt ? RSMap.worldAt(ev.clientX, ev.clientY) : null;
+  if (!p) return;
+  const cell = p.cell ? " — " + p.cell.text : "";
+  toast("клетка " + p.x.toFixed(2) + ", " + p.y.toFixed(2) + " м" + cell);
+}
 mapCanvas.addEventListener("pointerdown", (e) => {
-  if (e.button !== 0) return;
+  if (mapFromBoard() || e.button !== 0) return;
   mapDrag = { x: e.clientX, y: e.clientY, camX: mapView.camX, camY: mapView.camY, moved: false };
   mapCanvas.style.cursor = "grabbing";
   try { mapCanvas.setPointerCapture(e.pointerId); } catch (_) {}
 });
 mapCanvas.addEventListener("pointermove", (e) => {
-  if (!mapDrag) return;
+  if (mapFromBoard() || !mapDrag) return;
   const dx = e.clientX - mapDrag.x, dy = e.clientY - mapDrag.y;
   if (Math.hypot(dx, dy) < 8) return;
   mapDrag.moved = true;
@@ -258,6 +272,7 @@ mapCanvas.addEventListener("pointermove", (e) => {
   mapView.camY = mapDrag.camY + (dy * mapCanvas.height / r.height) / mapView.scale;
 });
 mapCanvas.addEventListener("pointerup", (e) => {
+  if (mapFromBoard()) { reportBoardCell(e); return; }
   const drag = mapDrag && mapDrag.moved;
   mapDrag = null;
   mapCanvas.style.cursor = "grab";
@@ -284,10 +299,12 @@ mapCanvas.addEventListener("pointerup", (e) => {
 });
 mapCanvas.addEventListener("wheel", (e) => {
   e.preventDefault();
+  if (mapFromBoard()) return;                     // масштаб карты задаёт борт
   mapView.scale = Math.max(8, Math.min(50, mapView.scale * (e.deltaY > 0 ? 0.9 : 1.12)));
 }, { passive: false });
 mapCanvas.addEventListener("contextmenu", (e) => {
   e.preventDefault();
+  if (mapFromBoard()) return;
   state.waypoints.pop();
 });
 

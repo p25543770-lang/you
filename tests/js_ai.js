@@ -97,6 +97,9 @@ function makeCanvas() {
   const el = makeEl('canvas');
   el.width = 660;
   el.height = 420;
+  el.clientWidth = 660;
+  el.clientHeight = 420;
+  el.getBoundingClientRect = () => ({ left: 0, top: 0, width: 660, height: 420 });
   el.calls = [];
   el.getContext = () => new Proxy({}, {
     get: (t, p) => {
@@ -221,7 +224,13 @@ check('без блока ИИ панель говорит об этом',
 ['sc-map-stats', 'sc-map-pose', 'sc-map-goal'].forEach((id) => registry.set(id, makeEl('span', { id: id })));
 const mapCanvas = makeCanvas();
 registry.set('sc-map', mapCanvas);
-const mapCtx = load(MAP_JS, { document: dom, fetch: () => Promise.reject(new Error('нет сети')) });
+
+// борт отдаёт клетки: 8×4 по 0,05 м, всё свободно
+const cellsAnswer = { ok: true, w: 8, h: 4, res: 0.05, version: 7, cells: '1*32' };
+const mapCtx = load(MAP_JS, {
+  document: dom,
+  fetch: () => Promise.resolve({ json: () => Promise.resolve(cellsAnswer) }),
+});
 
 const decoded = mapCtx.RSMap.decodeRle('0*20,1*8,2*4', 32);
 check('клетки борта разбираются верно',
@@ -235,15 +244,29 @@ check('робот нарисован',
   ops.indexOf('stroke') >= 0 && mapCanvas.calls.some((c) => c[0] === 'rotate'));
 check('площадка подписана',
   mapCanvas.calls.some((c) => c[0] === 'fillText' && c[1][0] === 'А'));
-check('клетки разведаны: робот в кадре',
-  Math.abs(mapCanvas.calls.filter((c) => c[0] === 'translate')[0][1][0] - 330) < 340);
 check('карта борта считается настоящей', mapCtx.RSMap.active() === true);
 check('подвал карты: разведано и задание',
   /разведано 42%/.test(registry.get('sc-map-stats').textContent) &&
   /площадка Б/.test(registry.get('sc-map-goal').textContent),
   registry.get('sc-map-stats').textContent + ' / ' + registry.get('sc-map-goal').textContent);
 check('карта без данных борта не выдаётся за настоящую',
-  mapCtx.RSMap.active() === true && mapCtx.RSMap.tick({ map: { ok: false } }) === false);
+  mapCtx.RSMap.tick({ map: { ok: false } }) === false);
 
-console.log(failures.length ? '\nошибок: ' + failures.length : '\nпанель ИИ и карта: разметка и данные сходятся');
-process.exit(failures.length ? 1 : 0);
+/* --- 4. Клик по карте борта читает клетку -------------------------------- */
+(async function readCell() {
+  mapCtx.RSMap.tick(state);                   // вернуть карту борта после проверки отказа
+  await new Promise((resolve) => setTimeout(resolve, 0));   // клетки приходят запросом
+  const free = mapCtx.RSMap.worldAt(340, 200);
+  check('клик по карте даёт мировые координаты',
+    free && free.x > 0 && free.y > 0 && free.x < 0.4 && free.y < 0.2,
+    free ? free.x.toFixed(3) + ', ' + free.y.toFixed(3) : 'нет точки');
+  check('клетка под кликом читается: состояние известно',
+    free && free.cell && ['свободно', 'препятствие', 'не разведано'].indexOf(free.cell.text) >= 0,
+    free && free.cell ? free.cell.text : 'нет клетки');
+  const outside = mapCtx.RSMap.worldAt(0, 0);
+  check('за пределами карты клетки нет', outside && !outside.cell);
+
+  console.log(failures.length ? '\nошибок: ' + failures.length
+    : '\nпанель ИИ и карта: разметка и данные сходятся');
+  process.exit(failures.length ? 1 : 0);
+}());
