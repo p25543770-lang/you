@@ -1,0 +1,33 @@
+# Запуск веб-пульта как службы Ubuntu.
+#
+# Установка:
+#   sudo useradd --system --home /opt/robot-control --shell /usr/sbin/nologin robotctl || true
+#   sudo mkdir -p /opt/robot-control && sudo cp -r . /opt/robot-control
+#   sudo chown -R robotctl:robotctl /opt/robot-control
+#   sudo cp scripts/robot-control.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now robot-control
+#   journalctl -u robot-control -f
+#
+[Unit]
+Description=Robot control web console (operator login)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=robotctl
+Group=robotctl
+WorkingDirectory=/opt/robot-control
+EnvironmentFile=/opt/robot-control/.env
+ExecStart=/usr/bin/python3 /opt/robot-control/run.py
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/robot-control/data /opt/robot-control/var
+
+[Install]
+WantedBy=multi-user.target

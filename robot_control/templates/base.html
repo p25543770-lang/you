@@ -1,0 +1,53 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="robots" content="noindex, nofollow">
+  <title>{% block title %}Робот — пульт оператора{% endblock %}</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+</head>
+<body>
+  <div class="layout">
+
+    {# Левая колонка появляется только после входа: намеренно пустая,
+       внизу — только пользователь. До входа страницы без колонки. #}
+    {% if session_user %}
+    <aside class="sidebar">
+      <div class="sidebar-top">
+        <span class="brand">ROBOT&nbsp;CONSOLE</span>
+      </div>
+
+      <div class="sidebar-space" aria-hidden="true"></div>
+
+      <div class="sidebar-bottom">
+        <div class="user-card">
+          <span class="avatar" aria-hidden="true">{{ session_user[:1] | upper }}</span>
+          <span class="user-meta">
+            <span class="user-name" title="{{ session_user }}">{{ session_user }}</span>
+            <span class="user-role">оператор</span>
+          </span>
+          <form method="post" action="{{ u('auth.logout') }}" class="inline-form">
+            <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+            <button type="submit" class="icon-btn" title="Выйти" aria-label="Выйти">
+              <svg viewBox="0 0 24 24" width="16" height="16" fill="none"
+                   stroke="currentColor" stroke-width="2" stroke-linecap="round"
+                   stroke-linejoin="round" aria-hidden="true">
+                <path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"></path>
+                <polyline points="16 17 21 12 16 7"></polyline>
+                <line x1="21" y1="12" x2="9" y2="12"></line>
+              </svg>
+            </button>
+          </form>
+        </div>
+      </div>
+    </aside>
+    {% endif %}
+
+    <main class="content{% if not session_user %} content-full{% endif %}">
+      {% block content %}{% endblock %}
+    </main>
+
+  </div>
+</body>
+</html>

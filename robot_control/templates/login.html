@@ -1,0 +1,38 @@
+{% extends "base.html" %}
+{% block title %}Вход оператора{% endblock %}
+{% block content %}
+<section class="card card-narrow">
+  <h1 class="card-title">Вход оператора</h1>
+  <p class="muted">Управление роботом доступно после авторизации.</p>
+
+  {% if error %}
+    <div class="alert alert-error" role="alert">{{ error }}</div>
+  {% endif %}
+
+  {% if nocookie %}
+    <div class="alert alert-error" role="alert">
+      Вход прошёл успешно, но браузер не сохранил cookie сессии — так бывает во
+      встроенном предпросмотре (iframe). Откройте пульт в новой вкладке или
+      разрешите cookie для этого сайта.
+    </div>
+  {% endif %}
+
+  <form method="post" action="{{ url_for('auth.login', next=request.args.get('next')) }}" novalidate>
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+
+    <label class="field">
+      <span class="field-label">Логин оператора</span>
+      <input class="input" type="text" name="username" value="{{ username }}"
+             autocomplete="username" autocapitalize="none" spellcheck="false" required>
+    </label>
+
+    <label class="field">
+      <span class="field-label">Пароль</span>
+      <input class="input" type="password" name="password"
+             autocomplete="current-password" required>
+    </label>
+
+    <button type="submit" class="btn btn-primary">Войти</button>
+  </form>
+</section>
+{% endblock %}
