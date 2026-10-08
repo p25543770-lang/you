@@ -758,6 +758,7 @@ def test_ai_tick_fits_the_five_millisecond_budget(monkeypatch):
     assert mean < backend.TICK_BUDGET_MS, "средний такт %.3f мс" % mean
     assert p95 < backend.TICK_BUDGET_MS, "p95 такта %.3f мс" % p95
 
+
     # сама сеть — доли миллисекунды: 32 нейрона, 10 входов, 8 выходов
     nets = []
     for _ in range(400):
@@ -766,6 +767,30 @@ def test_ai_tick_fits_the_five_millisecond_budget(monkeypatch):
         nets.append((time_mod.perf_counter() - began) * 1000.0)
     assert statistics.mean(nets) < 1.0, "прямой проход %.3f мс" % statistics.mean(nets)
     assert source.driver.neurons == 32
+
+
+def test_ai_panel_shows_the_tick_not_the_whole_read(monkeypatch):
+    """На панели ИИ — отклик такта 100 Гц, а не время чтения с догоном.
+
+    Киоск опрашивает состояние реже, чем идёт контур, и одно чтение догоняет
+    несколько тактов. На экран должен идти отклик одного такта (его меряет сам
+    контур), иначе панель показывала бы «больше бюджета» на ровном месте.
+    """
+    from slam_gui import backend
+
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(backend.time, "time", lambda: clock["t"])
+    source = backend.SimSource()
+    app = backend.App(source, backend.Vault("1234"))
+    app.snapshot()
+    clock["t"] += 0.5                          # как киоск: редкий опрос, 5 тактов догона
+    data = app.snapshot()
+    ai = data["ai"]
+    assert ai["budgetMs"] == backend.TICK_BUDGET_MS
+    assert 0.0 < ai["tickMs"] <= ai["readMs"]
+    assert ai["tickAvgMs"] < backend.TICK_BUDGET_MS, ai["tickAvgMs"]
+    assert ai["tickMs"] < backend.TICK_BUDGET_MS, ai["tickMs"]
+
 
 
 def test_state_carries_the_tick_ms_and_the_budget(monkeypatch):

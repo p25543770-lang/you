@@ -806,7 +806,8 @@ class SimSource:
         self.frames_ok = 0
         self.scan = None
         self.last_read_ms = 0.0
-        self.step_ms = 0.0                     # отклик такта контура (мс)
+        self.step_ms = 0.0                     # отклик такта контура (мс), сглаженный
+        self.last_step_ms = 0.0                # отклик последнего такта, без сглаживания
         self.odom = None                       # последнее /odom
         self.stall_s = 0.0                     # стоим, не выполняя задание
 
@@ -911,6 +912,7 @@ class SimSource:
             self.tick += 1
             self._step(now)
         spent = (time.perf_counter() - began) * 1000.0 / steps
+        self.last_step_ms = spent
         self.step_ms = spent if not self.step_ms else self.step_ms * 0.8 + spent * 0.2
 
     def _step(self, now):
@@ -1501,14 +1503,20 @@ class App:
     def snapshot(self):
         tick_began = time.perf_counter()
         data = self.source.read()
-        #: сколько занял такт управления: сеть, обзор дальномера, карта, ROS
+        #: сколько занял такт управления: сеть, обзор дальномера, карта, ROS.
+        #: Чтение может догнать несколько тактов сразу (киоск опрашивает реже,
+        #: чем идёт контур), поэтому на экран идёт отклик одного такта 100 Гц —
+        #: его меряет сам контур; время чтения целиком видно в pipeline.readMs.
         tick_ms = (time.perf_counter() - tick_began) * 1000.0
         self.tick_avg_ms = tick_ms if self.tick_avg_ms is None else \
             self.tick_avg_ms * 0.9 + tick_ms * 0.1
         ai_block = data.get("ai")
         if isinstance(ai_block, dict):
-            ai_block["tickMs"] = round(tick_ms, 3)
-            ai_block["tickAvgMs"] = round(self.tick_avg_ms, 3)
+            step_ms = getattr(self.source, "last_step_ms", 0.0) or tick_ms
+            avg_ms = getattr(self.source, "step_ms", 0.0) or self.tick_avg_ms
+            ai_block["tickMs"] = round(step_ms, 3)
+            ai_block["tickAvgMs"] = round(avg_ms, 3)
+            ai_block["readMs"] = round(tick_ms, 3)
             ai_block["budgetMs"] = TICK_BUDGET_MS
         lock_state = self.vault.state(self.lock_open)
         cargo = dict(data.get("cargo") or {})
