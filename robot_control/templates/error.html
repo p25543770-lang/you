@@ -1,0 +1,9 @@
+{% extends "base.html" %}
+{% block title %}Ошибка {{ code }}{% endblock %}
+{% block content %}
+<section class="card card-narrow">
+  <h1 class="card-title">{{ code }}</h1>
+  <p class="muted">{{ message }}</p>
+  <p><a class="btn btn-primary" href="{{ u('panel.dashboard') }}">На главную</a></p>
+</section>
+{% endblock %}

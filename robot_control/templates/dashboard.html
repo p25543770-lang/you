@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block title %}Пульт оператора{% endblock %}
+{% block content %}
+<section class="card">
+  <h1 class="card-title">Пульт оператора</h1>
+  <div class="alert alert-ok" role="status">
+    Авторизация пройдена. Вы вошли как <strong>{{ operator }}</strong> с ролью «оператор».
+  </div>
+
+  <div class="placeholder">
+    <h2 class="placeholder-title">Управление роботом ещё не подключено</h2>
+    <p class="muted">
+      Это заглушка. Движение, приводы, камера и телеметрия появятся здесь позже —
+      сейчас после входа намеренно не выполняется никаких действий.
+    </p>
+    <ul class="todo">
+      <li>Подключение к бортовому контроллеру робота</li>
+      <li>Кнопки движения и аварийный стоп</li>
+      <li>Поток с камеры</li>
+      <li>Телеметрия: заряд, скорость, состояние связи</li>
+    </ul>
+  </div>
+</section>
+{% endblock %}
