@@ -19,13 +19,76 @@ from __future__ import annotations
 import importlib.util
 import logging
 import os
+import secrets
 import sys
+from pathlib import Path
 
 from robot_control.config import Config
 
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s %(levelname)-7s %(name)s: %(message)s"
 )
+
+PROJECT_ROOT = Path(__file__).resolve().parent
+
+DEFAULT_OPERATOR = "admin"
+DEFAULT_PASSWORD = "1234"
+
+
+def ensure_env_file() -> None:
+    """Создаёт .env с постоянным RC_SECRET_KEY, если его нет.
+
+    Без файла ключ генерируется заново при каждом запуске: сессии слетают, а
+    открытые ранее страницы входа получают недействительный CSRF-токен.
+    """
+    env_path = PROJECT_ROOT / ".env"
+    if env_path.is_file():
+        return
+    env_path.write_text(
+        "RC_SECRET_KEY={}\nRC_BIND_HOST=0.0.0.0\nRC_PORT=8080\n".format(
+            secrets.token_urlsafe(48)
+        ),
+        encoding="utf-8",
+    )
+    os.chmod(env_path, 0o600)
+    print("создан .env с новым RC_SECRET_KEY (права 600)")
+
+
+def ensure_operator(config: Config) -> None:
+    """Заводит учётку оператора, если ни одной нет.
+
+    Иначе после потери data/operators.json вход отвергает любой логин-пароль,
+    а причина («учёток нет вовсе») пользователю не видна.
+    """
+    from robot_control.auth import OperatorStore
+
+    store = OperatorStore(config.operators_file)
+    if store.exists():
+        try:
+            if store.load():
+                return
+        except (OSError, ValueError) as exc:
+            print(f"файл учёткок не читается ({exc}) — создаю заново", file=sys.stderr)
+
+    username = (os.environ.get("RC_OPERATOR") or DEFAULT_OPERATOR).strip()
+    password = os.environ.get("RC_OPERATOR_PASSWORD") or DEFAULT_PASSWORD
+
+    config.operators_file.parent.mkdir(parents=True, exist_ok=True)
+    store.add_or_update(username, password, iterations=config.pbkdf2_iterations)
+
+    credentials = config.operators_file.parent / "credentials.txt"
+    credentials.write_text(
+        f"login: {username}\npassword: {password}\n", encoding="utf-8"
+    )
+    os.chmod(credentials, 0o600)
+
+    print(f"учёток не было — создана: {username} / {password}")
+    if len(password) < 8:
+        print(
+            "  ⚠ пароль короткий: для точки доступа лучше длиннее "
+            "(RC_OPERATOR_PASSWORD='...' в .env)"
+        )
+
 
 
 def run_gunicorn(config: Config) -> int:
@@ -52,6 +115,10 @@ def run_gunicorn(config: Config) -> int:
         f"Запуск gunicorn: http://{config.bind_host}:{config.port}/  "
         f"(файл операторов: {config.operators_file})"
     )
+    # os.execv заменяет процесс вместе с буферами: без flush сообщения выше
+    # (в том числе про созданную учётку) просто теряются.
+    sys.stdout.flush()
+    sys.stderr.flush()
     os.execv(sys.executable, argv)
     return 0  # недостижимо
 
@@ -70,7 +137,9 @@ def run_dev(config: Config) -> int:
 
 
 def main() -> int:
+    ensure_env_file()
     config = Config.from_env()
+    ensure_operator(config)
     if "--dev" in sys.argv:
         return run_dev(config)
     if importlib.util.find_spec("gunicorn") is None:
