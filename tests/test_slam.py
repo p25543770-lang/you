@@ -434,11 +434,13 @@ def test_demo_drive_modes_are_coherent():
     spec.loader.exec_module(backend)
 
     modes = {m["title"]: m["angles"] for m in backend.DEMO_DRIVE_MODES}
-    assert modes["поворот вправо"]["FL"] > 0 and modes["поворот вправо"]["FR"] > 0
-    assert modes["поворот вправо"]["FR"] > modes["поворот вправо"]["FL"]   # внутреннее колесо
-    assert set(modes["краб вправо"].values()) == {20}                       # все параллельно
-    assert modes["разворот на месте"]["FL"] == 90                           # передние в одну сторону
-    assert modes["разворот на месте"]["RL"] == -90                          # задние в другую
+    turn = modes["поворот вправо"]
+    assert turn["FL"] > 0 and turn["FR"] > 0
+    assert turn["FR"] > turn["FL"]                        # внутреннее колесо довёрнуто больше
+    assert turn["RL"] == turn["FL"] and turn["RR"] == turn["FR"]   # задние как передние
+    assert set(modes["краб боком"].values()) == {90}      # чистый боком, все под 90°
+    assert modes["разворот на месте"]["FL"] == 90         # передние в одну сторону
+    assert modes["разворот на месте"]["RL"] == -90        # задние в другую
     assert set(modes["прямо"].values()) == {0}
 
     # режим выбирается по времени и цикл повторяется
@@ -457,11 +459,11 @@ def test_demo_drive_modes_are_coherent():
     clock = [2000.0]
     with mock.patch("time.time", side_effect=lambda: clock[0]):
         source = backend.SimSource()
-        source.t0 = clock[0] - 14.0
+        source.t0 = clock[0] - 14.0        # фаза «краб боком» (8 + 4 = 12 с)
         for _ in range(12):
             clock[0] += 0.3
             source.t0 += 0.3
             payload = source.read()
-    assert payload["driveMode"] == "краб вправо"
+    assert payload["driveMode"] == "краб боком"
     angles = [round(m["angle"]) for m in payload["motors"]]
-    assert angles == [20, 20, 20, 20], angles
+    assert angles == [90, 90, 90, 90], angles

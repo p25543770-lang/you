@@ -49,13 +49,13 @@
   /* Демонстрационные режимы езды — та же логика, что в gui/backend.py.
      Раньше каждое колесо крутилось своей синусоидой, и по углам четырёх
      модулей нельзя было понять, куда едет робот. Теперь углы согласованы,
-     как у настоящей 4WIS-машины: поворот (передние в одну сторону), краб
-     (все четыре параллельно), разворот на месте (передние +90°, задние −90°)
-     и задний ход. */
+     как у настоящей 4WIS-машины: в повороте участвуют все четыре колеса
+     (задние как передние), краб — чистый боком под 90°, разворот на месте
+     (передние +90°, задние −90°) и задний ход. */
   const DRIVE_MODES = [
     { sec: 8, angles: { FL: 0, FR: 0, RL: 0, RR: 0 }, spin: 1, title: 'прямо' },
-    { sec: 4, angles: { FL: 26, FR: 34, RL: 0, RR: 0 }, spin: 1, title: 'поворот вправо' },
-    { sec: 4, angles: { FL: 20, FR: 20, RL: 20, RR: 20 }, spin: 1, title: 'краб вправо' },
+    { sec: 4, angles: { FL: 26, FR: 34, RL: 26, RR: 34 }, spin: 1, title: 'поворот вправо' },
+    { sec: 4, angles: { FL: 90, FR: 90, RL: 90, RR: 90 }, spin: 1, title: 'краб боком' },
     { sec: 5, angles: { FL: 90, FR: 90, RL: -90, RR: -90 }, spin: 1, title: 'разворот на месте' },
     { sec: 4, angles: { FL: 0, FR: 0, RL: 0, RR: 0 }, spin: -1, title: 'назад' },
   ];
@@ -219,12 +219,32 @@
         <div class="pbar" title="обороты модуля"><i id="mc-bar-${m.id}"></i></div>
       </article>`;
 
-    const wheel = (m) => `
-      <svg class="rwheel rwheel-${m.id.toLowerCase()}" id="mc-wheel-${m.id}"
-           viewBox="0 0 40 60" role="img" aria-label="${m.id}: колесо прямо">
-        <rect class="rwheel-tyre" x="13" y="4" width="14" height="52" rx="7"></rect>
-        <line class="rwheel-dir" x1="20" y1="11" x2="20" y2="49"></line>
-      </svg>`;
+    /* Координаты четырёх рулевых модулей в системе схемы (viewBox 240×360):
+       по углам восьмиугольной рамы, как на настоящей машине. */
+    const MODULES = { FL: [48, 84], FR: [192, 84], RL: [48, 276], RR: [192, 276] };
+
+    /* Колесо: чёрная шина с красным ободом (как на фото), внутри — стрелка
+       качения. Поворачивается целиком как группа, вокруг ступицы модуля. */
+    const wheel = (m) => {
+      const [x, y] = MODULES[m.id];
+      return `
+        <g class="rwheel" id="mc-wheel-${m.id}" role="img" aria-label="${m.id}: колесо прямо">
+          <rect class="rwheel-tyre" x="${x - 17}" y="${y - 34}" width="34" height="68" rx="9"></rect>
+          <rect class="rwheel-rim" x="${x - 9}" y="${y - 25}" width="18" height="50" rx="6"></rect>
+          <line class="rwheel-dir" x1="${x}" y1="${y - 22}" x2="${x}" y2="${y + 22}"></line>
+          <polygon class="rwheel-arrow" points="${x},${y - 31} ${x - 5},${y - 21} ${x + 5},${y - 21}"></polygon>
+        </g>`;
+    };
+
+    /* Ступица рулевого модуля — круглая, поверх колеса: ось поворота видна. */
+    const collar = (id) => {
+      const [x, y] = MODULES[id];
+      return `
+        <g class="rmod" aria-hidden="true">
+          <circle class="rmod-collar" cx="${x}" cy="${y}" r="14"></circle>
+          <circle class="rmod-axis" cx="${x}" cy="${y}" r="4"></circle>
+        </g>`;
+    };
 
     const side = (ids) => DEMO.motors.filter((m) => ids.indexOf(m.id) >= 0).map(card).join('');
 
@@ -232,8 +252,16 @@
       <div class="rmap-col rmap-left">${side(['FL', 'RL'])}</div>
       <div class="robot" id="sc-robot">
         <span class="robot-front">перед<i aria-hidden="true"></i></span>
-        <div class="robot-chassis" aria-hidden="true"></div>
-        ${DEMO.motors.map(wheel).join('')}
+        <svg class="robot-svg" viewBox="0 0 240 360" role="img"
+             aria-label="Робот сверху: восьмиугольная рама, четыре поворотных колёсных модуля">
+          <!-- рама: восьмиугольник со срезанными углами и поперечинами -->
+          <polygon class="rframe" points="60,14 180,14 226,60 226,300 180,346 60,346 14,300 14,60"></polygon>
+          <rect class="rframe-inner" x="52" y="108" width="136" height="144" rx="6"></rect>
+          <line class="rbeam" x1="26" y1="108" x2="214" y2="108"></line>
+          <line class="rbeam" x1="26" y1="252" x2="214" y2="252"></line>
+          ${DEMO.motors.map(wheel).join('')}
+          ${DEMO.motors.map((m) => collar(m.id)).join('')}
+        </svg>
         <span class="robot-rear">корма</span>
       </div>
       <div class="rmap-col rmap-right">${side(['FR', 'RR'])}</div>`;

@@ -135,11 +135,20 @@ vm.runInNewContext(fs.readFileSync(MAIN_JS, 'utf8'), sandbox, { filename: 'main.
 const gridHtml = registry.get('sc-motor-grid').innerHTML;
 const el = (id) => registry.get(id);
 
-// 1. Разметка схемы собрана целиком
-check('в панели есть корпус робота', /id="sc-robot"/.test(gridHtml));
+// 1. Разметка схемы собрана целиком: рама, модули, колёса
+check('в панели есть схема робота', /id="sc-robot"/.test(gridHtml));
 check('в панели четыре колеса', ['FL', 'FR', 'RL', 'RR']
   .every((id) => gridHtml.indexOf('id="mc-wheel-' + id + '"') >= 0));
 check('у робота помечен перед', /robot-front[\s\S]*?перед/.test(gridHtml));
+check('рама восьмиугольная, со срезанными углами',
+  /class="rframe" points="[\d.,\s]+"/.test(gridHtml)
+  && (gridHtml.match(/class="rframe" points="([^"]+)"/)[1].split(' ').length === 8),
+  (gridHtml.match(/class="rframe" points="([^"]+)"/) || [])[1]);
+check('четыре ступицы рулевых модулей (оси поворота)',
+  (gridHtml.match(/rmod-collar/g) || []).length === 4,
+  String((gridHtml.match(/rmod-collar/g) || []).length));
+check('у колёс красные ободы, как на фото',
+  (gridHtml.match(/rwheel-rim/g) || []).length === 4);
 
 // 2. Отрисовка поворачивает колёса и пишет направление словами
 setTimeout(() => {
@@ -163,6 +172,25 @@ setTimeout(() => {
     el('mc-temp-FR').innerHTML === '40<small>°C</small>', el('mc-temp-FR').innerHTML);
   check('в подвале виден манёвр',
     el('sc-motors-sum').textContent.indexOf('манёвр: поворот вправо') === 0, el('sc-motors-sum').textContent);
+
+  // 4. Просьба «RL и RR поворачиваются как FL и FR»: все четыре колеса
+  state.data.motors = [
+    { id: 'FL', title: 'передний левый', angle: 26, rpm: 108, temp: 37, homed: true },
+    { id: 'FR', title: 'передний правый', angle: 34, rpm: 108, temp: 35, homed: true },
+    { id: 'RL', title: 'задний левый', angle: 26, rpm: 108, temp: 36, homed: true },
+    { id: 'RR', title: 'задний правый', angle: 34, rpm: 108, temp: 37, homed: true },
+  ];
+  sandbox.RS_MAIN.render();
+  ['FL', 'FR', 'RL', 'RR'].forEach((id) => {
+    const wheelAngle = String(el('mc-wheel-' + id).style.transform);
+    check(id + ' повёрнут при повороте машины',
+      wheelAngle !== 'rotate(0.0deg)' && wheelAngle !== 'rotate(0deg)', wheelAngle);
+    check(id + ' подписан «вправо»', el('mc-dir-' + id).textContent === 'вправо',
+      el('mc-dir-' + id).textContent);
+  });
+  check('заднее левое повёрнуто как переднее левое',
+    String(el('mc-wheel-RL').style.transform) === String(el('mc-wheel-FL').style.transform),
+    String(el('mc-wheel-RL').style.transform));
 
   if (failures.length) {
     console.log('расхождения:\n  ' + failures.join('\n  '));

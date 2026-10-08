@@ -19,6 +19,7 @@
   --sc-gr: #17794a;
   --sc-am: #8f5f06;
   --sc-rd: #b02f26;
+  --sc-rim: #a33a31;
   --sc-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
     "Liberation Mono", "Courier New", monospace;
   --sc-sans: system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", sans-serif;
@@ -32,6 +33,7 @@
 }
 
 body.sc-dark {
+  --sc-rim: #c4453a;
   --ok: #46bd7c;
   --warn: #dfa43a;
   --err: #e0574b;
@@ -355,6 +357,9 @@ body.sc-dark {
   flex: 1;
   min-height: 0;
   overflow: auto;
+  /* Схема и карточки держатся вместе по центру панели, а не растягиваются
+     на всю высоту: карточки — напротив своих углов рамы. */
+  align-content: center;
 }
 
 .rmap-col {
@@ -584,15 +589,49 @@ body.sc-dark {
 .sc-chip-open { border-color: var(--sc-rd); color: var(--sc-rd); }
 .sc-chip-blocked { border-color: var(--sc-rd); color: var(--sc-rd); }
 
-/* --- Схема робота сверху: корпус и колёса в центре панели ---------------- */
+/* --- Схема робота сверху: рама и четыре поворотных модуля ---------------- */
+/* Рисуется по фотографиям машины: восьмиугольная стальная рама со срезанными
+   углами, четыре рулевых модуля по углам, колёса с красным ободом. */
 .robot {
   position: relative;
   grid-column: 2;
-  width: 208px;
-  height: 292px;
   display: grid;
   place-items: center;
+  padding: 20px 0;
 }
+
+.robot-svg {
+  width: 186px;
+  height: 279px;
+  display: block;
+}
+
+/* Рама: восьмиугольник со срезанными углами + поперечины. */
+.rframe {
+  fill: rgba(120, 132, 140, 0.05);
+  stroke: var(--sc-line-2);
+  stroke-width: 3;
+  stroke-linejoin: round;
+}
+
+.rframe-inner { fill: none; stroke: var(--sc-line); stroke-width: 2; }
+.rbeam { stroke: var(--sc-line-2); stroke-width: 3; stroke-linecap: round; }
+
+/* Ступица рулевого вала — ось поворота колеса, видна поверх колеса. */
+.rmod-collar { fill: var(--sc-panel-2); stroke: var(--sc-tx-3); stroke-width: 2; }
+.rmod-axis { fill: var(--sc-tx-3); }
+
+/* Колесо целиком поворачивается вокруг ступицы (задаёт main.js). */
+.rwheel {
+  transform-box: fill-box;
+  transform-origin: 50% 50%;
+  transition: transform 0.35s cubic-bezier(0.3, 1.4, 0.5, 1);
+}
+
+.rwheel-tyre { fill: #23282c; stroke: #4b555c; stroke-width: 2.5; }
+.rwheel-rim { fill: none; stroke: var(--sc-rim); stroke-width: 3; }
+.rwheel-dir { stroke: var(--sc-cy); stroke-width: 2; stroke-linecap: round; }
+.rwheel-arrow { fill: var(--sc-cy); }
 
 .robot-front,
 .robot-rear {
@@ -620,42 +659,6 @@ body.sc-dark {
 }
 
 .robot-rear { bottom: 0; }
-
-.robot-chassis {
-  position: relative;
-  width: 100px;
-  height: 192px;
-  background: var(--sc-panel-2);
-  border: 1px solid var(--sc-line-2);
-  border-radius: 22px;
-}
-
-.robot-chassis::before {
-  content: "";
-  position: absolute;
-  top: -1px;
-  left: 20px;
-  right: 20px;
-  height: 3px;
-  border-radius: 0 0 2px 2px;
-  background: var(--sc-cy);
-}
-
-/* Колесо: корпус колеса и линия его качения. Поворот задаёт main.js. */
-.rwheel {
-  position: absolute;
-  width: 40px;
-  height: 60px;
-  transition: transform 0.35s cubic-bezier(0.3, 1.4, 0.5, 1);
-}
-
-.rwheel-tyre { fill: var(--sc-panel); stroke: var(--sc-tx-2); stroke-width: 2.5; }
-.rwheel-dir { stroke: var(--sc-cy); stroke-width: 2; stroke-linecap: round; }
-
-.rwheel-fl { top: 44px; left: 12px; }
-.rwheel-fr { top: 44px; right: 12px; }
-.rwheel-rl { bottom: 44px; left: 12px; }
-.rwheel-rr { bottom: 44px; right: 12px; }
 
 /* Полоса оборотов: двусторонняя — реверс отличается цветом. */
 .pbar {
