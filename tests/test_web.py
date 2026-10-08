@@ -131,6 +131,33 @@ def test_csrf_token_is_required(client, operator):
         assert "operator" not in session
 
 
+def test_stale_csrf_shows_form_again_and_retry_works(client, operator):
+    """Устаревший токен (сервер перезапускали) — не тупик: форма со свежим
+    токеном возвращается, и повторный ввод проходит."""
+    stale = client.post(
+        "/login",
+        data={"username": OPERATOR, "password": PASSWORD, "csrf_token": "был.до.перезапуска"},
+    )
+    assert stale.status_code == 400
+    text = stale.get_data(as_text=True)
+    assert "Форма устарела" in text
+    assert 'name="password"' in text          # форму можно заполнить заново
+    assert OPERATOR in text                    # введённый логин не потерялся
+
+    fresh_token = csrf_token(stale)
+    assert fresh_token != "был.до.перезапуска"
+
+    retry = client.post(
+        "/login",
+        data={
+            "username": OPERATOR,
+            "password": PASSWORD,
+            "csrf_token": fresh_token,
+        },
+    )
+    assert retry.status_code == 302            # вход состоялся
+
+
 def test_failed_attempts_are_limited(app, client, operator):
     limit = app.extensions["rc_config"].max_failed_attempts
     for _ in range(limit):

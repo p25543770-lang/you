@@ -20,7 +20,6 @@ from urllib.parse import urlparse
 
 from flask import (
     Flask,
-    abort,
     g,
     jsonify,
     redirect,
@@ -287,7 +286,23 @@ def create_app(config: Config | None = None) -> Flask:
 
         if request.method == "POST":
             if not csrf_ok():
-                abort(400)
+                # Токен недействителен: чаще всего страница была открыта до
+                # перезапуска сервера (сменился RC_SECRET_KEY) или браузер
+                # отдал форму из кэша. Голый 400 здесь — тупик, поэтому
+                # показываем форму заново, с уже свежим токеном.
+                log.warning(
+                    "вход отклонён: недействительный CSRF-токен (%s)",
+                    request.remote_addr or "unknown",
+                )
+                return (
+                    render_template(
+                        "login.html",
+                        error="Форма устарела (сервер перезапускали). "
+                        "Введите логин и пароль ещё раз.",
+                        username=(request.form.get("username") or "").strip(),
+                    ),
+                    400,
+                )
             username = (request.form.get("username") or "").strip()
             password = request.form.get("password") or ""
             ip = request.remote_addr or "unknown"
