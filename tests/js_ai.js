@@ -129,6 +129,8 @@ const state = {
     throttle: 0.62, speed: 0.6,
     loss: 0.0085, lossAvg: 0.01, pretrainLoss: 0.19, steps: 12345,
     tickMs: 0.52, tickAvgMs: 0.61, budgetMs: 5,
+    safety: { state: 'slow', active: true, reason: 'скорость снижена по тормозному пути',
+      clearanceM: 0.55, requestedMps: 0.6, limitMps: 0.34, scanAgeMs: 40 },
     activations: Array.from({ length: 32 }, (_, i) => (i % 3 - 1) * 0.4),
     inputs: {
       dx: 0.4, dy: -0.3, dth: 0.2, crab: 0, obstL: 0.2, obstC: 0.9,
@@ -140,7 +142,7 @@ const state = {
       { time: '12:00:09', label: 'разворот · влево · 0,3 м/с', mode: 'разворот' },
     ],
     ros: {
-      available: false, enabled: false, topic: '/cmd_vel', published: 0,
+      available: false, enabled: false, topic: '/sim/cmd_vel', published: 0,
       reason: 'rclpy не найден — ИИ ведёт стенд', error: '',
     },
   },
@@ -201,12 +203,22 @@ check('обучение: такты и ошибка',
   registry.get('sc-ai-train').textContent);
 
 const ros = registry.get('sc-ai-ros').textContent;
-check('ROS 2: показан топик и честная причина', /\/cmd_vel/.test(ros) && /rclpy/.test(ros), ros);
+check('ROS 2: показан изолированный топик и честная причина', /\/sim\/cmd_vel/.test(ros) && /rclpy/.test(ros), ros);
 const tick = registry.get('sc-ai-tick');
 check('отклик такта и бюджет 5 мс видны',
   /0,52 мс/.test(tick.textContent) && /бюджет 5 мс/.test(tick.textContent) &&
   /сред\. 0,61/.test(tick.textContent), tick.textContent);
 check('такт в бюджете не помечен тревогой', tick.dataset.over === 'no');
+check('на панели виден ограничитель скорости по лидару',
+  /СНИЖЕНА/.test(registry.get('sc-ai-safety').textContent) &&
+  registry.get('sc-ai-safety').dataset.state === 'slow',
+  registry.get('sc-ai-safety').textContent);
+aiCtx.RSAiPanel.render({ ai: Object.assign({}, state.ai, {
+  safety: { state: 'stop', reason: 'лидар устарел', clearanceM: null, limitMps: 0 },
+}) });
+check('защитная остановка явно показана красным состоянием',
+  /СТОП/.test(registry.get('sc-ai-safety').textContent) &&
+  registry.get('sc-ai-safety').dataset.state === 'stop');
 aiCtx.RSAiPanel.render({ ai: Object.assign({}, state.ai, { tickMs: 7.5 }) });
 check('такт сверх бюджета помечен', registry.get('sc-ai-tick').dataset.over === 'yes');
 aiCtx.RSAiPanel.render(state);

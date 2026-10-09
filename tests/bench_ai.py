@@ -1,4 +1,4 @@
-"""Замер отклика: сеть, один шаг обучения и полный такт стенда.
+"""Замер отклика: сеть, один шаг обучения и полный такт стенда с защитой.
 
 ПК робота — i5-13400 / 16 ГБ (заказчик назвал бюджет отклика 5 мс). Здесь
 меряем на этой машине и печатаем, сколько остаётся на сети при таком бюджете.
@@ -74,11 +74,12 @@ for _ in range(3000):
     t0 = time.perf_counter()
     src.lidar.sectors(src.scan)          # что такт отдаёт сети: три сектора с /scan
     rays.append(time.perf_counter() - t0)
-report("такт стенда (сеть + карта + ROS)", ticks)
+report("такт стенда (сеть + защита + карта + шина)", ticks)
 report("из них: секторы дальномера с /scan", rays)
 m = ms(ticks)
-print("бюджет 5 мс: средний такт оставляет %.2f мс запаса, макс %.2f мс" % (
-    5.0 - statistics.mean(m), 5.0 - max(m)))
+budget_ms = B.TICK_BUDGET_MS
+print("бюджет %.0f мс: средний такт оставляет %.2f мс запаса, макс %.2f мс" % (
+    budget_ms, budget_ms - statistics.mean(m), budget_ms - max(m)))
 print("нейронов: %d (%s) · шагов обучения: %d · ошибка: %.5f" % (
     src.driver.neurons, " → ".join(map(str, src.driver.layers)), src.driver.steps,
     src.driver.loss_avg or 0.0))

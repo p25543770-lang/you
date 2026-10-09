@@ -6,7 +6,8 @@
  *   • команду: куда встали колёса, какая тяга, слово манёвра;
  *   • намерение сети и манёвр учителя — видно, где сеть ещё догоняет;
  *   • обучение: сколько тактов и какая ошибка (на ходу), плюс ошибка урока;
- *   • ROS 2: топик /cmd_vel, сколько команд опубликовано, включена ли выдача;
+ *   • независимая защита: свежесть лидара, ограничение скорости и СТОП;
+ *   • ROS 2: изолированный топик /sim/cmd_vel, сколько команд опубликовано;
  *   • препятствия с дальномера и задание, к которому едет робот;
  *   • журнал: последние команды с временем.
  *
@@ -58,6 +59,7 @@
       '  <div><span>тяга</span><b id="sc-ai-throttle">—</b></div>',
       '  <div><span>обучение</span><b id="sc-ai-train">—</b></div>',
       '  <div><span>отклик</span><b id="sc-ai-tick">—</b></div>',
+      '  <div><span>защита</span><b id="sc-ai-safety" data-state="unknown">—</b></div>',
       '  <div><span>ROS 2</span><b id="sc-ai-ros">—</b></div>',
       '  <div><span>препятствия</span><b id="sc-ai-obst">—</b></div>',
       '  <div><span>задание</span><b id="sc-ai-goal">—</b></div>',
@@ -86,6 +88,7 @@
       throttle: el('sc-ai-throttle'),
       train: el('sc-ai-train'),
       tick: el('sc-ai-tick'),
+      safety: el('sc-ai-safety'),
       ros: el('sc-ai-ros'),
       obst: el('sc-ai-obst'),
       goal: el('sc-ai-goal'),
@@ -136,6 +139,17 @@
       ' · справа ' + fmt(inputs.obstR);
   }
 
+  function safetyText(safety) {
+    if (!safety) return 'нет данных защиты';
+    const state = safety.state || 'unknown';
+    const distance = safety.clearanceM == null ? '' : ' · ' + fmt(safety.clearanceM, 2) + ' м';
+    const limit = safety.limitMps == null ? '' : ' · предел ' + fmt(safety.limitMps, 2) + ' м/с';
+    if (state === 'stop') return 'СТОП · ' + (safety.reason || 'проверка датчика') + distance;
+    if (state === 'slow') return 'СНИЖЕНА' + limit + distance;
+    if (state === 'ok') return 'АКТИВНА · траектория свободна' + distance;
+    return 'нет данных защиты';
+  }
+
   function rosText(ros, available) {
     if (!ros) return 'нет данных';
     const parts = [];
@@ -163,6 +177,8 @@
       setText(refs.throttle, '—');
       setText(refs.train, '—');
       setText(refs.tick, '—');
+      setText(refs.safety, 'нет данных защиты');
+      if (refs.safety) refs.safety.dataset.state = 'unknown';
       setText(refs.ros, ai.reason || '—');
       setText(refs.obst, '—');
       setText(refs.goal, '—');
@@ -186,6 +202,8 @@
     }
     setText(refs.train, 'тактов ' + (ai.steps || 0) + ' · ошибка ' + fmt(ai.loss, 4) +
       (ai.pretrainLoss != null ? ' · урок ' + fmt(ai.pretrainLoss, 4) : ''));
+    setText(refs.safety, safetyText(ai.safety));
+    if (refs.safety) refs.safety.dataset.state = (ai.safety && ai.safety.state) || 'unknown';
     setText(refs.ros, rosText(ai.ros, ai.available !== false));
     setText(refs.obst, obstacleText(ai.inputs));
     const goal = ai.goal || {};
@@ -199,5 +217,5 @@
     return true;
   }
 
-  window.RSAiPanel = { render, mount, wheelText, rosText };
+  window.RSAiPanel = { render, mount, wheelText, rosText, safetyText };
 })();

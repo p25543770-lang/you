@@ -825,6 +825,10 @@ class SimSource:
         self.driver = ai_driver.NeuralDriver()
         self.pretrain_loss = self.driver.pretrain()      # урок перед выездом
         self.sink = ai_driver.RosCommandSink(enabled=ai_ros)
+        self.safety = ai_driver.SafetySupervisor()       # независимый слой перед ROS/приводом
+        self.last_safety = {"state": "stop", "active": True,
+                            "reason": "ожидание свежего лидара", "clearanceM": None,
+                            "requestedMps": 0.0, "limitMps": 0.0, "scanAgeMs": None}
         self.target_vec = None                 # цель обучения, сглаженная по тактам
         self.last_inputs = {}
         self.last_target = {}
@@ -950,6 +954,17 @@ class SimSource:
         cmd = ai_driver.command_from_outputs(out["y"])
         cmd["label"] = cmd["label"].rsplit(" · ", 1)[0] + " · " + \
             ("%.1f м/с" % (abs(cmd["throttle"]) * ai_driver.V_MAX)).replace(".", ",")
+        odom_in = getattr(self, "odom", None)
+        current_velocity = current_velocity_age_s = None
+        if isinstance(odom_in, dict):
+            try:
+                current_velocity = (odom_in["vx"], odom_in["vy"], odom_in["wz"])
+                current_velocity_age_s = now - float(odom_in["stamp"])
+            except (KeyError, TypeError, ValueError, OverflowError):
+                current_velocity = current_velocity_age_s = None
+        cmd, self.last_safety = self.safety.filter(
+            cmd, self.scan, now, current_velocity=current_velocity,
+            current_velocity_age_s=current_velocity_age_s)
         self.last_command = cmd
         self._log_command()
         intent = ai_driver.body_velocity(cmd["angles"], cmd["throttle"])
@@ -1084,6 +1099,7 @@ class SimSource:
             "activations": self.driver.activations(),
             "inputs": dict(self.last_inputs),
             "teacher": self.last_target.get("mode", "—"),
+            "safety": dict(self.last_safety),
             "goal": {
                 "label": goal["label"],
                 "dist": round(math.hypot(dx, dy), 2),

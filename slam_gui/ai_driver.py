@@ -13,7 +13,7 @@
   сеть учится его повторять. В управление идут **выходы сети**, а не учителя:
   разница между ними видна на экране как «ошибка».
 * **ROS 2** — равноправный участник: те же числа (вперёд/боком/угловая
-  скорость), которыми живёт стенд, уходят в ``/cmd_vel`` через
+  скорость), которыми живёт стенд, уходят в изолированный ``/sim/cmd_vel`` через
   :class:`RosCommandSink`, если рядом есть rclpy. Без ROS стенд продолжает
   ехать, и панель честно пишет, что ROS рядом нет.
 
@@ -269,6 +269,283 @@ def body_velocity(angles: dict, throttle: float) -> tuple:
     return vx, vy, wz
 
 
+class SafetySupervisor:
+    """Независимый ограничитель движения между нейросетью и приводом.
+
+    Сеть выбирает команду, но не может отменить этот слой: он проверяет свежий
+    круговой /scan и свежую /odom, оценивает свободный коридор в направлении
+    фактического движения (включая задний ход и «краб») и снижает тягу по
+    тормозному пути.
+    Если датчик неисправен/устарел или команда ведёт в слишком тесное место,
+    на привод уходит нулевая тяга. Геометрия корпуса — консервативная стартовая
+    оценка от колёсной базы; перед реальной машиной её обязательно сверить с
+    габаритами и тормозами конкретного шасси.
+    """
+
+    SCAN_MAX_AGE_S = 0.25       # два с половиной периода лидара 10 Гц
+    MIN_RAYS = 72               # полный круг, не грубее примерно 5° на луч
+    REACTION_S = 0.20           # выдержка на обновление лидара и реакцию привода
+    BRAKE_DECEL_MPS2 = 0.65     # консервативное замедление, м/с²
+    MARGIN_M = 0.08             # дополнительный отступ от расчётного контура
+    HALF_LENGTH_M = WHEELBASE / 2.0
+    HALF_WIDTH_M = 0.23         # временная оценка; откалибровать по корпусу
+    ODOM_MAX_AGE_S = 0.25       # без свежей скорости нельзя безопасно учесть инерцию
+    MIN_COMMAND_SPEED = 0.025   # ниже — считаем поступательное движение нулевым
+    MIN_CURRENT_SPEED = 0.035
+
+    def __init__(self, scan_max_age_s: float = SCAN_MAX_AGE_S):
+        self.scan_max_age_s = float(scan_max_age_s)
+
+    def _scan_points(self, scan, now):
+        """Проверяет свежесть/полноту /scan и возвращает точки в координатах базы."""
+        if not isinstance(scan, dict):
+            return None, None, None, "нет данных лидара"
+        ranges = scan.get("ranges")
+        if not isinstance(ranges, (list, tuple)) or len(ranges) < self.MIN_RAYS:
+            return None, None, None, "неполный скан лидара"
+        try:
+            stamp = float(scan["stamp"])
+            angle_min = float(scan["angle_min"])
+            angle_inc = float(scan["angle_inc"])
+            range_max = float(scan["range_max"])
+            now = float(now)
+        except (KeyError, TypeError, ValueError, OverflowError):
+            return None, None, None, "неверные метки лидара"
+        if not all(math.isfinite(v) for v in (stamp, angle_min, angle_inc, range_max, now)) \
+                or angle_inc == 0.0 or range_max <= 0.0:
+            return None, None, None, "неверные параметры лидара"
+        if abs(angle_inc) > math.radians(5.5):
+            return None, None, None, "слишком редкий скан лидара"
+        coverage = abs(angle_inc) * len(ranges)
+        if coverage < 2.0 * math.pi - max(0.10, 1.5 * abs(angle_inc)):
+            return None, None, None, "лидар не видит кругом"
+        age = now - stamp
+        if age < -0.05:
+            return None, None, None, "время лидара не синхронизировано"
+        age = max(0.0, age)          # время отметки /scan может опережать входной now на доли мс
+        if age > self.scan_max_age_s:
+            return None, None, age, "лидар устарел"
+
+        points = []
+        nearest = range_max
+        for i, raw in enumerate(ranges):
+            try:
+                distance = float(raw)
+            except (TypeError, ValueError, OverflowError):
+                return None, None, age, "повреждён скан лидара"
+            if math.isnan(distance) or distance == -math.inf or distance < 0.0:
+                return None, None, age, "повреждён скан лидара"
+            # В ROS бесконечность означает «эхо не найдено до range_max».
+            if distance == math.inf:
+                distance = range_max
+            else:
+                distance = min(distance, range_max)
+            angle = angle_min + i * angle_inc
+            x = distance * math.cos(angle)
+            y = distance * math.sin(angle)
+            points.append((x, y))
+            if distance < nearest:
+                nearest = distance
+        return points, nearest, age, ""
+
+    def _path_clearance(self, points, vx, vy, wz, speed):
+        """Проверяет дугу на длину тормозного пути с раздутым контуром корпуса.
+
+        Интегрируем командную дугу с шагом 4 см — также для бокового хода. Эхо
+        должно оставаться вне прямоугольного корпуса на всём пути реакции и
+        торможения, а не только на текущем луче «вперёд».
+        """
+        if speed <= 1e-6:
+            return None
+        a, reaction = self.BRAKE_DECEL_MPS2, self.REACTION_S
+        stop_path = reaction * speed + speed * speed / (2.0 * a)
+        path_step = 0.04
+        steps = max(1, int(math.ceil(stop_path / path_step)))
+        half_length = self.HALF_LENGTH_M + self.MARGIN_M
+        half_width = self.HALF_WIDTH_M + self.MARGIN_M
+        for index in range(steps + 1):
+            distance = min(index * path_step, stop_path)
+            theta = wz * distance / speed
+            if abs(wz) <= 1e-6:
+                px, py = vx / speed * distance, vy / speed * distance
+            else:
+                sin_t, cos_t = math.sin(theta), math.cos(theta)
+                px = (vx * sin_t + vy * (cos_t - 1.0)) / wz
+                py = (vx * (1.0 - cos_t) + vy * sin_t) / wz
+            cos_t, sin_t = math.cos(theta), math.sin(theta)
+            for ox, oy in points:
+                rx, ry = ox - px, oy - py
+                local_x = rx * cos_t + ry * sin_t
+                if abs(local_x) > half_length:
+                    continue
+                local_y = -rx * sin_t + ry * cos_t
+                if abs(local_y) <= half_width:
+                    # Недооценка на один шаг компенсирует дискретизацию дуги.
+                    return max(0.0, distance - path_step)
+        return None
+
+    def _safe_speed(self, clearance):
+        """Максимум скорости по расстоянию до первого пересечения корпуса."""
+        available = max(0.0, clearance)
+        a, t = self.BRAKE_DECEL_MPS2, self.REACTION_S
+        # Решение v*t + v²/(2a) <= свободный путь.
+        safe_speed = max(0.0, math.sqrt((a * t) ** 2 + 2.0 * a * available) - a * t)
+        return min(V_MAX, safe_speed)
+
+    def filter(self, command: dict, scan: dict, now: float,
+               current_velocity=None, current_velocity_age_s=None) -> tuple:
+        """Возвращает (безопасная команда, отчёт защиты); не меняет углы руления."""
+        command_error = not isinstance(command, dict)
+        safe = dict(command) if isinstance(command, dict) else {}
+        raw_angles = safe.get("angles")
+        if not isinstance(raw_angles, dict) or any(name not in raw_angles for name in WHEEL_NAMES):
+            command_error = True
+            raw_angles = raw_angles if isinstance(raw_angles, dict) else {}
+        safe_angles = {}
+        for name in WHEEL_NAMES:
+            try:
+                angle = float(raw_angles.get(name, 0.0))
+                if not math.isfinite(angle):
+                    raise ValueError("non-finite wheel angle")
+                safe_angles[name] = _clamp(angle, -ANGLE_LIMIT, ANGLE_LIMIT)
+            except (AttributeError, TypeError, ValueError, OverflowError):
+                safe_angles[name] = 0.0
+                command_error = True
+        safe["angles"] = safe_angles
+        try:
+            requested_throttle = _clamp(float(safe.get("throttle", 0.0)), -1.0, 1.0)
+            if not math.isfinite(requested_throttle):
+                raise ValueError("non-finite throttle")
+        except (TypeError, ValueError, OverflowError):
+            requested_throttle = 0.0
+            command_error = True
+        if command_error:
+            requested_throttle = 0.0
+        safe["throttle"] = requested_throttle
+        requested_v = body_velocity(safe["angles"], requested_throttle)
+        requested_speed = math.hypot(requested_v[0], requested_v[1])
+        try:
+            if current_velocity is None or current_velocity_age_s is None:
+                raise ValueError("missing odometry")
+            odom_age = float(current_velocity_age_s)
+            if not math.isfinite(odom_age) or odom_age < -0.05 or odom_age > self.ODOM_MAX_AGE_S:
+                raise ValueError("stale odometry")
+            current_vx, current_vy = float(current_velocity[0]), float(current_velocity[1])
+            current_wz = float(current_velocity[2]) if len(current_velocity) > 2 else 0.0
+            if not all(math.isfinite(v) for v in (current_vx, current_vy, current_wz)):
+                raise ValueError("non-finite odometry")
+        except (TypeError, ValueError, IndexError, OverflowError):
+            current_vx = current_vy = current_wz = 0.0
+            velocity_error = True
+        else:
+            velocity_error = False
+        current_speed = math.hypot(current_vx, current_vy)
+
+        if command_error or velocity_error:
+            error = "неверная команда колёс" if command_error else "нет достоверной одометрии"
+            safe["throttle"] = 0.0
+            self._update_label(safe, "stop")
+            return safe, {"state": "stop", "active": True, "reason": error,
+                          "clearanceM": None, "requestedMps": round(requested_speed, 2),
+                          "safeMps": 0.0, "limitMps": 0.0, "scanAgeMs": None}
+
+        points, nearest, age, error = self._scan_points(scan, now)
+        result = {
+            "state": "ok", "active": False, "reason": "контроль активен",
+            "clearanceM": None if nearest is None else round(nearest, 2),
+            "requestedMps": round(requested_speed, 2),
+            "limitMps": round(V_MAX, 2), "scanAgeMs": None if age is None else round(age * 1000.0),
+        }
+        if error:
+            safe["throttle"] = 0.0
+            result.update(state="stop", active=True, reason=error, limitMps=0.0, safeMps=0.0)
+            self._update_label(safe, "stop")
+            return safe, result
+
+        command_limits = []
+        clearances = []
+        must_brake = False
+        # Проверяем и выбранный нейросетью путь, и текущую инерцию: при смене
+        # направления машина сначала продолжает катиться по старому курсу.
+        paths = []
+        if requested_speed >= self.MIN_COMMAND_SPEED:
+            paths.append((requested_v[0], requested_v[1], requested_v[2],
+                          requested_speed, "команда"))
+        if current_speed >= self.MIN_CURRENT_SPEED:
+            paths.append((current_vx, current_vy, current_wz, current_speed, "инерция"))
+
+        for vx, vy, wz, speed, path_name in paths:
+            clearance = self._path_clearance(points, vx, vy, wz, speed)
+            # Проверяем до полной остановки при текущей скорости. Если дуга
+            # свободна на всём тормозном пути, текущая уставка проходит.
+            safe_limit = self._safe_speed(clearance) if clearance is not None else V_MAX
+            if clearance is not None:
+                clearances.append(clearance)
+            if path_name == "команда":
+                command_limits.append(safe_limit)
+            elif current_speed > safe_limit + 0.02:
+                must_brake = True
+                result["reason"] = "торможение перед препятствием"
+
+        # При развороте на месте корпус заметает габаритный круг, а не только
+        # точку центра. Запрещаем спин, если лидар видит препятствие в этом круге.
+        spinning = (requested_speed < self.MIN_COMMAND_SPEED and abs(requested_v[2]) > 0.02) \
+            or (current_speed < self.MIN_CURRENT_SPEED and abs(current_wz) > 0.02)
+        if spinning:
+            turn_clearance = float(nearest)
+            turn_buffer = math.hypot(self.HALF_LENGTH_M, self.HALF_WIDTH_M) + self.MARGIN_M
+            clearances.append(turn_clearance)
+            if turn_clearance <= turn_buffer:
+                must_brake = True
+                result["reason"] = "мало места для разворота"
+                command_limits.append(0.0)
+        elif not paths and nearest <= math.hypot(self.HALF_LENGTH_M, self.HALF_WIDTH_M) + self.MARGIN_M:
+            # Даже при нулевой уставке показываем, что корпус стоит у препятствия.
+            must_brake = True
+            result["reason"] = "препятствие близко к корпусу"
+            command_limits.append(0.0)
+
+        command_limit = min(command_limits) if command_limits else V_MAX
+        if command_limit <= 1e-3 and requested_speed >= self.MIN_COMMAND_SPEED:
+            must_brake = True
+            result["reason"] = "препятствие в стоп-зоне"
+        if must_brake:
+            safe["throttle"] = 0.0
+        elif safe["throttle"] != 0.0 and requested_speed > command_limit + 1e-3:
+            safe["throttle"] *= command_limit / max(requested_speed, 1e-9)
+            result["reason"] = "скорость снижена по тормозному пути"
+        result["limitMps"] = round(max(0.0, command_limit), 2)
+
+        if clearances:
+            result["clearanceM"] = round(min(clearances), 2)
+        if must_brake:
+            result.update(state="stop", active=True, limitMps=0.0)
+        elif abs(safe["throttle"]) < 1e-3 and abs(requested_throttle) >= 1e-3:
+            result.update(state="stop", active=True, limitMps=0.0)
+            if result["reason"] == "контроль активен":
+                result["reason"] = "защитная остановка"
+        elif abs(safe["throttle"]) + 1e-3 < abs(requested_throttle):
+            result.update(state="slow", active=True)
+        self._update_label(safe, result["state"])
+        result["safeMps"] = round(math.hypot(*body_velocity(safe["angles"], safe["throttle"])[:2]), 2)
+        return safe, result
+
+    @staticmethod
+    def _update_label(command, state):
+        """Скорость и состояние на этикетке соответствуют уставке после защиты."""
+        parts = [part for part in str(command.get("label") or "").split(" · ")
+                 if part not in {"СТОП защиты", "ограничение защиты"}]
+        if parts and "м/с" in parts[-1]:
+            speed = abs(float(command.get("throttle", 0.0))) * V_MAX
+            parts[-1] = ("%.1f м/с" % speed).replace(".", ",")
+        if state == "stop":
+            parts.append("СТОП защиты")
+        elif state == "slow":
+            parts.append("ограничение защиты")
+        if parts and command.get("label"):
+            command["label"] = " · ".join(parts)
+
+
 def scenario_inputs(dx: float, dy: float, dth: float, crab: bool, obst, soc: float = 0.8,
                     cargo: float = 1.0, speed: float = 0.3) -> dict:
     """Входы сети по обстановке: и для очной тренировки, и для езды."""
@@ -409,22 +686,34 @@ class NeuralDriver:
 
 
 class RosCommandSink:
-    """Мост стенда в ROS 2: ``/cmd_vel``, ``/scan``, ``/odom``.
+    """Изолированный мост симулятора в ROS 2: ``/sim/cmd_vel``, ``/sim/scan``, ``/sim/odom``.
 
-    Тот же граф, что у настоящего робота: команды ИИ уходят в ``/cmd_vel``
-    (geometry_msgs/Twist), обороты дальномера — в ``/scan`` (LaserScan),
-    поза и скорости ходовой — в ``/odom`` (Odometry).
+    Типы сообщений совместимы с ходовой ROS: Twist, LaserScan и Odometry,
+    однако все синтетические данные находятся в ``/sim``. Даже если вызывающий
+    код попросит ``/cmd_vel``, sink добавит изолирующий префикс: обычный драйвер
+    физического робота не получит команду случайно.
 
-    Публикация включается только явно (``RC_AI_ROS=1``): по умолчанию стенд
-    никому не командует. Если rclpy рядом нет — панель так и говорит, а стенд
-    продолжает жить на своей модели. Если в ROS есть только Twist, команды
-    уходят, а про /scan и /odom панель честно пишет: типов нет.
+    Публикация включается только явно (``RC_AI_ROS=1``); по умолчанию стенд
+    никому не командует. Для аппаратного робота нужен отдельный узел с реальными
+    датчиками, E-STOP и проверенным watchdog. Если rclpy рядом нет — панель так
+    и говорит.
     """
 
-    topic = "/cmd_vel"
+    namespace = "/sim"
+    topic = "/sim/cmd_vel"
+    scan_topic = "/sim/scan"
+    odom_topic = "/sim/odom"
+
+    @classmethod
+    def _isolate_topic(cls, topic: str) -> str:
+        """Topic override никогда не снимает обязательный namespace ``/sim``."""
+        name = str(topic or "cmd_vel").strip("/") or "cmd_vel"
+        if name == "sim" or name.startswith("sim/"):
+            return "/" + name
+        return cls.namespace + "/" + name
 
     def __init__(self, enabled: bool = False, topic: str = "/cmd_vel"):
-        self.topic = topic
+        self.topic = self._isolate_topic(topic)
         self.enabled = bool(enabled)
         self.available = False
         self.reason = ""
@@ -462,19 +751,19 @@ class RosCommandSink:
             self.reason = f"ROS есть, но мост не поднялся: {exc}"
             self.last_error = str(exc)
             return
-        # --- дальномер и поза уходят в ROS теми же темами, что на машине ---
+        # --- синтетические дальномер и поза остаются изолированы в /sim ---
         try:
             from nav_msgs.msg import Odometry
             from sensor_msgs.msg import LaserScan
-            self.publisher_scan = self.node.create_publisher(LaserScan, "/scan", 5)
-            self.publisher_odom = self.node.create_publisher(Odometry, "/odom", 10)
+            self.publisher_scan = self.node.create_publisher(LaserScan, self.scan_topic, 5)
+            self.publisher_odom = self.node.create_publisher(Odometry, self.odom_topic, 10)
             self._LaserScan, self._Odometry = LaserScan, Odometry
             self.scan_ready = self.odom_ready = True
         except Exception as exc:                           # noqa: BLE001 — без /scan стенд живёт
             self.extra_error = str(exc)
 
     def publish_scan(self, scan) -> bool:
-        """Оборот дальномера в ``/scan`` (sensor_msgs/LaserScan)."""
+        """Оборот симулятора в ``/sim/scan`` (sensor_msgs/LaserScan)."""
         if not (self.scan_ready and self.enabled and self.publisher_scan) or not scan:
             return False
         try:
@@ -494,7 +783,7 @@ class RosCommandSink:
             return False
 
     def publish_odom(self, odom) -> bool:
-        """Поза и скорости ходовой в ``/odom`` (nav_msgs/Odometry)."""
+        """Синтетическая поза в ``/sim/odom`` (nav_msgs/Odometry)."""
         if not (self.odom_ready and self.enabled and self.publisher_odom) or not odom:
             return False
         try:
@@ -537,6 +826,8 @@ class RosCommandSink:
             "available": self.available,
             "enabled": self.enabled,
             "topic": self.topic,
+            "scanTopic": self.scan_topic,
+            "odomTopic": self.odom_topic,
             "published": self.published,
             "publishedScan": self.published_scan,
             "publishedOdom": self.published_odom,

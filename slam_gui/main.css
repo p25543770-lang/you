@@ -860,6 +860,10 @@ body.sc-dark {
   overflow-wrap: anywhere;
 }
 
+#sc-ai-safety[data-state="ok"] { color: var(--sc-gr, #72d99a); }
+#sc-ai-safety[data-state="slow"] { color: var(--sc-am); }
+#sc-ai-safety[data-state="stop"] { color: #ff7272; font-weight: 700; }
+
 .sc-ai-log {
   display: flex;
   flex-direction: column;

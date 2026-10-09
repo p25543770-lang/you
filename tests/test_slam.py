@@ -541,32 +541,188 @@ def test_ai_teacher_and_4wis_kinematics():
     assert open_goal["mode"] == "вперёд", open_goal["mode"]
 
 
-def test_ros_sink_sends_commands_to_cmd_vel(monkeypatch):
-    """С ROS 2 ИИ работает вместе: те же скорости уходят в /cmd_vel.
+def test_independent_safety_supervisor_checks_scan_and_braking():
+    """Слой защиты вне сети тормозит по пути, в обе стороны и при потере лидара."""
+    ai = _ai_module()
+    guard = ai.SafetySupervisor()
+    count = 72
+    angle_min = -math.pi
+    angle_inc = 2.0 * math.pi / count
 
-    rclpy на стенде нет, поэтому подставляем заглушку — проверяем, что команды
-    действительно публикуются и с правильными числами.
-    """
+    def scan(hits=(), stamp=10.0):
+        ranges = [3.0] * count
+        for bearing, distance in hits:
+            index = int(round((bearing - angle_min) / angle_inc)) % count
+            ranges[index] = distance
+        return {"stamp": stamp, "angle_min": angle_min, "angle_inc": angle_inc,
+                "range_max": 3.0, "ranges": ranges}
+
+    straight = {"angles": dict.fromkeys(ai.WHEEL_NAMES, 0.0), "throttle": 0.6,
+                "label": "вперёд · прямо · 0,6 м/с"}
+
+    def apply_guard(command, scan_data, now, **kwargs):
+        kwargs.setdefault("current_velocity", (0.0, 0.0, 0.0))
+        kwargs.setdefault("current_velocity_age_s", 0.0)
+        return guard.filter(command, scan_data, now, **kwargs)
+
+    # На 55 см спереди сетевой газ снижается по рассчитанному тормозному пути.
+    slowed, status = apply_guard(straight, scan(((0.0, 0.55),)), 10.0)
+    assert status["state"] == "slow" and status["active"] is True
+    assert 0.0 < slowed["throttle"] < straight["throttle"]
+    assert status["limitMps"] < status["requestedMps"]
+    assert "ограничение защиты" in slowed["label"]
+
+    # Слишком близкое препятствие блокирует тягу независимо от выхода нейросети.
+    stopped, status = apply_guard(straight, scan(((0.0, 0.35),)), 10.0)
+    assert stopped["throttle"] == 0.0
+    assert status["state"] == "stop" and status["clearanceM"] <= 0.36
+    idle, status = apply_guard(dict(straight, throttle=0.0), scan(((0.0, 0.35),)), 10.0)
+    assert idle["throttle"] == 0.0 and status["state"] == "stop"
+
+    # Если колёса уже катятся к стене, команда отъехать назад не отменяет инерцию:
+    # сначала защита выдаёт нулевую тягу, а не сразу реверс.
+    reversing = dict(straight, throttle=-0.4, label="назад · 0,4 м/с")
+    stopped, status = apply_guard(reversing, scan(((0.0, 0.55),)), 10.0,
+                                  current_velocity=(0.55, 0.0, 0.0))
+    assert stopped["throttle"] == 0.0 and status["state"] == "stop"
+    assert "торможение" in status["reason"]
+
+    # Задний ход тоже проверяется по задним лучам, а не только по переднему сектору.
+    reverse = dict(straight, throttle=-0.6, label="назад · 0,6 м/с")
+    stopped, status = apply_guard(reverse, scan(((math.pi, 0.35),)), 10.0)
+    assert stopped["throttle"] == 0.0 and status["state"] == "stop"
+
+    # При боковом ходе используется направление движения «крабом».
+    crab = {"angles": dict.fromkeys(ai.WHEEL_NAMES, 90.0), "throttle": 0.6,
+            "label": "краб · 0,6 м/с"}
+    slowed, status = apply_guard(crab, scan(((-math.pi / 2.0, 0.65),)), 10.0)
+    assert 0.0 < slowed["throttle"] < crab["throttle"]
+    assert status["state"] == "slow"
+
+    # У разворота проверяется весь круг, который описывает корпус.
+    spin = {"angles": {"FL": 90.0, "FR": 90.0, "RL": -90.0, "RR": -90.0},
+            "throttle": 0.4, "label": "разворот · 0,4 м/с"}
+    stopped, status = apply_guard(spin, scan(((math.pi / 2.0, 0.35),)), 10.0)
+    assert stopped["throttle"] == 0.0 and status["state"] == "stop"
+    assert "разворота" in status["reason"]
+
+    # На дуге проверяется весь изгиб: поворот к левому препятствию замедляется,
+    # а дуга в свободную сторону не получает ложный стоп.
+    hit_left_front = scan(((math.radians(30.0), 0.55),))
+    curve_left = {"angles": {"FL": -30.0, "FR": -30.0, "RL": 30.0, "RR": 30.0},
+                  "throttle": 0.6, "label": "дуга влево · 0,6 м/с"}
+    curve_right = {"angles": {"FL": 30.0, "FR": 30.0, "RL": -30.0, "RR": -30.0},
+                   "throttle": 0.6, "label": "дуга вправо · 0,6 м/с"}
+    left_safe, left_status = apply_guard(curve_left, hit_left_front, 10.0)
+    right_safe, right_status = apply_guard(curve_right, hit_left_front, 10.0)
+    assert left_status["state"] == "slow" and left_safe["throttle"] < curve_left["throttle"]
+    assert right_status["state"] == "ok" and right_safe["throttle"] == curve_right["throttle"]
+
+    # Устаревший, частичный или повреждённый скан — тяга закрывается.
+    for bad_scan, now in ((scan(stamp=9.74), 10.0),
+                          (dict(scan(), ranges=[3.0] * 20), 10.0),
+                          (dict(scan(), ranges=[float("nan")] + [3.0] * 71), 10.0)):
+        stopped, status = apply_guard(straight, bad_scan, now)
+        assert stopped["throttle"] == 0.0 and status["state"] == "stop"
+        assert status["active"] is True
+
+    clear, status = apply_guard(straight, scan(), 10.0)
+    assert clear["throttle"] == straight["throttle"] and status["state"] == "ok"
+    malformed = dict(straight, angles={name: 0.0 for name in ai.WHEEL_NAMES[:-1]})
+    stopped, status = apply_guard(malformed, scan(), 10.0)
+    assert stopped["throttle"] == 0.0 and status["state"] == "stop"
+    # Недостаточная угловая плотность/покрытие — это не «свободная дорога».
+    for bad_scan in (dict(scan(), angle_inc=math.radians(20.0)),
+                     dict(scan(), angle_inc=math.radians(4.0)),
+                     dict(scan(), ranges=[3.0] * 50)):
+        stopped, status = apply_guard(straight, bad_scan, 10.0)
+        assert stopped["throttle"] == 0.0 and status["state"] == "stop"
+    clear, status = apply_guard(straight, scan(stamp=10.02), 10.0)
+    assert clear["throttle"] == straight["throttle"] and status["scanAgeMs"] == 0
+
+    # Без свежей /odom ограничитель не предполагает, что машина стоит.
+    for velocity, age in ((None, 0.0), ((0.0, 0.0, 0.0), None),
+                          ((0.0, 0.0, 0.0), guard.ODOM_MAX_AGE_S + 0.01),
+                          ((0.0, 0.0, 0.0), -0.06)):
+        stopped, status = guard.filter(straight, scan(), 10.0,
+                                       current_velocity=velocity,
+                                       current_velocity_age_s=age)
+        assert stopped["throttle"] == 0.0 and status["state"] == "stop"
+        assert status["reason"] == "нет достоверной одометрии"
+
+
+def test_sim_sends_safety_limited_command_to_the_drive(monkeypatch):
+    """Защита стоит в линии выпуска: до ROS и до /wheel_cmd доходит уже стоп."""
+    from slam_gui import backend
+
+    clock = {"t": 1500.0}
+    monkeypatch.setattr(backend.time, "time", lambda: clock["t"])
+    source = backend.SimSource()
+    source.tick = 1                           # не перезаписывать подставленный скан
+    source.scan = {"topic": "/scan", "stamp": clock["t"], "angle_min": -math.pi,
+                   "angle_inc": 2.0 * math.pi / backend.LIDAR_RAYS,
+                   "range_max": backend.LIDAR_RANGE,
+                   "ranges": [0.25] * backend.LIDAR_RAYS}
+    source._step(clock["t"])
+
+    assert source.last_safety["state"] == "stop"
+    assert source.last_command["throttle"] == 0.0
+    assert source.topics.last["/wheel_cmd"]["throttle"] == 0.0
+    velocity = source.topics.last["/cmd_vel"]
+    assert abs(velocity["vx"]) < 1e-9 and abs(velocity["vy"]) < 1e-9
+    assert source.ai_state(source.mission.goal(), 0.0, 0.0, 0.0)["safety"]["state"] == "stop"
+
+
+def test_ros_sink_sends_commands_to_cmd_vel(monkeypatch):
+    """Командные и модельные ROS-сообщения остаются в изолированном /sim."""
     import sys
     import types
 
     ai = _ai_module()
     published = []
+    publishers = {}
 
     class FakeTwist:
         def __init__(self):
             self.linear = types.SimpleNamespace(x=0.0, y=0.0)
             self.angular = types.SimpleNamespace(z=0.0)
 
+    class FakeLaserScan:
+        def __init__(self):
+            self.header = types.SimpleNamespace(frame_id="")
+            self.ranges = []
+
+    class FakeOdometry:
+        def __init__(self):
+            self.header = types.SimpleNamespace(frame_id="")
+            self.child_frame_id = ""
+            self.pose = types.SimpleNamespace(pose=types.SimpleNamespace(
+                position=types.SimpleNamespace(x=0.0, y=0.0),
+                orientation=types.SimpleNamespace(z=0.0, w=0.0)))
+            self.twist = types.SimpleNamespace(twist=types.SimpleNamespace(
+                linear=types.SimpleNamespace(x=0.0, y=0.0),
+                angular=types.SimpleNamespace(z=0.0)))
+
+    expected_topics = {FakeTwist: "/sim/cmd_vel", FakeLaserScan: "/sim/scan",
+                       FakeOdometry: "/sim/odom"}
+
     class FakePublisher:
+        def __init__(self, topic):
+            self.topic = topic
+            self.messages = []
+
         def publish(self, msg):
-            published.append((msg.linear.x, msg.linear.y, msg.angular.z))
+            self.messages.append(msg)
+            if self.topic == "/sim/cmd_vel":
+                published.append((msg.linear.x, msg.linear.y, msg.angular.z))
 
     class FakeNode:
         def create_publisher(self, msg_type, topic, qos):
-            assert msg_type is FakeTwist
-            assert topic == "/cmd_vel"
-            return FakePublisher()
+            assert msg_type in expected_topics
+            assert topic == expected_topics[msg_type]
+            publisher = FakePublisher(topic)
+            publishers[topic] = publisher
+            return publisher
 
     fake_rclpy = types.ModuleType("rclpy")
     fake_rclpy.ok = lambda: True
@@ -576,21 +732,58 @@ def test_ros_sink_sends_commands_to_cmd_vel(monkeypatch):
     geometry_msg = types.ModuleType("geometry_msgs.msg")
     geometry_msg.Twist = FakeTwist
     geometry.msg = geometry_msg
+    nav = types.ModuleType("nav_msgs")
+    nav_msg = types.ModuleType("nav_msgs.msg")
+    nav_msg.Odometry = FakeOdometry
+    nav.msg = nav_msg
+    sensor = types.ModuleType("sensor_msgs")
+    sensor_msg = types.ModuleType("sensor_msgs.msg")
+    sensor_msg.LaserScan = FakeLaserScan
+    sensor.msg = sensor_msg
     monkeypatch.setitem(sys.modules, "rclpy", fake_rclpy)
     monkeypatch.setitem(sys.modules, "geometry_msgs", geometry)
     monkeypatch.setitem(sys.modules, "geometry_msgs.msg", geometry_msg)
+    monkeypatch.setitem(sys.modules, "nav_msgs", nav)
+    monkeypatch.setitem(sys.modules, "nav_msgs.msg", nav_msg)
+    monkeypatch.setitem(sys.modules, "sensor_msgs", sensor)
+    monkeypatch.setitem(sys.modules, "sensor_msgs.msg", sensor_msg)
 
     sink = ai.RosCommandSink(enabled=True)
     assert sink.available, sink.reason
+    assert sink.status()["topic"] == "/sim/cmd_vel"
+    assert sink.status()["scanTopic"] == "/sim/scan"
+    assert sink.status()["odomTopic"] == "/sim/odom"
     assert sink.publish(0.4, -0.1, 0.2) is True
     assert sink.publish(0.0, 0.6, 0.0) is True
     assert published == [(0.4, -0.1, 0.2), (0.0, 0.6, 0.0)]
-    assert sink.status()["published"] == 2
 
-    # без разрешения стенд никому не командует
+    assert sink.publish_scan({"frame_id": "laser", "angle_min": -math.pi,
+                              "angle_inc": math.pi / 3.0, "range_max": 3.0,
+                              "ranges": [1.0, 2.0, 3.0]}) is True
+    laser_msg = publishers["/sim/scan"].messages[-1]
+    assert laser_msg.header.frame_id == "laser" and laser_msg.ranges == [1.0, 2.0, 3.0]
+    assert math.isclose(laser_msg.angle_max, -math.pi / 3.0)
+
+    assert sink.publish_odom({"x": 1.2, "y": -0.4, "th": 0.8, "vx": 0.4,
+                              "vy": -0.1, "wz": 0.2}) is True
+    odom_msg = publishers["/sim/odom"].messages[-1]
+    assert odom_msg.header.frame_id == "odom" and odom_msg.child_frame_id == "base_link"
+    assert (odom_msg.pose.pose.position.x, odom_msg.pose.pose.position.y) == (1.2, -0.4)
+    assert (odom_msg.twist.twist.linear.x, odom_msg.twist.twist.linear.y,
+            odom_msg.twist.twist.angular.z) == (0.4, -0.1, 0.2)
+    assert sink.status()["published"] == 2
+    assert sink.status()["publishedScan"] == sink.status()["publishedOdom"] == 1
+
+    # Даже явно запрошенный стандартный actuators topic не снимает /sim-prefix.
+    isolated_override = ai.RosCommandSink(enabled=False, topic="/cmd_vel")
+    assert isolated_override.topic == "/sim/cmd_vel"
+
+    # Без разрешения стенд никому не командует и не публикует данные.
     quiet = ai.RosCommandSink(enabled=False)
     assert quiet.publish(1.0, 0.0, 0.0) is False
-    assert quiet.published == 0
+    assert quiet.publish_scan({"ranges": [1.0]}) is False
+    assert quiet.publish_odom({"x": 0.0}) is False
+    assert quiet.published == quiet.published_scan == quiet.published_odom == 0
 
 
 def test_state_reports_ai_and_map(client, operator):
@@ -608,7 +801,11 @@ def test_state_reports_ai_and_map(client, operator):
     assert len(ai["activations"]) == 32
     assert set(ai["angles"]) == {"FL", "FR", "RL", "RR"}
     assert ai["steps"] >= 1 and ai["loss"] >= 0.0
-    assert ai["ros"]["topic"] == "/cmd_vel"
+    assert ai["ros"]["topic"] == "/sim/cmd_vel"
+    assert ai["ros"]["scanTopic"] == "/sim/scan"
+    assert ai["ros"]["odomTopic"] == "/sim/odom"
+    assert ai["safety"]["state"] in {"ok", "slow", "stop"}
+    assert "reason" in ai["safety"] and "scanAgeMs" in ai["safety"]
     # АКБ ушла с панели киоска, но данные по-прежнему нужны приборной линейке
     assert body["battery"]["soc"] > 0 and body["battery"]["volts"] > 0
     assert "goal" in ai and ai["goal"]["label"]
@@ -757,6 +954,7 @@ def test_ai_tick_fits_the_five_millisecond_budget(monkeypatch):
         mean, p95, max(ticks)))
     assert mean < backend.TICK_BUDGET_MS, "средний такт %.3f мс" % mean
     assert p95 < backend.TICK_BUDGET_MS, "p95 такта %.3f мс" % p95
+    assert max(ticks) < backend.TICK_BUDGET_MS, "максимальный такт %.3f мс" % max(ticks)
 
 
     # сама сеть — доли миллисекунды: 32 нейрона, 10 входов, 8 выходов
