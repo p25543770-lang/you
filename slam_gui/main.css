@@ -719,6 +719,8 @@ body.is-stale .side {
 
 /* планшет вертикально и телефон: одна колонка, страница прокручивается */
 @media (max-width: 900px) {
+  /* на телефоне и планшете полоса тревог переносит текст, а не обрезает его */
+  .alerts-text { white-space: normal; }
   body {
     height: auto;
     min-height: 100vh;
