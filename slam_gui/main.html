@@ -14,189 +14,194 @@
   экран не выдумывает значения: показывает последние полученные, помечает их
   «устарели» и выводит тревогу. Демо-данные включаются только адресом с ?demo=1.
 
-  Раскладка: шапка → полоса тревог (появляется, только если что-то требует
-  внимания) → ключевые показатели АКБ и тяги → слева шасси (корпус по центру,
-  оси с колёсами по бокам, модули в углах), справа маршрут и журнал событий → подвал.
+  Раскладка: слева колонка — режим и связь, маршрут, инженерный пульт, журнал
+  событий, выход. Справа — полоса тревог (появляется, только если что-то требует
+  внимания), ключевые показатели АКБ и тяги, шасси (корпус по центру, оси с колёсами,
+  модули в углах). На узком экране колонка уходит под шасси.
 
   Адреса: на дисплее робота — http://127.0.0.1:8080/ ; с планшета — http://<ip>:8080/ ;
   инженерный пульт — /console.
 -->
 <body>
-  <header class="top">
-    <div class="brand">
-      <span class="logo" aria-hidden="true">
-        <svg width="26" height="26" viewBox="0 0 24 24" fill="none">
-          <path d="M4 14h16M7 10h10M9 6h6" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
-          <circle cx="7" cy="18" r="2.2" fill="currentColor"/>
-          <circle cx="17" cy="18" r="2.2" fill="currentColor"/>
-        </svg>
-      </span>
-      <div>
-        <b>RUS SLAM</b>
-        <small>робот-курьер · 4WIS/4WID</small>
-      </div>
-    </div>
-
-    <div class="mode" id="mode" role="status">—</div>
-
-    <div class="top-right">
-      <span class="chip" id="data-chip">ожидание сервера</span>
-      <span class="chip" id="link-chip">
-        <i class="dot" aria-hidden="true"></i>
-        <span id="link-text">связь с бортом: —</span>
-      </span>
-      <time class="clock" id="clock" aria-label="текущее время">--:--:--</time>
-      <a class="btn btn-ghost" href="/exit" title="Завершить сеанс оператора">Выйти</a>
-    </div>
-  </header>
-
-  <div class="alerts" id="alerts" role="status" hidden>
-    <span class="alerts-dot" aria-hidden="true"></span>
-    <span class="alerts-text" id="alerts-text"></span>
-    <span class="alerts-more" id="alerts-more"></span>
-  </div>
-
-  <section class="kpis" aria-label="Ключевые показатели">
-    <article class="kpi kpi-soc">
-      <span class="kpi-label">Заряд АКБ</span>
-      <b class="kpi-value"><span class="kpi-num" id="k-soc">—</span><small>%</small></b>
-      <span class="kpi-sub" id="k-soc-sub">—</span>
-      <div class="meter segs"><i id="k-soc-bar"></i></div>
-    </article>
-    <article class="kpi">
-      <span class="kpi-label">Напряжение</span>
-      <b class="kpi-value"><span class="kpi-num" id="k-volts">—</span><small>В</small></b>
-      <span class="kpi-sub" id="k-volts-sub">—</span>
-    </article>
-    <article class="kpi">
-      <span class="kpi-label">Ток</span>
-      <b class="kpi-value"><span class="kpi-num" id="k-amps">—</span><small>А</small></b>
-      <span class="kpi-sub" id="k-amps-sub">—</span>
-    </article>
-    <article class="kpi">
-      <span class="kpi-label">Запас хода</span>
-      <b class="kpi-value"><span class="kpi-num" id="k-range">—</span><small>км</small></b>
-      <span class="kpi-sub" id="k-range-sub">—</span>
-    </article>
-    <article class="kpi">
-      <span class="kpi-label">Тяга</span>
-      <b class="kpi-value"><span class="kpi-num" id="k-power">—</span><small>кВт</small></b>
-      <span class="kpi-sub" id="k-power-sub">—</span>
-    </article>
-  </section>
-
-  <main class="work">
-    <section class="panel chassis" aria-labelledby="chassis-title">
-      <header class="panel-head">
-        <h1 id="chassis-title">Шасси</h1>
-        <span class="panel-meta" id="chassis-meta">—</span>
-      </header>
-
-      <div class="chassis-grid">
-        <!-- передняя ось -->
-        <article class="mod tag-fl" id="mod-FL" data-tone="idle">
-          <header class="mod-head">
-            <b class="mod-id">FL</b>
-            <span class="mod-title">передний левый</span>
-            <span class="chip idle" id="mod-state-FL">—</span>
-          </header>
-          <div class="mod-metrics">
-            <div class="metric"><span class="metric-label">угол руля</span><span class="metric-value"><b id="angle-FL">—</b></span></div>
-            <div class="metric"><span class="metric-label">обороты</span><span class="metric-value"><b id="rpm-FL">—</b><small>об/мин</small></span></div>
-            <div class="metric"><span class="metric-label">температура</span><span class="metric-value"><b id="temp-FL">—</b><small>°C</small></span></div>
-          </div>
-          <div class="meter thin"><i id="tbar-FL"></i></div>
-        </article>
-        <div class="axle axle-fl" aria-hidden="true"><div class="wheel" id="wheel-FL" data-tone="idle"></div></div>
-
-        <div class="body" aria-label="Корпус робота">
-          <span class="body-end body-front">перед</span>
-          <div class="body-speed">
-            <b id="speed">—</b>
-            <small>скорость, м/с</small>
-          </div>
-          <span class="body-end body-rear">корма</span>
+  <div class="app">
+    <header class="top panel">
+      <div class="brand">
+        <span class="logo" aria-hidden="true">
+          <svg width="26" height="26" viewBox="0 0 24 24" fill="none">
+            <path d="M4 14h16M7 10h10M9 6h6" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
+            <circle cx="7" cy="18" r="2.2" fill="currentColor"/>
+            <circle cx="17" cy="18" r="2.2" fill="currentColor"/>
+          </svg>
+        </span>
+        <div>
+          <b>RUS SLAM</b>
+          <small>робот-курьер · 4WIS/4WID</small>
         </div>
-
-        <div class="axle axle-fr" aria-hidden="true"><div class="wheel" id="wheel-FR" data-tone="idle"></div></div>
-        <article class="mod tag-fr" id="mod-FR" data-tone="idle">
-          <header class="mod-head">
-            <b class="mod-id">FR</b>
-            <span class="mod-title">передний правый</span>
-            <span class="chip idle" id="mod-state-FR">—</span>
-          </header>
-          <div class="mod-metrics">
-            <div class="metric"><span class="metric-label">угол руля</span><span class="metric-value"><b id="angle-FR">—</b></span></div>
-            <div class="metric"><span class="metric-label">обороты</span><span class="metric-value"><b id="rpm-FR">—</b><small>об/мин</small></span></div>
-            <div class="metric"><span class="metric-label">температура</span><span class="metric-value"><b id="temp-FR">—</b><small>°C</small></span></div>
-          </div>
-          <div class="meter thin"><i id="tbar-FR"></i></div>
-        </article>
-
-        <!-- задняя ось -->
-        <article class="mod tag-rl" id="mod-RL" data-tone="idle">
-          <header class="mod-head">
-            <b class="mod-id">RL</b>
-            <span class="mod-title">задний левый</span>
-            <span class="chip idle" id="mod-state-RL">—</span>
-          </header>
-          <div class="mod-metrics">
-            <div class="metric"><span class="metric-label">угол руля</span><span class="metric-value"><b id="angle-RL">—</b></span></div>
-            <div class="metric"><span class="metric-label">обороты</span><span class="metric-value"><b id="rpm-RL">—</b><small>об/мин</small></span></div>
-            <div class="metric"><span class="metric-label">температура</span><span class="metric-value"><b id="temp-RL">—</b><small>°C</small></span></div>
-          </div>
-          <div class="meter thin"><i id="tbar-RL"></i></div>
-        </article>
-        <div class="axle axle-rl" aria-hidden="true"><div class="wheel" id="wheel-RL" data-tone="idle"></div></div>
-
-        <div class="axle axle-rr" aria-hidden="true"><div class="wheel" id="wheel-RR" data-tone="idle"></div></div>
-        <article class="mod tag-rr" id="mod-RR" data-tone="idle">
-          <header class="mod-head">
-            <b class="mod-id">RR</b>
-            <span class="mod-title">задний правый</span>
-            <span class="chip idle" id="mod-state-RR">—</span>
-          </header>
-          <div class="mod-metrics">
-            <div class="metric"><span class="metric-label">угол руля</span><span class="metric-value"><b id="angle-RR">—</b></span></div>
-            <div class="metric"><span class="metric-label">обороты</span><span class="metric-value"><b id="rpm-RR">—</b><small>об/мин</small></span></div>
-            <div class="metric"><span class="metric-label">температура</span><span class="metric-value"><b id="temp-RR">—</b><small>°C</small></span></div>
-          </div>
-          <div class="meter thin"><i id="tbar-RR"></i></div>
-        </article>
       </div>
+
+      <div class="mode" id="mode" role="status">—</div>
+
+      <div class="status">
+        <span class="chip" id="data-chip">ожидание сервера</span>
+        <span class="chip" id="link-chip">
+          <i class="dot" aria-hidden="true"></i>
+          <span id="link-text">связь с бортом: —</span>
+        </span>
+      </div>
+
+      <time class="clock" id="clock" aria-label="текущее время">--:--:--</time>
+    </header>
+
+    <section class="panel route" aria-labelledby="route-title">
+      <h2 class="sec-title" id="route-title">Маршрут</h2>
+      <ol class="timeline">
+        <li class="tl-item">
+          <small>откуда</small>
+          <b id="route-from">—</b>
+        </li>
+        <li class="tl-item tl-end">
+          <small>куда</small>
+          <b id="route-to">—</b>
+        </li>
+      </ol>
     </section>
 
-    <aside class="side">
-      <section class="panel route" aria-labelledby="route-title">
-        <header class="panel-head">
-          <h2 id="route-title">Маршрут</h2>
-        </header>
-        <ol class="timeline">
-          <li class="tl-item">
-            <small>откуда</small>
-            <b id="route-from">—</b>
-          </li>
-          <li class="tl-item tl-end">
-            <small>куда</small>
-            <b id="route-to">—</b>
-          </li>
-        </ol>
+    <section class="panel console" aria-labelledby="console-title">
+      <h2 class="sec-title" id="console-title">Инженерный пульт</h2>
+      <p class="console-text">Сервис двигателей, карта SLAM, телеметрия, E-STOP.</p>
+      <a class="btn btn-accent" id="console-link" href="/console">Открыть пульт →</a>
+    </section>
+
+    <section class="panel events" aria-labelledby="ev-title">
+      <header class="panel-head">
+        <h2 id="ev-title">События</h2>
+        <span class="panel-meta">за сеанс экрана</span>
+      </header>
+      <ul class="ev-list" id="ev-list" aria-live="polite"></ul>
+    </section>
+
+    <footer class="panel foot">
+      <a class="btn btn-ghost" href="/exit" title="Завершить сеанс оператора">Выйти</a>
+      <p class="specs">рулевые NEMA 23 · тяговые BLDC 260 Вт · АКБ LiFePO4 12S3P, 714 Вт·ч</p>
+    </footer>
+
+    <main class="main">
+      <div class="alerts" id="alerts" role="status" hidden>
+        <span class="alerts-dot" aria-hidden="true"></span>
+        <span class="alerts-text" id="alerts-text"></span>
+        <span class="alerts-more" id="alerts-more"></span>
+      </div>
+
+      <section class="kpis" aria-label="Ключевые показатели">
+        <article class="kpi kpi-soc">
+          <span class="kpi-label">Заряд АКБ</span>
+          <b class="kpi-value"><span class="kpi-num" id="k-soc">—</span><small>%</small></b>
+          <span class="kpi-sub" id="k-soc-sub">—</span>
+          <div class="meter segs"><i id="k-soc-bar"></i></div>
+        </article>
+        <article class="kpi">
+          <span class="kpi-label">Напряжение</span>
+          <b class="kpi-value"><span class="kpi-num" id="k-volts">—</span><small>В</small></b>
+          <span class="kpi-sub" id="k-volts-sub">—</span>
+        </article>
+        <article class="kpi">
+          <span class="kpi-label">Ток</span>
+          <b class="kpi-value"><span class="kpi-num" id="k-amps">—</span><small>А</small></b>
+          <span class="kpi-sub" id="k-amps-sub">—</span>
+        </article>
+        <article class="kpi">
+          <span class="kpi-label">Запас хода</span>
+          <b class="kpi-value"><span class="kpi-num" id="k-range">—</span><small>км</small></b>
+          <span class="kpi-sub" id="k-range-sub">—</span>
+        </article>
+        <article class="kpi">
+          <span class="kpi-label">Тяга</span>
+          <b class="kpi-value"><span class="kpi-num" id="k-power">—</span><small>кВт</small></b>
+          <span class="kpi-sub" id="k-power-sub">—</span>
+        </article>
       </section>
 
-      <section class="panel events" aria-labelledby="ev-title">
+      <section class="panel chassis" aria-labelledby="chassis-title">
         <header class="panel-head">
-          <h2 id="ev-title">События</h2>
-          <span class="panel-meta">за сеанс экрана</span>
+          <h1 id="chassis-title">Шасси</h1>
+          <span class="panel-meta" id="chassis-meta">—</span>
         </header>
-        <ul class="ev-list" id="ev-list" aria-live="polite"></ul>
-      </section>
-    </aside>
-  </main>
 
-  <footer class="foot">
-    <span>рулевые NEMA 23 · тяговые BLDC 260 Вт · АКБ LiFePO4 12S3P, 714 Вт·ч</span>
-    <a class="btn btn-accent" id="console-link" href="/console">Инженерный пульт →</a>
-  </footer>
+        <div class="chassis-grid">
+          <!-- передняя ось -->
+          <article class="mod tag-fl" id="mod-FL" data-tone="idle">
+            <header class="mod-head">
+              <b class="mod-id">FL</b>
+              <span class="mod-title">передний левый</span>
+              <span class="chip idle" id="mod-state-FL">—</span>
+            </header>
+            <div class="mod-metrics">
+              <div class="metric"><span class="metric-label">угол руля</span><span class="metric-value"><b id="angle-FL">—</b></span></div>
+              <div class="metric"><span class="metric-label">обороты</span><span class="metric-value"><b id="rpm-FL">—</b><small>об/мин</small></span></div>
+              <div class="metric"><span class="metric-label">температура</span><span class="metric-value"><b id="temp-FL">—</b><small>°C</small></span></div>
+            </div>
+            <div class="meter thin"><i id="tbar-FL"></i></div>
+          </article>
+          <div class="axle axle-fl" aria-hidden="true"><div class="wheel" id="wheel-FL" data-tone="idle"></div></div>
+
+          <div class="body" aria-label="Корпус робота">
+            <span class="body-end body-front">перед</span>
+            <div class="body-speed">
+              <b id="speed">—</b>
+              <small>скорость, м/с</small>
+            </div>
+            <span class="body-end body-rear">корма</span>
+          </div>
+
+          <div class="axle axle-fr" aria-hidden="true"><div class="wheel" id="wheel-FR" data-tone="idle"></div></div>
+          <article class="mod tag-fr" id="mod-FR" data-tone="idle">
+            <header class="mod-head">
+              <b class="mod-id">FR</b>
+              <span class="mod-title">передний правый</span>
+              <span class="chip idle" id="mod-state-FR">—</span>
+            </header>
+            <div class="mod-metrics">
+              <div class="metric"><span class="metric-label">угол руля</span><span class="metric-value"><b id="angle-FR">—</b></span></div>
+              <div class="metric"><span class="metric-label">обороты</span><span class="metric-value"><b id="rpm-FR">—</b><small>об/мин</small></span></div>
+              <div class="metric"><span class="metric-label">температура</span><span class="metric-value"><b id="temp-FR">—</b><small>°C</small></span></div>
+            </div>
+            <div class="meter thin"><i id="tbar-FR"></i></div>
+          </article>
+
+          <!-- задняя ось -->
+          <article class="mod tag-rl" id="mod-RL" data-tone="idle">
+            <header class="mod-head">
+              <b class="mod-id">RL</b>
+              <span class="mod-title">задний левый</span>
+              <span class="chip idle" id="mod-state-RL">—</span>
+            </header>
+            <div class="mod-metrics">
+              <div class="metric"><span class="metric-label">угол руля</span><span class="metric-value"><b id="angle-RL">—</b></span></div>
+              <div class="metric"><span class="metric-label">обороты</span><span class="metric-value"><b id="rpm-RL">—</b><small>об/мин</small></span></div>
+              <div class="metric"><span class="metric-label">температура</span><span class="metric-value"><b id="temp-RL">—</b><small>°C</small></span></div>
+            </div>
+            <div class="meter thin"><i id="tbar-RL"></i></div>
+          </article>
+          <div class="axle axle-rl" aria-hidden="true"><div class="wheel" id="wheel-RL" data-tone="idle"></div></div>
+
+          <div class="axle axle-rr" aria-hidden="true"><div class="wheel" id="wheel-RR" data-tone="idle"></div></div>
+          <article class="mod tag-rr" id="mod-RR" data-tone="idle">
+            <header class="mod-head">
+              <b class="mod-id">RR</b>
+              <span class="mod-title">задний правый</span>
+              <span class="chip idle" id="mod-state-RR">—</span>
+            </header>
+            <div class="mod-metrics">
+              <div class="metric"><span class="metric-label">угол руля</span><span class="metric-value"><b id="angle-RR">—</b></span></div>
+              <div class="metric"><span class="metric-label">обороты</span><span class="metric-value"><b id="rpm-RR">—</b><small>об/мин</small></span></div>
+              <div class="metric"><span class="metric-label">температура</span><span class="metric-value"><b id="temp-RR">—</b><small>°C</small></span></div>
+            </div>
+            <div class="meter thin"><i id="tbar-RR"></i></div>
+          </article>
+        </div>
+      </section>
+    </main>
+  </div>
 
   <script src="/slam_auth.js"></script>
   <script src="main.js"></script>
