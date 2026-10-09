@@ -193,3 +193,58 @@ def test_exit_link_logs_out(client, operator):
     assert client.get("/").status_code == 200
     assert client.get("/exit").status_code == 302
     assert client.get("/").status_code == 302  # интерфейс снова закрыт
+
+
+# ------------------------ основной экран (киоск) ------------------------- #
+def test_main_screen_has_no_cargo_compartment(client, operator):
+    """Грузовой отсек с PIN-клавиатурой убран с главного экрана. Ячейка и /api/lock
+    остались у инженерного пульта (их проверяют тесты замка выше)."""
+    login(client)
+    text = client.get("/").get_data(as_text=True)
+    for phrase in ("Грузовой отсек", "Открыть отсек", "Введите PIN"):
+        assert phrase not in text, phrase
+    assert not re.search(r"\bPIN\b", text)
+
+    js = client.get("/main.js").get_data(as_text=True)
+    assert "api/lock" not in js
+    assert "api/audit" not in js
+    assert "cargo" not in js
+    assert not re.search(r"\b(lock|pin|PIN)\b", js)
+
+
+def test_main_screen_shows_four_drive_modules(client, operator):
+    login(client)
+    text = client.get("/").get_data(as_text=True)
+    for module in ("FL", "FR", "RL", "RR"):
+        assert f'id="mod-{module}"' in text, module
+        assert f'id="wheel-{module}"' in text, module
+
+
+def test_main_screen_has_logout_and_console_links(client, operator):
+    login(client)
+    text = client.get("/").get_data(as_text=True)
+    assert 'href="/exit"' in text
+    assert 'href="/console"' in text
+
+
+def test_main_screen_polls_state_with_relative_url(client, operator):
+    """Относительный путь нужен, чтобы экран работал и под /main.html,
+    и за прокси предпросмотра, где префикс может отличаться."""
+    login(client)
+    js = client.get("/main.js").get_data(as_text=True)
+    assert "fetch('api/state'" in js
+    assert "'/api/state'" not in js
+
+
+def test_main_screen_demo_only_on_request(client, operator):
+    """Выдуманные данные не подменяют отказ сервера: демо только при ?demo=1."""
+    login(client)
+    js = client.get("/main.js").get_data(as_text=True)
+    assert "get('demo') === '1'" in js
+
+
+def test_main_screen_keeps_session_token_for_console(client, operator):
+    """Ссылка на пульт сохраняет st, иначе в iframe-предпросмотре вход потеряется."""
+    login(client)
+    js = client.get("/main.js").get_data(as_text=True)
+    assert "'/console?st='" in js

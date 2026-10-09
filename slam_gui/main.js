@@ -1,541 +1,495 @@
 /* ============================================================================
- * main.js — основной экран робота: данные и взаимодействие.
+ * main.js — основной экран робота (киоск). Показывает состояние, управления нет.
  *
- * Источник данных:
- *   1) бэкенд `gui/backend.py` — GET /api/state каждые 300 мс (двигатели, АКБ,
- *      груз, замок, связь), POST /api/lock/open|close, GET /api/audit;
- *   2) если сервера нет (страница открыта как файл или обычным static-сервером)
- *      — локальная демонстрация, чтобы экран не оставался пустым.
+ * Данные: GET api/state раз в 300 мс (slam_gui/backend.py).
+ *   • сервер не отвечает или последний ответ старше 2 с → значения не выдумываются:
+ *     показываются последние полученные, помечаются «устарели», выводится тревога;
+ *   • демо-данные — только при адресе с параметром ?demo=1 (показ без робота).
  *
- * ПРАВИЛА ЭКРАНА (чтобы в интерфейсе не было дублей):
- *   • одно действие — один орган управления. Очистка ввода PIN — только клавиша
- *     «СБРОС» на клавиатуре; открытие/закрытие отсека — одна кнопка, её надпись
- *     меняется по состоянию. Второй кнопки сброса нет;
- *   • одно состояние показывается в одном месте: замок — чип в шапке панели
- *     «Грузовой отсек»; груз — строка под клавиатурой; заряд — кольцо АКБ;
- *     связь с модулями — подвал панели «Двигатели»; канал данных — чип в шапке;
- *   • сообщение под PIN-кодом — только отклик на последнее действие
- *     (доступ разрешён / неверный PIN / блокировка), оно не повторяет состояние.
+ * Что показывает экран:
+ *   шапка (режим, источник данных, связь с бортом, часы, выход);
+ *   полоса тревог — появляется, только если что-то требует внимания;
+ *   ключевые показатели АКБ и тяги;
+ *   шасси: четыре модуля по углам (угол руля, обороты, температура, состояние);
+ *   маршрут и журнал событий, которые экран заметил за сеанс.
  *
- * Переход на инженерный пульт: одна ссылка в подвале экрана.
+ * Журнал пишет только переходы: связь, связь с бортом, уровень АКБ, режим,
+ * источник и состояние модулей (в норме ↔ проблема). Ход в норме не логируется.
  * ========================================================================== */
 (function () {
   'use strict';
 
+  /* ------------------------------------------------------------ настройки */
+  const POLL_MS = 300;             // период опроса /api/state
+  const DEMO_MS = 200;             // шаг отрисовки демо-данных
+  const FETCH_TIMEOUT_MS = 1500;   // дольше — запрос неудачный
+  const STALE_MS = 2000;           // ответ старше — данные устарели
+  const EVENTS_KEEP = 40;          // событий в памяти
+  const EVENTS_SHOW = 12;          // событий на экране
+  const MOVE_RPM = 4;              // выше — модуль вращается
+  const TEMP_WARN_C = 45;          // полоска температуры: жёлтая
+  const TEMP_ALARM_C = 55;         // модуль в состоянии «перегрев»
+  const TEMP_SCALE_C = 70;         // шкала полоски температуры
+  const DEFAULT_LOW_V = 35.5;      // порог предупреждения АКБ, если сервер не прислал свой
+  const DEFAULT_CRIT_V = 33.5;     // порог аварии АКБ, если сервер не прислал свой
+  const MODULES = ['FL', 'FR', 'RL', 'RR'];
+  const LEVEL_SEV = { 'НОРМА': 'ok', 'НИЗКИЙ': 'warn', 'КРИТИЧЕСКИЙ': 'err' };
+  const LEVEL_WORD = { 'НОРМА': 'норма', 'НИЗКИЙ': 'низкий', 'КРИТИЧЕСКИЙ': 'критический' };
+
+  const params = new URLSearchParams(window.location.search);
+  const DEMO = params.get('demo') === '1';
+  const SESSION_TOKEN = params.get('st');   // сессия без cookie (как в slam_auth.js)
+
+  /* ------------------------------------------------------------ помощники */
   const $ = (id) => document.getElementById(id);
-  const POLL_MS = 300;
-  const AUDIT_MS = 5000;
-  const PROMPT = 'Введите PIN-код и нажмите «Открыть»';
+  const formatters = {};
 
-  /* ======================================================================
-   * 1. Демонстрационный источник (резерв, когда API недоступен)
-   * ==================================================================== */
-  const DEMO = {
-    motors: [
-      { id: 'FL', title: 'передний левый', angle: 0, rpm: 0, temp: 36, homed: true },
-      { id: 'FR', title: 'передний правый', angle: 0, rpm: 0, temp: 37, homed: true },
-      { id: 'RL', title: 'задний левый', angle: 0, rpm: 0, temp: 35, homed: true },
-      { id: 'RR', title: 'задний правый', angle: 0, rpm: 0, temp: 36, homed: true },
-    ],
-    battery: { soc: 78, volts: 41.2, amps: 12.4, rangeKm: 14.2, state: 'разряд', level: 'НОРМА' },
-    cargo: { kg: 80, closed: true },
-    mode: 'АВТОНОМНЫЙ РЕЖИМ',
-    route: 'склад → зона выгрузки',
-    powerKw: 2.4,
-    linkOk: true,
-    localPin: '2580',          // только для демо-режима
-    maxAttempts: 5,
-    lockMs: 30000,
-  };
-
-  function demoStep(dt) {
-    const b = DEMO.battery;
-    DEMO.motors.forEach((m, i) => {
-      const target = Math.sin(Date.now() / (2600 + i * 400)) * 34;
-      m.angle += (target - m.angle) * Math.min(1, dt * 3.2);
-      const rpm = (b.amps / 12) * 260;
-      m.rpm += (rpm - m.rpm) * Math.min(1, dt * 1.4);
-      m.temp = 34 + Math.abs(m.rpm) / 40 + Math.sin(Date.now() / 5000 + i) * 1.4;
-    });
-    b.amps += ((6 + 12 * Math.abs(Math.sin(Date.now() / 9000))) - b.amps) * Math.min(1, dt * 0.6);
-    b.soc = Math.max(6, b.soc - b.amps * dt / 3600 * 100 / 18.6);
-    b.volts = 30 + b.soc / 100 * 13.8 - b.amps * 0.075 / 12;
-    b.rangeKm = b.soc / 100 * 18.5;
-    b.state = 'разряд';
-    b.level = b.volts < 33.5 ? 'КРИТИЧЕСКИЙ' : b.volts < 35.5 ? 'НИЗКИЙ' : 'НОРМА';
-    DEMO.powerKw = b.volts * b.amps / 1000;
+  function fmt(value, digits) {
+    if (typeof value !== 'number' || !isFinite(value)) return '—';
+    if (!formatters[digits]) {
+      formatters[digits] = new Intl.NumberFormat('ru-RU', {
+        minimumFractionDigits: digits,
+        maximumFractionDigits: digits,
+      });
+    }
+    return formatters[digits].format(value);
   }
 
-  /* ======================================================================
-   * 2. API-источник (gui/backend.py)
-   * ==================================================================== */
-  const api = {
-    ok: false,          // есть ли ответ сервера
-    data: null,
-    at: 0,              // когда получен последний снимок
-    source: '—',
-    error: '',
-    lastAudit: null,
-    timer: null,
-    auditTimer: null,
-  };
+  function setText(node, text) {
+    if (node && node.textContent !== text) node.textContent = text;
+  }
 
-  const hasFetch = typeof fetch === 'function';
+  // Меняет только тон (ok / warn / err …); постоянные классы сохраняются.
+  function setTone(node, base, tone) {
+    if (!node) return;
+    const cls = tone ? (base ? base + ' ' + tone : tone) : base;
+    if (node.className !== cls) node.className = cls;
+  }
 
-  function apiUrl(path) { return path; }        // относительные URL — работает на любом порту
+  function make(tag, cls, text) {
+    const node = document.createElement(tag);
+    if (cls) node.className = cls;
+    if (text !== undefined) node.textContent = text;
+    return node;
+  }
 
-  /** Данные сервера свежие (ответ был меньше 2 с назад). */
-  function apiFresh() { return api.ok && !!api.data && (Date.now() - api.at) < 2000; }
+  const clockText = (date) => date.toLocaleTimeString('ru-RU', { hour12: false });
+  const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
+  const round1 = (x) => Math.round(x * 10) / 10;
+  const round2 = (x) => Math.round(x * 100) / 100;
 
-  async function apiPoll() {
-    if (!hasFetch) return;
+  /* --------------------------------------------------- состояние модуля */
+
+  function hasTemp(m) {
+    // SerialSource не передаёт температуру и отдаёт 0: это «нет данных», а не 0 °C.
+    return typeof m.temp === 'number' && m.temp > 0;
+  }
+
+  // Текст о проблеме модуля; температуру добавляем только при перегреве.
+  function problemText(m, s) {
+    return m.id + ': ' + s.label + (s.key === 'hot' ? ', ' + fmt(m.temp, 0) + ' °C' : '');
+  }
+
+  function moduleState(m) {
+    if (m.online === false) return { key: 'offline', label: 'нет связи', sev: 'err' };
+    if (m.fault) return { key: 'fault', label: 'авария', sev: 'err' };
+    if (m.homed === false) return { key: 'homing', label: 'хоминг', sev: 'warn' };
+    if (Number(m.temp) > TEMP_ALARM_C) return { key: 'hot', label: 'перегрев', sev: 'err' };
+    if (Math.abs(Number(m.rpm) || 0) > MOVE_RPM) return { key: 'move', label: 'движение', sev: 'move' };
+    return { key: 'ready', label: 'готов', sev: 'ok' };
+  }
+
+  const isProblem = (s) => s.sev === 'warn' || s.sev === 'err';
+
+  /* ------------------------------------------------------ демо (?demo=1) */
+
+  function demoData(nowMs) {
+    const t = nowMs / 1000;
+    const speed = 0.55 + 0.45 * Math.sin(t / 9);                       // условная скорость
+    const motors = MODULES.map((id, i) => {
+      const rpm = speed * 260 + Math.sin(t * 2 + i) * 3;
+      return {
+        id,
+        angle: Math.sin(t / (2.6 + i * 0.4)) * 34,
+        rpm,
+        temp: 34 + Math.abs(rpm) / 40 + Math.sin(t / 5 + i) * 1.4,
+        homed: true,
+        online: true,
+        fault: false,
+      };
+    });
+    const soc = 55 + 25 * Math.sin(t / 120);                           // медленный цикл заряда
+    const amps = 6 + 12 * Math.abs(Math.sin(t / 9));
+    const volts = 30 + (soc / 100) * 13.8 - amps * 0.075;
+    const capacityWh = 714;
+    const battery = {
+      soc: round1(soc),
+      volts: round2(volts),
+      amps: round2(amps),
+      watts: Math.round(volts * amps),
+      remainingWh: Math.round(capacityWh * soc / 100),
+      rangeKm: round1(capacityWh * soc / 100 / 32),
+      state: amps > 0.2 ? 'разряд' : 'покой',
+      level: volts >= DEFAULT_LOW_V ? 'НОРМА' : volts >= DEFAULT_CRIT_V ? 'НИЗКИЙ' : 'КРИТИЧЕСКИЙ',
+      tempC: 28,
+      thresholds: { lowV: DEFAULT_LOW_V, criticalV: DEFAULT_CRIT_V },
+    };
+    return {
+      source: 'demo',
+      mode: 'АВТОНОМНЫЙ РЕЖИМ',
+      route: 'склад → зона выгрузки',
+      motors,
+      battery,
+      powerKw: round2(battery.watts / 1000),
+      speedMps: round2(speed),
+      linkOk: true,
+    };
+  }
+
+  /* ----------------------------------------------------- источник данных */
+
+  const link = { data: null, at: 0, error: '' };   // последний удачный ответ
+
+  async function poll() {
+    const ctl = new AbortController();
+    const timer = setTimeout(() => ctl.abort(), FETCH_TIMEOUT_MS);
     try {
-      const res = await fetch(apiUrl('api/state'), { cache: 'no-store' });
+      const res = await fetch('api/state', { cache: 'no-store', signal: ctl.signal });
       if (!res.ok) throw new Error('HTTP ' + res.status);
       const body = await res.json();
-      if (body && body.ok && body.data) {
-        api.data = body.data;
-        api.source = body.data.source || '—';
-        api.at = Date.now();
-        api.ok = true;
-        api.error = '';
-      }
+      if (!body || !body.ok || !body.data) throw new Error('пустой ответ сервера');
+      link.data = body.data;
+      link.at = Date.now();
+      link.error = '';
     } catch (err) {
-      api.ok = false;
-      api.error = String(err && err.message ? err.message : err);
-    }
-  }
-
-  async function apiAudit() {
-    if (!hasFetch) return;
-    try {
-      const res = await fetch(apiUrl('api/audit?limit=1'), { cache: 'no-store' });
-      if (!res.ok) return;
-      const body = await res.json();
-      api.lastAudit = body && body.audit && body.audit.length ? body.audit[0] : null;
-    } catch (err) { /* журнал не критичен */ }
-  }
-
-  async function apiLock(path, payload) {
-    const res = await fetch(apiUrl(path), {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload || {}),
-    });
-    return res.json();
-  }
-
-  /** Данные для отрисовки: свежий снимок API либо локальная демонстрация. */
-  function read() {
-    if (apiFresh()) return api.data;
-    return {
-      motors: DEMO.motors,
-      battery: DEMO.battery,
-      cargo: DEMO.cargo,
-      mode: DEMO.mode,
-      route: DEMO.route,
-      powerKw: DEMO.powerKw,
-      linkOk: DEMO.linkOk,
-      ts: Date.now() / 1000,
-    };
-  }
-
-  /* ======================================================================
-   * 3. Состояние экрана
-   * ==================================================================== */
-  const lock = { pin: '', busy: false, demoOpen: false, fails: 0, lockUntil: 0 };
-
-  /**
-   * Единственный источник правды о замке: пока сервер отвечает — его состояние,
-   * иначе — локальное демонстрационное. Экрану не нужна своя копия состояния.
-   */
-  function lockView() {
-    if (apiFresh() && api.data.lock) {
-      const l = api.data.lock;
-      return {
-        open: !!l.open,
-        blocked: !!l.blocked,
-        remainingMs: Number(l.remainingMs || 0),
-        attemptsLeft: l.attemptsLeft,
-        from: 'сервер',
-      };
-    }
-    const left = Math.max(0, lock.lockUntil - Date.now());
-    return {
-      open: lock.demoOpen,
-      blocked: left > 0,
-      remainingMs: left,
-      attemptsLeft: DEMO.maxAttempts - lock.fails,
-      from: 'демо',
-    };
-  }
-
-  /* ======================================================================
-   * 4. Разметка
-   * ==================================================================== */
-  const KEYPAD = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '⌫', '0', 'СБРОС'];
-  const KEY_LABEL = { '⌫': '⌫', 'СБРОС': 'СБРОС' };
-
-  function mountMotors() {
-    const grid = $('sc-motor-grid');
-    if (!grid) return;
-    grid.innerHTML = DEMO.motors.map((m) => `
-      <article class="mcard" id="mc-${m.id}">
-        <div class="mcard-top">
-          <b>${m.id}</b>
-          <span class="mcard-name">${m.title}</span>
-          <span class="sc-chip sc-chip-idle" id="mc-state-${m.id}">ожидание</span>
-        </div>
-        <div class="mcard-body">
-          <div class="dial">
-            <svg viewBox="0 0 100 100" aria-hidden="true">
-              <circle class="dial-bg" cx="50" cy="50" r="38"></circle>
-              <g>
-                ${[-60, -30, 0, 30, 60, 90, 120, 150, 180, 210, 240].map((a) =>
-                  `<line class="dial-tick" x1="50" y1="12" x2="50" y2="19" transform="rotate(${a} 50 50)"></line>`).join('')}
-              </g>
-              <line class="dial-needle" id="mc-needle-${m.id}" x1="50" y1="50" x2="50" y2="18"></line>
-              <circle class="dial-hub" cx="50" cy="50" r="4.5"></circle>
-            </svg>
-            <span class="dial-val" id="mc-angle-${m.id}">0°</span>
-          </div>
-          <div class="mcard-stats">
-            <div class="mstat"><span>об/мин</span><b id="mc-rpm-${m.id}">0</b></div>
-            <div class="mstat"><span>температура</span><b id="mc-temp-${m.id}">36<small>°C</small></b></div>
-            <div class="pbar"><i id="mc-bar-${m.id}"></i></div>
-          </div>
-        </div>
-      </article>`).join('');
-  }
-
-  function mountKeypad() {
-    const pad = $('sc-keypad');
-    if (!pad) return;
-    pad.innerHTML = KEYPAD.map((k) => {
-      const mode = k === '⌫' || k === 'СБРОС';
-      const label = KEY_LABEL[k] || k;
-      const aria = k === '⌫' ? 'удалить последнюю цифру'
-        : k === 'СБРОС' ? 'очистить ввод' : 'цифра ' + k;
-      return `<button type="button" class="sc-key${mode ? ' sc-key-mode' : ''}" data-key="${k}"
-                 aria-label="${aria}">${label}</button>`;
-    }).join('');
-    pad.querySelectorAll('[data-key]').forEach((b) => b.addEventListener('click', () => press(b.dataset.key)));
-  }
-
-  /* ======================================================================
-   * 5. Замок грузового отсека
-   * ==================================================================== */
-  function press(k) {
-    if (lock.busy) return;                       // идёт проверка PIN — ввод не принимаем
-    if (lockView().blocked) return;              // блокировку считает сервер (или демо-режим)
-    if (k === 'СБРОС' || k === 'C') {
-      lock.pin = '';
-      renderPin();
-      setMsg(PROMPT);
-      return;
-    }
-    if (k === '⌫') lock.pin = lock.pin.slice(0, -1);
-    else if (lock.pin.length < 8) lock.pin += k;
-    renderPin();
-  }
-
-  function renderPin() {
-    const el = $('sc-pin-dots');
-    if (el) el.textContent = lock.pin ? '•'.repeat(lock.pin.length).split('').join(' ') : '— — — —';
-  }
-
-  function setMsg(text, cls) {
-    const el = $('sc-pin-msg');
-    if (!el) return;
-    el.textContent = text;
-    el.className = 'sc-pin-msg' + (cls ? ' ' + cls : '');
-  }
-
-  function shake() {
-    const box = $('sc-lock-state');
-    if (!box || !box.parentElement) return;
-    box.parentElement.classList.add('sc-shake');
-    setTimeout(() => box.parentElement.classList.remove('sc-shake'), 400);
-  }
-
-  /** Главное действие: открыть отсек по PIN либо закрыть уже открытый. */
-  function toggleCargo() {
-    if (lockView().open) closeCargo(); else tryOpen();
-  }
-
-  async function tryOpen() {
-    if (lock.busy) return;
-    const lv = lockView();
-    if (lv.blocked) {
-      setMsg('Ввод заблокирован: ещё ' + Math.ceil(lv.remainingMs / 1000) + ' с', 'err');
-      return;
-    }
-    if (lock.pin.length < 4) { setMsg('PIN — не менее 4 цифр', 'warn'); return; }
-    lock.busy = true;
-    try {
-      if (api.ok) {
-        const res = await apiLock('api/lock/open', { pin: lock.pin });
-        lock.pin = '';
-        renderPin();
-        if (res.ok) {
-          setMsg('Доступ разрешён', 'ok');
-          await apiAudit();
-        } else if (res.reason === 'blocked') {
-          setMsg('Ввод заблокирован: ещё ' + Math.ceil((res.remainingMs || 0) / 1000) + ' с', 'err');
-          shake();
-        } else {
-          const left = res.attemptsLeft;
-          setMsg(left !== undefined ? 'Неверный PIN. Осталось попыток: ' + left : 'Неверный PIN', 'err');
-          shake();
-        }
-      } else {
-        // демо-режим: проверка на месте
-        const pin = lock.pin;
-        lock.pin = '';
-        renderPin();
-        if (pin === DEMO.localPin) {
-          lock.demoOpen = true;
-          lock.fails = 0;
-          setMsg('Доступ разрешён (демо-режим)', 'ok');
-        } else {
-          lock.fails += 1;
-          if (lock.fails >= DEMO.maxAttempts) {
-            lock.fails = 0;
-            lock.lockUntil = Date.now() + DEMO.lockMs;
-            setMsg('Пять неудачных попыток. Блокировка на 30 с', 'err');
-          } else {
-            setMsg('Неверный PIN. Осталось попыток: ' + (DEMO.maxAttempts - lock.fails), 'err');
-          }
-          shake();
-        }
-      }
-    } catch (err) {
-      setMsg('Нет связи с сервером: ' + (err && err.message ? err.message : err), 'err');
+      link.error = err && err.name === 'AbortError' ? 'нет ответа от сервера' : String((err && err.message) || err);
     } finally {
-      lock.busy = false;
-      render();
+      clearTimeout(timer);
     }
   }
 
-  async function closeCargo() {
-    if (!lockView().open) return;
-    lock.busy = true;
-    try {
-      if (api.ok) await apiLock('api/lock/close', {});
-    } catch (err) { /* закрываем локально в любом случае */ }
-    lock.demoOpen = false;
-    lock.pin = '';
-    renderPin();
-    setMsg('Отсек закрыт', 'ok');
-    lock.busy = false;
-    render();
+  function currentView(nowMs) {
+    if (DEMO) {
+      return { demo: true, hasData: true, live: true, source: 'demo', data: demoData(nowMs) };
+    }
+    const hasData = link.data !== null;
+    const live = hasData && nowMs - link.at < STALE_MS;
+    return {
+      demo: false,
+      hasData,
+      live,
+      source: live ? String(link.data.source || '—') : null,
+      data: link.data,
+    };
   }
 
-  /* ======================================================================
-   * 6. Отрисовка
-   * ==================================================================== */
-  function motorState(m) {
-    if (m.online === false) return ['нет связи', 'sc-chip-err'];
-    if (m.fault) return ['авария', 'sc-chip-err'];
-    if (m.homed === false) return ['хоминг', 'sc-chip-warn'];
-    if (m.temp > 55) return ['перегрев', 'sc-chip-err'];
-    if (Math.abs(m.rpm) > 4) return ['движение', 'sc-chip-move'];
-    return ['готов', 'sc-chip-ok'];
+  /* ------------------------------------------------------------ тревоги */
+
+  function buildAlerts(view) {
+    if (!view.hasData) return [{ sev: 'warn', text: 'ожидание данных от робота' }];
+    if (!view.live) {
+      const sec = Math.round((Date.now() - link.at) / 1000);
+      return [{ sev: 'err', text: 'нет связи с сервером · показаны последние данные, устарели на ' + sec + ' с' }];
+    }
+    const d = view.data;
+    const b = d.battery || {};
+    const th = b.thresholds || {};
+    const low = typeof th.lowV === 'number' ? th.lowV : DEFAULT_LOW_V;
+    const crit = typeof th.criticalV === 'number' ? th.criticalV : DEFAULT_CRIT_V;
+    const out = [];
+
+    if (d.linkOk === false) out.push({ sev: 'err', text: 'нет связи с бортом' });
+    if (typeof b.volts === 'number') {
+      if (b.volts < crit) out.push({ sev: 'err', text: 'АКБ ниже аварийного порога ' + fmt(crit, 1) + ' В' });
+      else if (b.volts < low) out.push({ sev: 'warn', text: 'АКБ ниже порога предупреждения ' + fmt(low, 1) + ' В' });
+    }
+    (Array.isArray(d.motors) ? d.motors : []).forEach((m) => {
+      const s = moduleState(m);
+      if (isProblem(s)) out.push({ sev: s.sev, text: problemText(m, s) });
+    });
+    // сначала аварии, потом предупреждения
+    return out.sort((x, y) => (x.sev === 'err' ? 0 : 1) - (y.sev === 'err' ? 0 : 1));
   }
 
-  function fmt(v, digits) {
-    return Number(v || 0).toFixed(digits === undefined ? 1 : digits).replace('.', ',');
+  /* ------------------------------------------------------------ журнал */
+
+  const journal = { items: [], prev: null, sig: null };   // sig: null → первая отрисовка всегда
+
+  function note(sev, text) {
+    journal.items.unshift({ sev, text, time: clockText(new Date()) });
+    if (journal.items.length > EVENTS_KEEP) journal.items.length = EVENTS_KEEP;
+  }
+
+  function snapshotOf(view) {
+    const d = view.data || {};
+    const b = d.battery || {};
+    const motors = {};
+    (Array.isArray(d.motors) ? d.motors : []).forEach((m) => {
+      motors[m.id] = { s: moduleState(m), m };
+    });
+    return {
+      live: view.live,
+      linkOk: d.linkOk !== false,
+      level: b.level || null,
+      volts: b.volts,
+      mode: d.mode || null,
+      source: view.source,
+      motors,
+    };
+  }
+
+  function trackEvents(view) {
+    if (!view.hasData) return;                     // ещё ни одного ответа — писать не о чем
+    const now = snapshotOf(view);
+    const prev = journal.prev;
+    journal.prev = now;
+
+    if (!prev) {
+      note('info', 'экран запущен · ' + (view.live ? 'данные: ' + (view.source || '—') : 'сервер недоступен'));
+      return;
+    }
+    if (prev.live !== now.live) {
+      if (now.live) note('ok', 'связь с сервером восстановлена');
+      else note('err', 'нет связи с сервером · показаны последние данные');
+    }
+    if (now.live && prev.linkOk !== now.linkOk) {
+      note(now.linkOk ? 'ok' : 'err', now.linkOk ? 'связь с бортом восстановлена' : 'связь с бортом пропала');
+    }
+    if (now.live && now.level && prev.level && now.level !== prev.level) {
+      note(LEVEL_SEV[now.level] || 'info',
+        'АКБ: ' + (LEVEL_WORD[now.level] || now.level.toLowerCase()) + ' · ' + fmt(now.volts, 1) + ' В');
+    }
+    if (now.live && now.mode && prev.mode && now.mode !== prev.mode) {
+      note('info', 'режим: ' + now.mode.toLowerCase());
+    }
+    if (now.live && now.source && prev.source && now.source !== prev.source) {
+      note('info', 'источник данных: ' + now.source);
+    }
+    MODULES.forEach((id) => {
+      const p = prev.motors[id];
+      const c = now.motors[id];
+      if (!p || !c || p.s.key === c.s.key) return;
+      if (isProblem(c.s)) note(c.s.sev, problemText(c.m, c.s));
+      else if (isProblem(p.s)) note('ok', id + ': в норме');
+    });
+  }
+
+  function renderEvents() {
+    const list = $('ev-list');
+    if (!list) return;
+    const shown = journal.items.slice(0, EVENTS_SHOW);
+    const sig = shown.map((e) => e.time + '|' + e.sev + '|' + e.text).join('\n');
+    if (sig === journal.sig) return;               // список не менялся — DOM не трогаем
+    journal.sig = sig;
+    list.textContent = '';
+    if (!shown.length) {
+      list.appendChild(make('li', 'ev-empty', 'событий за сеанс пока нет'));
+      return;
+    }
+    shown.forEach((e) => {
+      const li = make('li', 'ev ev-' + e.sev);
+      li.appendChild(make('i', 'ev-dot'));
+      li.appendChild(make('time', '', e.time));
+      li.appendChild(make('span', 'ev-text', e.text));
+      list.appendChild(li);
+    });
+  }
+
+  /* ------------------------------------------------------------ отрисовка */
+
+  function renderHeader(view, d) {
+    const mode = $('mode');
+    if (mode) {
+      setText(mode, view.hasData ? (d.mode || '—') : '—');
+      setTone(mode, 'mode', d.mode && !/АВТОНОМ/i.test(d.mode) ? 'is-other' : '');
+    }
+
+    const chip = $('data-chip');
+    let text = 'ожидание сервера';
+    let tone = '';
+    if (view.demo) { text = 'демо-данные'; tone = 'warn'; }
+    else if (view.live) { text = 'сервер · ' + view.source; tone = 'ok'; }
+    else if (view.hasData) { text = 'сервер недоступен'; tone = 'err'; }
+    setText(chip, text);
+    setTone(chip, 'chip', tone);
+    if (chip && chip.title !== link.error) chip.title = link.error;
+
+    let linkText = 'связь с бортом: —';
+    let linkTone = '';
+    if (view.live) {
+      const ok = d.linkOk !== false;
+      linkText = ok ? 'связь с бортом: есть' : 'связь с бортом: нет';
+      linkTone = ok ? 'ok' : 'err';
+    }
+    setText($('link-text'), linkText);
+    setTone($('link-chip'), 'chip', linkTone);
+  }
+
+  function renderAlerts(view) {
+    const box = $('alerts');
+    if (!box) return;
+    const list = buildAlerts(view);
+    box.hidden = list.length === 0;
+    if (!list.length) return;
+    const top = list.some((a) => a.sev === 'err') ? 'err' : 'warn';
+    setTone(box, 'alerts', top === 'warn' ? 'warn' : '');
+    setText($('alerts-text'), list.slice(0, 3).map((a) => a.text).join(' · '));
+    setText($('alerts-more'), list.length > 3 ? '+' + (list.length - 3) : '');
+  }
+
+  function renderKpis(d, b) {
+    const th = b.thresholds || {};
+    const low = typeof th.lowV === 'number' ? th.lowV : DEFAULT_LOW_V;
+    const crit = typeof th.criticalV === 'number' ? th.criticalV : DEFAULT_CRIT_V;
+
+    // заряд
+    const soc = typeof b.soc === 'number' ? clamp(b.soc, 0, 100) : null;
+    setText($('k-soc'), soc === null ? '—' : fmt(soc, 0));
+    const bar = $('k-soc-bar');
+    if (bar) {
+      bar.style.width = (soc === null ? 0 : soc).toFixed(1) + '%';
+      setTone(bar, '', soc === null ? '' : soc < 20 ? 'err' : soc < 40 ? 'warn' : '');
+    }
+    setText($('k-soc-sub'), b.state || b.level ? (b.state || '—') + ' · ' + (LEVEL_WORD[b.level] || '—') : '—');
+    setTone($('k-soc-sub'), 'kpi-sub', LEVEL_SEV[b.level] || '');
+
+    // напряжение
+    const volts = typeof b.volts === 'number' ? b.volts : null;
+    setText($('k-volts'), fmt(volts, 1));
+    setTone($('k-volts'), 'kpi-num', volts === null ? '' : volts < crit ? 'err' : volts < low ? 'warn' : '');
+    setText($('k-volts-sub'), 'порог ' + fmt(low, 1) + ' В');
+
+    // ток
+    setText($('k-amps'), fmt(b.amps, 1));
+    setText($('k-amps-sub'), 'темп. АКБ ' + (typeof b.tempC === 'number' ? fmt(b.tempC, 0) + ' °C' : '—'));
+
+    // запас хода
+    setText($('k-range'), fmt(b.rangeKm, 1));
+    setText($('k-range-sub'), typeof b.remainingWh === 'number' ? 'остаток ' + fmt(b.remainingWh, 0) + ' Вт·ч' : '—');
+
+    // тяга
+    setText($('k-power'), fmt(d.powerKw, 2));
+    setText($('k-power-sub'), 'скорость ' + (typeof d.speedMps === 'number' ? fmt(d.speedMps, 2) + ' м/с' : '—'));
+  }
+
+  function renderChassis(view, d, motors) {
+    let moving = 0;
+    let online = 0;
+    MODULES.forEach((id) => {
+      const m = motors.find((x) => x.id === id);
+      if (!m) return;
+      if (m.online !== false) online += 1;
+      if (Math.abs(Number(m.rpm) || 0) > MOVE_RPM) moving += 1;
+    });
+    setText($('chassis-meta'), view.hasData
+      ? 'в движении ' + moving + ' из ' + MODULES.length + ' · на связи ' + online + ' из ' + MODULES.length
+      : '—');
+    setText($('speed'), typeof d.speedMps === 'number' ? fmt(d.speedMps, 2) : '—');
+
+    MODULES.forEach((id) => {
+      const m = motors.find((x) => x.id === id);
+      const card = $('mod-' + id);
+      const chip = $('mod-state-' + id);
+      const wheel = $('wheel-' + id);
+      const angleEl = $('angle-' + id);
+      const rpmEl = $('rpm-' + id);
+      const tempEl = $('temp-' + id);
+      const bar = $('tbar-' + id);
+
+      if (!m) {
+        setText(chip, 'нет данных');
+        setTone(chip, 'chip', 'idle');
+        if (card) card.dataset.tone = 'idle';
+        if (wheel) {
+          wheel.dataset.tone = 'idle';
+          wheel.style.transform = 'rotate(0deg)';
+        }
+        setText(angleEl, '—');
+        setText(rpmEl, '—');
+        setText(tempEl, '—');
+        if (bar) {
+          bar.style.width = '0%';
+          setTone(bar, '', '');
+        }
+        return;
+      }
+
+      const s = moduleState(m);
+      setText(chip, s.label);
+      setTone(chip, 'chip', s.sev);
+      if (card && card.dataset.tone !== s.sev) card.dataset.tone = s.sev;
+
+      const hasAngle = typeof m.angle === 'number' && isFinite(m.angle);
+      const angle = hasAngle ? clamp(m.angle, -90, 90) : 0;
+      if (wheel) {
+        if (wheel.dataset.tone !== s.sev) wheel.dataset.tone = s.sev;
+        wheel.style.transform = 'rotate(' + angle.toFixed(1) + 'deg)';
+      }
+      setText(angleEl, hasAngle ? Math.round(angle) + '°' : '—');
+      setText(rpmEl, typeof m.rpm === 'number' ? fmt(m.rpm, 0) : '—');
+
+      const warm = hasTemp(m);
+      setText(tempEl, warm ? fmt(m.temp, 0) : '—');
+      if (bar) {
+        bar.style.width = (warm ? clamp((m.temp / TEMP_SCALE_C) * 100, 0, 100) : 0).toFixed(1) + '%';
+        setTone(bar, '', !warm ? '' : m.temp > TEMP_ALARM_C ? 'err' : m.temp >= TEMP_WARN_C ? 'warn' : '');
+      }
+    });
+  }
+
+  function renderRoute(d) {
+    const parts = String(d.route || '').split('→').map((s) => s.trim()).filter(Boolean);
+    setText($('route-from'), parts[0] || '—');
+    setText($('route-to'), parts[1] || '—');
   }
 
   function render() {
-    const d = read();
-    const fresh = apiFresh();
-    const lv = lockView();
+    const view = currentView(Date.now());
+    trackEvents(view);
 
-    /* двигатели: карточки + сводка */
-    let moving = 0;
-    let online = 0;
-    const motors = d.motors || [];
-    motors.forEach((m) => {
-      const needle = $('mc-needle-' + m.id);
-      if (needle) needle.style.transform = 'rotate(' + Number(m.angle || 0).toFixed(1) + 'deg)';
-      const ang = $('mc-angle-' + m.id);
-      if (ang) ang.textContent = Math.round(m.angle || 0) + '°';
-      const rpm = $('mc-rpm-' + m.id);
-      if (rpm) rpm.textContent = String(Math.round(m.rpm || 0));
-      const temp = $('mc-temp-' + m.id);
-      if (temp) temp.innerHTML = Math.round(m.temp || 0) + '<small>°C</small>';
-      const bar = $('mc-bar-' + m.id);
-      if (bar) {
-        bar.style.width = Math.min(100, Math.abs(m.rpm || 0) / 3) + '%';
-        bar.classList.toggle('neg', (m.rpm || 0) < 0);
-      }
-      const st = $('mc-state-' + m.id);
-      if (st) {
-        const s = motorState(m);
-        st.textContent = s[0];
-        st.className = 'sc-chip ' + s[1];
-      }
-      if (Math.abs(m.rpm || 0) > 4) moving += 1;
-      if (m.online !== false) online += 1;
-    });
-    const sum = $('sc-motors-sum');
-    if (sum) sum.textContent = 'в движении: ' + moving + ' из ' + motors.length
-      + ' · модули на связи: ' + online + ' из ' + motors.length;
-
-    /* АКБ: кольцо (заряд и уровень), строки, подсказка о порогах */
+    const d = view.data || {};
     const b = d.battery || {};
-    const soc = Number(b.soc || 0);
-    const C = 2 * Math.PI * 60;
-    const fill = $('sc-ring-fill');
-    if (fill) {
-      fill.style.strokeDasharray = (soc / 100 * C).toFixed(1) + ' ' + C.toFixed(1);
-      fill.style.stroke = soc < 20 ? 'var(--err)' : soc < 40 ? 'var(--warn)' : 'var(--ok)';
-    }
-    const socEl = $('sc-soc');
-    if (socEl) socEl.innerHTML = Math.round(soc) + '<span>%</span>';
-    const label = $('sc-soc-label');
-    if (label) label.textContent = String(b.level || '—').toLowerCase();
-    const volts = $('sc-volts');
-    if (volts) volts.textContent = fmt(b.volts, 1) + ' В';
-    const amps = $('sc-amps');
-    if (amps) amps.textContent = fmt(b.amps, 1) + ' А';
-    const range = $('sc-range');
-    if (range) range.textContent = fmt(b.rangeKm, 1) + ' км';
-    const bstate = $('sc-batt-state');
-    if (bstate) bstate.textContent = b.state || '—';
-    const hint = $('sc-batt-hint');
-    if (hint) {
-      const v = Number(b.volts || 0);
-      hint.textContent = v && v < 33.5 ? 'ниже аварийного порога 33,5 В — движение запрещено'
-        : v && v < 35.5 ? 'ниже порога 35,5 В — «ползучий» режим'
-        : 'пороги: 35,5 В предупреждение · 33,5 В авария';
-      hint.style.color = v && v < 33.5 ? 'var(--err)' : v && v < 35.5 ? 'var(--warn)' : '';
-    }
+    const motors = Array.isArray(d.motors) ? d.motors : [];
 
-    /* груз: только про груз, состояние замка показывает чип панели */
-    const cargo = d.cargo || {};
-    const kg = $('sc-cargo-kg');
-    if (kg) kg.textContent = (cargo.kg === undefined ? '—' : cargo.kg) + ' кг';
-    const cst = $('sc-cargo-state');
-    if (cst) cst.textContent = lv.open ? 'доступен для погрузки/выгрузки' : 'закреплён и заперт';
+    setText($('clock'), clockText(new Date()));
+    renderHeader(view, d);
+    renderAlerts(view);
+    renderKpis(d, b);
+    renderChassis(view, d, motors);
+    renderRoute(d);
+    renderEvents();
+    document.body.classList.toggle('is-stale', !view.live);
+  }
 
-    /* шапка и подвал */
-    const mode = $('sc-mode');
-    if (mode) mode.textContent = d.mode || '—';
-    const route = $('sc-foot-route');
-    if (route) route.textContent = 'маршрут: ' + (d.route || '—');
-    const power = $('sc-foot-power');
-    if (power) power.textContent = 'тяга: ' + fmt(d.powerKw, 2) + ' кВт · КПД 0,86';
-    const dot = $('sc-link-dot');
-    if (dot) dot.classList.toggle('off', !d.linkOk);
-    const txt = $('sc-link-text');
-    if (txt) txt.textContent = d.linkOk ? 'связь с бортом: есть' : 'связь с бортом: нет';
+  /* ------------------------------------------------------------ запуск */
 
-    /* режим данных: сервер или демо */
-    const chip = $('sc-data');
-    if (chip) {
-      if (fresh) {
-        chip.textContent = 'данные: сервер (' + api.source + ')';
-        chip.className = 'sc-chip sc-chip-ok';
-      } else {
-        chip.textContent = hasFetch ? 'данные: демо · сервер недоступен' : 'данные: демо';
-        chip.className = 'sc-chip sc-chip-warn';
-      }
-    }
-    const ev = $('sc-foot-event');
-    if (ev) {
-      const e = api.lastAudit;
-      ev.textContent = 'журнал: ' + (e ? (e.ok ? 'доступ разрешён' : 'отказ в доступе') : '—');
-    }
-
-    /* замок: чип и единственная кнопка действия */
-    const chipLock = $('sc-lock-state');
-    if (chipLock) {
-      if (lv.blocked) {
-        chipLock.textContent = 'БЛОКИРОВКА ' + Math.ceil(lv.remainingMs / 1000) + ' с';
-        chipLock.className = 'sc-chip sc-chip-blocked';
-      } else if (lv.open) {
-        chipLock.textContent = 'ОТКРЫТО';
-        chipLock.className = 'sc-chip sc-chip-open';
-      } else {
-        chipLock.textContent = 'ЗАКРЫТО';
-        chipLock.className = 'sc-chip sc-chip-closed';
-      }
-    }
-    const openBtn = $('sc-btn-open');
-    if (openBtn) {
-      openBtn.disabled = lv.blocked || lock.busy;
-      openBtn.textContent = lv.open ? 'Закрыть отсек' : 'Открыть отсек';
+  function initLinks() {
+    // ссылка на пульт сохраняет токен сессии, если он есть в адресе
+    const consoleLink = $('console-link');
+    if (consoleLink && SESSION_TOKEN) {
+      consoleLink.href = '/console?st=' + encodeURIComponent(SESSION_TOKEN);
     }
   }
 
-  function clock() {
-    const el = $('sc-clock');
-    if (el) el.textContent = new Date().toLocaleTimeString('ru-RU', { hour12: false });
-  }
-
-  /* ======================================================================
-   * 7. Навигация: основной экран ↔ инженерный пульт
-   * ==================================================================== */
-  function goConsole() { window.location.href = 'index.html'; }
-
-  function initNav() {
-    const link = $('sc-console-link');
-    if (link) link.addEventListener('click', (e) => { e.preventDefault(); goConsole(); });
-  }
-
-  /* ======================================================================
-   * 8. Запуск
-   * ==================================================================== */
-  function boot() {
-    mountMotors();
-    mountKeypad();
-    renderPin();
-    setMsg(PROMPT);
-    initNav();
-    clock();
-    setInterval(clock, 1000);
-
-    // Единственная кнопка отсека: открыть по PIN либо закрыть
-    const openBtn = $('sc-btn-open');
-    if (openBtn) openBtn.addEventListener('click', toggleCargo);
-
-    // Физическая клавиатура (дубликатов органов управления не создаёт)
-    document.addEventListener('keydown', (e) => {
-      if (/^[0-9]$/.test(e.key)) press(e.key);
-      else if (e.key === 'Backspace') press('⌫');
-      else if (e.key === 'Escape') press('СБРОС');
-      else if (e.key === 'Enter') toggleCargo();
-    });
-
-    // Опрос бэкенда
-    if (hasFetch) {
-      apiPoll().then(render);
-      api.timer = setInterval(apiPoll, POLL_MS);
-      api.auditTimer = setInterval(apiAudit, AUDIT_MS);
-      apiAudit();
-    }
-
-    // Отрисовка; локальная анимация — только когда данных сервера нет
-    let last = performance.now();
-    setInterval(() => {
-      const now = performance.now();
-      const dt = Math.min(0.5, (now - last) / 1000);
-      last = now;
-      if (!apiFresh()) demoStep(dt);
+  async function loop() {
+    try {
+      if (!DEMO) await poll();
       render();
-    }, 200);
+    } catch (err) {
+      console.error('RUS SLAM main:', err);
+    } finally {
+      setTimeout(loop, DEMO ? DEMO_MS : POLL_MS);
+    }
+  }
 
-    window.addEventListener('beforeunload', () => {
-      if (api.timer) clearInterval(api.timer);
-      if (api.auditTimer) clearInterval(api.auditTimer);
-    });
+  function boot() {
+    initLinks();
+    loop();
   }
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);
   else boot();
 
-  // Для тестов и отладки в консоли браузера
-  window.RS_MAIN = { api, lock, read, press, tryOpen, closeCargo, toggleCargo, lockView, render };
+  // для проверок в браузере и отладки
+  window.RS_MAIN = { render, currentView, buildAlerts, moduleState, journal, link };
 })();

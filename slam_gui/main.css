@@ -1,222 +1,782 @@
 /* ============================================================================
  * main.css — основной экран робота (киоск).
- * Тёмная тема ZMK Vision, крупные элементы под сенсорный дисплей 10–15″.
- * Рассчитан на 1024×600 … 1920×1080 без прокрутки страницы.
+ * Тёмная тема с крупными цифрами для дисплея. Рассчитан на 1024×600 … 1920×1080
+ * без прокрутки; на планшете и телефоне страница прокручивается.
  * ========================================================================== */
 
-:root{
-  --bg:#0b1411;
-  --panel:#121d18;
-  --panel-2:#16241e;
-  --line:#22322b;
-  --text:#e6f0eb;
-  --muted:#8fa79d;
-  --accent:#d5ff45;
-  --ok:#7ddc52;
-  --warn:#e5a438;
-  --err:#ff6a55;
-  --radius:18px;
+:root {
+  --bg: #0a120f;
+  --panel: #111c17;
+  --panel-2: #16241e;
+  --line: #22342c;
+  --line-2: #2d4439;
+  --text: #e8f1ec;
+  --muted: #8ea498;
+  --accent: #d5ff45;
+  --ok: #7ddc52;
+  --warn: #e5a438;
+  --err: #ff6a55;
+  --idle: #6f8579;
+  --radius: 16px;
+  --gap: 10px;
+  --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
 }
 
-*{box-sizing:border-box}
+*, *::before, *::after { box-sizing: border-box; }
+[hidden] { display: none !important; }
+html, body { height: 100%; }
 
-html,body{height:100%}
-body{
-  margin:0;
-  background:radial-gradient(1200px 700px at 20% -10%, #14231d 0%, transparent 60%);
-  background-color:var(--bg);
-  color:var(--text);
-  font-family:Inter,"Segoe UI",system-ui,Arial,sans-serif;
-  display:grid;
-  grid-template-rows:auto minmax(0,1fr) auto;
-  gap:10px;
-  padding:10px;
-  overflow:hidden;
-  user-select:none;
-  -webkit-tap-highlight-color:transparent;
-}
-
-/* ---------- 1. Шапка ---------- */
-.sc-head{
-  display:flex;align-items:center;gap:14px;
-  background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
-  padding:10px 16px;
-}
-.sc-brand{display:flex;align-items:center;gap:11px}
-.sc-logo{
-  width:42px;height:42px;border-radius:12px;display:grid;place-items:center;
-  background:var(--accent);color:#17211d;flex-shrink:0;
-}
-.sc-brand b{display:block;font-size:19px;letter-spacing:.06em}
-.sc-brand small{display:block;color:var(--muted);font-size:11px;margin-top:2px}
-
-.sc-mode{
-  margin-left:auto;
-  font-size:14px;font-weight:800;letter-spacing:.05em;
-  color:var(--accent);border:1px solid #3a4a1f;background:#1a2410;
-  padding:8px 14px;border-radius:999px;white-space:nowrap;
-}
-.sc-head-right{display:flex;align-items:center;gap:16px}
-.sc-link{display:flex;align-items:center;gap:8px;color:var(--muted);font-size:12.5px}
-.sc-dot{width:11px;height:11px;border-radius:50%;background:var(--ok);box-shadow:0 0 0 4px #7ddc5222}
-.sc-dot.off{background:var(--err);box-shadow:0 0 0 4px #ff6a5522}
-.sc-clock{font-size:26px;font-weight:800;font-variant-numeric:tabular-nums;letter-spacing:.02em}
-
-/* ---------- 2. Сетка ---------- */
-.sc-grid{
-  display:grid;
-  grid-template-columns:minmax(0,1.6fr) minmax(230px,0.9fr) minmax(270px,1fr);
-  gap:10px;
-  min-height:0;
-}
-.sc-panel{
-  background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
-  padding:12px 14px;display:flex;flex-direction:column;min-height:0;overflow:hidden;
-}
-.sc-panel-head{display:flex;align-items:baseline;gap:10px;margin-bottom:10px}
-.sc-panel-head h1{margin:0;font-size:15px;text-transform:uppercase;letter-spacing:.08em}
-.sc-note{color:var(--muted);font-size:11px;margin-left:auto;text-align:right}
-
-/* ---------- Двигатели ---------- */
-.sc-motor-grid{
-  flex:1;min-height:0;display:grid;grid-template-columns:1fr 1fr;grid-template-rows:1fr 1fr;gap:10px;
-}
-.mcard{
-  background:var(--panel-2);border:1px solid var(--line);border-radius:14px;
-  padding:10px 12px;display:flex;flex-direction:column;gap:8px;min-height:0;
-}
-.mcard-top{display:flex;align-items:center;gap:8px}
-.mcard-top b{font-size:22px;letter-spacing:.04em}
-.mcard-name{color:var(--muted);font-size:11px}
-.mcard-body{flex:1;display:flex;align-items:center;gap:12px;min-height:0}
-
-/* циферблат угла руля */
-.dial{position:relative;width:100%;max-width:130px;flex-shrink:0}
-.dial svg{width:100%;height:auto;display:block}
-.dial-bg{fill:none;stroke:#26382f;stroke-width:7}
-.dial-tick{stroke:#3a5148;stroke-width:2.5}
-.dial-needle{stroke:var(--accent);stroke-width:5;stroke-linecap:round;transform-origin:50px 50px;transition:transform .18s linear}
-.dial-hub{fill:var(--accent)}
-.dial-val{
-  position:absolute;left:0;right:0;bottom:-2px;text-align:center;
-  font-size:17px;font-weight:800;font-variant-numeric:tabular-nums;
+body {
+  margin: 0;
+  height: 100vh;
+  height: 100dvh;
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap);
+  padding: var(--gap);
+  overflow: hidden;
+  background:
+    radial-gradient(1200px 700px at 12% -12%, #173127 0%, transparent 60%),
+    var(--bg);
+  color: var(--text);
+  font-family: Inter, "Segoe UI", system-ui, Arial, sans-serif;
+  user-select: none;
+  -webkit-font-smoothing: antialiased;
+  -webkit-tap-highlight-color: transparent;
 }
 
-.mcard-stats{flex:1;display:flex;flex-direction:column;gap:6px;min-width:0}
-.mstat{display:flex;align-items:baseline;gap:8px;justify-content:space-between}
-.mstat span{color:var(--muted);font-size:11px;white-space:nowrap}
-.mstat b{font-size:21px;font-variant-numeric:tabular-nums}
-.mstat b small{font-size:11px;font-weight:600;color:var(--muted);margin-left:3px}
-.pbar{height:9px;border-radius:6px;background:#0d1714;overflow:hidden;border:1px solid var(--line)}
-.pbar i{display:block;height:100%;width:0;background:linear-gradient(90deg,#7ddc52,#d5ff45);transition:width .25s}
-.pbar i.neg{background:linear-gradient(90deg,#e5a438,#ff6a55)}
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
-.sc-chip{
-  margin-left:auto;font-size:10.5px;font-weight:800;letter-spacing:.05em;
-  padding:5px 9px;border-radius:999px;white-space:nowrap;
-}
-.sc-chip-ok{background:#16301f;color:var(--ok)}
-.sc-chip-move{background:#1a2a22;color:var(--accent)}
-.sc-chip-idle{background:#1b2622;color:var(--muted)}
-.sc-chip-warn{background:#3a3218;color:var(--warn)}
-.sc-chip-err{background:#3a1a17;color:var(--err)}
+/* ---------------------------------------------------------------- шапка */
 
-.sc-motor-foot{
-  display:flex;justify-content:space-between;gap:10px;margin-top:10px;
-  color:var(--muted);font-size:11px;
+.top {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 16px;
+  min-width: 0;
+  padding: 10px 16px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
 }
 
-/* ---------- Аккумулятор ---------- */
-.sc-batt{align-items:stretch}
-.sc-ring-wrap{position:relative;display:grid;place-items:center;flex:1;min-height:0;padding:4px 0}
-.sc-ring{width:min(100%,260px);height:auto;max-height:100%;transform:rotate(-90deg)}
-.sc-ring-bg{fill:none;stroke:#1d2b25;stroke-width:13}
-.sc-ring-fill{
-  fill:none;stroke:var(--ok);stroke-width:13;stroke-linecap:round;
-  stroke-dasharray:0 999;transition:stroke-dasharray .4s linear,stroke .3s;
-}
-.sc-ring-center{position:absolute;text-align:center}
-.sc-ring-center b{font-size:clamp(38px,7vh,64px);font-weight:800;font-variant-numeric:tabular-nums;line-height:1}
-.sc-ring-center b span{font-size:.45em;color:var(--muted);margin-left:2px}
-.sc-ring-center small{display:block;color:var(--muted);font-size:12px;letter-spacing:.14em;text-transform:uppercase;margin-top:4px}
-.sc-batt-rows{display:grid;grid-template-columns:1fr 1fr;gap:6px 12px}
-.sc-batt-row{display:flex;flex-direction:column;gap:2px;background:var(--panel-2);border:1px solid var(--line);border-radius:11px;padding:7px 10px}
-.sc-batt-row span{color:var(--muted);font-size:10.5px}
-.sc-batt-row b{font-size:17px;font-variant-numeric:tabular-nums}
-.sc-batt-foot{margin-top:8px;color:var(--muted);font-size:11px;text-align:center}
+.brand { display: flex; align-items: center; gap: 12px; min-width: 0; }
 
-/* ---------- Грузовой отсек ---------- */
-.sc-lock{justify-content:flex-start}
-.sc-chip-closed{background:#1b2622;color:var(--muted)}
-.sc-chip-open{background:#16301f;color:var(--ok)}
-.sc-chip-blocked{background:#3a1a17;color:var(--err)}
-
-.sc-pin{
-  font-family:ui-monospace,SFMono-Regular,Menlo,monospace;
-  font-size:clamp(26px,4.4vh,40px);font-weight:800;letter-spacing:.34em;
-  text-align:center;padding:10px 4px;color:var(--accent);min-height:1.2em;
-}
-.sc-pin-msg{text-align:center;color:var(--muted);font-size:12px;min-height:32px;padding:0 4px 8px}
-.sc-pin-msg.ok{color:var(--ok)}
-.sc-pin-msg.err{color:var(--err)}
-.sc-pin-msg.warn{color:var(--warn)}
-
-.sc-keypad{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;flex:1;min-height:0}
-.sc-key{
-  border:1px solid var(--line);background:var(--panel-2);color:var(--text);
-  border-radius:14px;font:inherit;font-size:clamp(20px,3.4vh,30px);font-weight:700;
-  cursor:pointer;min-height:44px;transition:background .1s,transform .06s;
-}
-.sc-key:hover{background:#1d2f28}
-.sc-key:active{transform:translateY(1px);background:#24382f}
-.sc-key.sc-key-mode{color:var(--muted);font-size:clamp(15px,2.4vh,21px)}
-
-.sc-lock-buttons{display:grid;grid-template-columns:1fr;gap:8px;margin-top:10px}
-.sc-btn{
-  border:1px solid var(--line);background:var(--panel-2);color:var(--text);
-  border-radius:14px;font:inherit;font-size:15px;font-weight:700;padding:14px 10px;cursor:pointer;
-}
-.sc-btn:hover{background:#1d2f28}
-.sc-btn-primary{background:var(--accent);color:#17211d;border-color:var(--accent)}
-.sc-btn-primary:hover{background:#c8f43a}
-.sc-btn[disabled]{opacity:.55;cursor:default}
-
-.sc-cargo{
-  display:flex;justify-content:space-between;gap:8px;margin-top:10px;padding-top:9px;
-  border-top:1px solid var(--line);color:var(--muted);font-size:11.5px;
-}
-.sc-cargo b{color:var(--text)}
-
-.sc-shake{animation:scShake .35s ease}
-@keyframes scShake{0%,100%{transform:translateX(0)}20%{transform:translateX(-7px)}40%{transform:translateX(7px)}60%{transform:translateX(-4px)}80%{transform:translateX(4px)}}
-
-/* ---------- 3. Подвал ---------- */
-.sc-foot{
-  display:flex;justify-content:space-between;gap:12px;align-items:center;
-  background:var(--panel);border:1px solid var(--line);border-radius:var(--radius);
-  padding:9px 16px;color:var(--muted);font-size:11.5px;
-}
-.sc-foot-hint{margin-left:auto;text-align:right}
-
-/* ---------- Адаптация под узкие/невысокие дисплеи ---------- */
-@media (max-width:1100px){
-  .sc-grid{grid-template-columns:minmax(0,1.4fr) minmax(0,1fr);grid-template-rows:minmax(0,1.2fr) minmax(0,1fr)}
-  .sc-lock{grid-column:2;grid-row:1 / span 2}
-  .sc-motors{grid-column:1;grid-row:1}
-  .sc-batt{grid-column:1;grid-row:2}
-  .sc-batt-rows{grid-template-columns:1fr 1fr}
-}
-@media (max-height:620px){
-  .sc-brand small,.sc-note,.sc-motor-foot,.sc-foot-hint{display:none}
-  .sc-clock{font-size:20px}
-  .sc-pin{font-size:26px}
+.logo {
+  flex: none;
+  display: grid;
+  place-items: center;
+  width: 42px;
+  height: 42px;
+  border-radius: 12px;
+  background: var(--accent);
+  color: #14200f;
 }
 
-/* Ссылка на инженерный пульт в подвале (переход между экранами) */
-.sc-foot-link{
-  min-height:44px;display:inline-flex;align-items:center;
-  margin-left:14px;color:var(--accent);text-decoration:none;font-weight:700;
-  border:1px solid #3a4a1f;border-radius:999px;padding:6px 12px;white-space:nowrap;
+.brand b { display: block; font-size: 19px; letter-spacing: .06em; }
+.brand small { display: block; margin-top: 2px; color: var(--muted); font-size: 11.5px; white-space: nowrap; }
+
+.mode {
+  margin-left: 8px;
+  padding: 8px 14px;
+  border: 1px solid #3d5220;
+  border-radius: 999px;
+  background: #18230f;
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 800;
+  letter-spacing: .06em;
+  white-space: nowrap;
 }
-.sc-foot-link:hover{background:#1a2410}
-#sc-data{cursor:default}
+.mode.is-other { color: var(--muted); background: #1a2420; border-color: var(--line-2); }
+
+.top-right {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+}
+
+.clock {
+  font-size: 26px;
+  font-weight: 800;
+  letter-spacing: .02em;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  padding: 6px 11px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: #18261f;
+  color: var(--muted);
+  font-size: 12.5px;
+  font-weight: 700;
+  white-space: nowrap;
+}
+.chip.ok   { color: var(--ok);     background: #14271a; border-color: #20402a; }
+.chip.move { color: var(--accent); background: #1c2a12; border-color: #3d5220; }
+.chip.warn { color: var(--warn);   background: #2e2612; border-color: #4a3b17; }
+.chip.err  { color: var(--err);    background: #2d1714; border-color: #4d2520; }
+.chip.idle { color: var(--idle); }
+
+.dot {
+  flex: none;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: currentColor;
+}
+
+.btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 44px;   /* цель касания не меньше 44 px */
+  padding: 0 16px;
+  border-radius: 999px;
+  font: inherit;
+  font-size: 14px;
+  font-weight: 800;
+  text-decoration: none;
+  white-space: nowrap;
+  cursor: pointer;
+}
+.btn-ghost { color: var(--text); background: transparent; border: 1px solid var(--line-2); }
+.btn-ghost:hover { background: var(--panel-2); }
+.btn-accent { color: #14200f; background: var(--accent); border: 1px solid var(--accent); }
+.btn-accent:hover { background: #c8f43a; }
+
+/* ------------------------------------------------------------ тревоги */
+
+.alerts {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-width: 0;
+  padding: 9px 14px;
+  border: 1px solid #4d2520;
+  border-radius: 12px;
+  background: #2a1613;
+  color: #ffd6cf;
+  font-size: 14px;
+  font-weight: 700;
+}
+.alerts.warn { border-color: #4a3b17; background: #2a2212; color: #f7deb0; }
+.alerts-dot { flex: none; width: 10px; height: 10px; border-radius: 50%; background: var(--err); }
+.alerts.warn .alerts-dot { background: var(--warn); }
+.alerts-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.alerts-more { flex: none; margin-left: auto; color: var(--muted); font-size: 12px; font-weight: 700; }
+
+/* ------------------------------------------------------ ключевые цифры */
+
+.kpis {
+  flex: none;
+  display: grid;
+  grid-template-columns: repeat(5, minmax(0, 1fr));
+  gap: var(--gap);
+}
+
+.kpi {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+  padding: 10px 14px 12px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+}
+
+.kpi-label {
+  color: var(--muted);
+  font-size: 11.5px;
+  font-weight: 700;
+  letter-spacing: .08em;
+  text-transform: uppercase;
+  white-space: nowrap;
+}
+
+.kpi-value {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  margin-top: 2px;
+  white-space: nowrap;
+}
+
+.kpi-num {
+  font-size: clamp(26px, 3.2vw, 40px);
+  font-weight: 800;
+  line-height: 1.05;
+  font-variant-numeric: tabular-nums;
+}
+.kpi-num.warn { color: var(--warn); }
+.kpi-num.err  { color: var(--err); }
+
+.kpi-value small { color: var(--muted); font-size: 15px; font-weight: 700; }
+
+.kpi-sub {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+.kpi-sub.ok   { color: var(--ok); }
+.kpi-sub.warn { color: var(--warn); }
+.kpi-sub.err  { color: var(--err); }
+
+/* полоски: заряд (с делениями по 10 %) и температура */
+
+.meter {
+  position: relative;
+  height: 6px;
+  margin-top: auto;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: #0b1511;
+}
+.meter i {
+  display: block;
+  height: 100%;
+  width: 0;
+  background: var(--ok);
+  transition: width .4s ease, background-color .3s ease;
+}
+.meter i.warn { background: var(--warn); }
+.meter i.err  { background: var(--err); }
+.meter.segs::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  background: repeating-linear-gradient(90deg, transparent 0 calc(10% - 2px), #0b1511 calc(10% - 2px) 10%);
+}
+
+/* ------------------------------------------------------- рабочая зона */
+
+.work {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) clamp(260px, 22vw, 380px);
+  gap: var(--gap);
+}
+
+.panel {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  padding: 12px 14px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
+
+.panel-head {
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+  margin-bottom: 10px;
+}
+.panel-head h1,
+.panel-head h2 {
+  margin: 0;
+  font-size: 13.5px;
+  font-weight: 800;
+  letter-spacing: .1em;
+  text-transform: uppercase;
+}
+.panel-meta {
+  margin-left: auto;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: 12px;
+  text-align: right;
+}
+
+/* ------------------------------------------------------------ шасси */
+/*
+ * Сетка 5 × 4: по бокам — модули (углы) и оси с колёсами, по центру — корпус
+ * на всю высоту. Колонки корпуса и осей зависят от ширины окна, строки
+ * модулей не сжимаются ниже своего содержимого. Колёса поворачиваются на угол руля.
+ */
+
+.chassis-grid {
+  --axle: clamp(44px, 5vw, 110px);
+  --body: clamp(160px, 20vw, 380px);
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) var(--axle) var(--body) var(--axle) minmax(0, 1fr);
+  /* ряд модуля не короче карточки: иначе карточки заходят друг на друга */
+  grid-template-rows: minmax(0, .25fr) minmax(auto, 1fr) minmax(auto, 1fr) minmax(0, .25fr);
+  column-gap: 12px;
+  row-gap: 12px;
+}
+
+.body      { grid-column: 3; grid-row: 1 / span 4; }
+.tag-fl    { grid-column: 1; grid-row: 2; }
+.axle-fl   { grid-column: 2; grid-row: 2; }
+.axle-fr   { grid-column: 4; grid-row: 2; }
+.tag-fr    { grid-column: 5; grid-row: 2; }
+.tag-rl    { grid-column: 1; grid-row: 3; }
+.axle-rl   { grid-column: 2; grid-row: 3; }
+.axle-rr   { grid-column: 4; grid-row: 3; }
+.tag-rr    { grid-column: 5; grid-row: 3; }
+
+/* карточка модуля: id, состояние и три показателя */
+
+.mod {
+  position: relative;
+  align-self: center;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-width: 0;
+  padding: 14px 16px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+}
+.mod[data-tone="warn"] { border-color: #5a4619; }
+.mod[data-tone="err"]  { border-color: #5a2a23; }
+
+.mod-head {
+  display: flex;
+  flex-wrap: wrap;          /* подпись уходит на отдельную строку, а не обрезается */
+  align-items: center;
+  gap: 4px 8px;
+  min-width: 0;
+}
+.mod-id { font-size: 26px; font-weight: 900; letter-spacing: .04em; }
+.mod-title {
+  order: 3;                 /* всегда третьей строкой, под кодом и чипом */
+  flex: 0 0 100%;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: 13px;
+}
+.mod-head .chip { margin-left: auto; padding: 4px 9px; font-size: 11px; }
+
+.mod-metrics {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 6px;
+}
+
+/* по умолчанию: «подпись — значение» в строку */
+.metric {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+  min-width: 0;
+}
+.metric-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--muted);
+  font-size: 12.5px;
+}
+.metric-value {
+  display: inline-flex;
+  align-items: baseline;
+  gap: 4px;
+  white-space: nowrap;
+}
+.metric-value b {
+  font-size: 20px;
+  font-weight: 800;
+  line-height: 1.1;
+  font-variant-numeric: tabular-nums;
+}
+.metric-value small {
+  color: var(--muted);
+  font-size: 11.5px;
+  font-weight: 700;
+}
+
+.mod .meter { margin-top: 0; }
+
+/* ось: линия от модуля к корпусу, колесо поверх неё */
+
+.axle {
+  position: relative;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  min-height: 0;
+}
+.axle::before {
+  content: "";
+  position: absolute;
+  left: -12px;
+  right: -12px;
+  top: 50%;
+  height: 2px;
+  background: var(--line-2);
+  transform: translateY(-50%);
+}
+
+.wheel {
+  position: relative;
+  z-index: 1;
+  width: clamp(26px, 2.6vw, 40px);
+  height: min(62%, 150px);
+  border: 2px solid #3b5248;
+  border-radius: 12px;
+  background: linear-gradient(180deg, #0c1612, #101d18);
+  transition: transform .25s linear, border-color .3s ease;
+}
+.wheel::before {       /* ось колеса: видно, куда он повёрнут */
+  content: "";
+  position: absolute;
+  left: -6px;
+  right: -6px;
+  top: 50%;
+  height: 2px;
+  background: #3b5248;
+  transform: translateY(-50%);
+}
+.wheel::after {        /* ступица */
+  content: "";
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: 9px;
+  height: 9px;
+  border-radius: 50%;
+  background: #3b5248;
+  transform: translate(-50%, -50%);
+}
+.wheel[data-tone="move"] { border-color: var(--accent); }
+.wheel[data-tone="ok"]   { border-color: var(--ok); }
+.wheel[data-tone="warn"] { border-color: var(--warn); }
+.wheel[data-tone="err"]  { border-color: var(--err); }
+.wheel[data-tone="idle"] { border-color: var(--idle); }
+
+/* корпус робота по центру */
+
+.body {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  min-width: 0;
+  min-height: 0;
+  border: 1px solid var(--line-2);
+  border-radius: 26px;
+  background:
+    radial-gradient(circle at 1px 1px, #203630 1px, transparent 1.5px) 0 0 / 22px 22px,
+    linear-gradient(180deg, #15241e, #0f1915);
+  overflow: hidden;
+}
+.body::before {        /* контур рамы */
+  content: "";
+  position: absolute;
+  inset: 16px;
+  border: 1px dashed #2b4037;
+  border-radius: 18px;
+  pointer-events: none;
+}
+.body-end {
+  position: absolute;
+  left: 0;
+  right: 0;
+  color: var(--muted);
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: .16em;
+  text-align: center;
+  text-transform: uppercase;
+}
+.body-front { top: 26px; }
+.body-rear  { bottom: 26px; }
+
+.body-speed {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 2px;
+}
+.body-speed b {
+  font-size: clamp(30px, 4.4vw, 64px);
+  font-weight: 900;
+  line-height: 1;
+  font-variant-numeric: tabular-nums;
+}
+.body-speed small {
+  color: var(--muted);
+  font-size: 12px;
+  letter-spacing: .04em;
+}
+
+/* ------------------------------------------------- справа: маршрут, события */
+
+.side {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gap);
+  min-width: 0;
+  min-height: 0;
+}
+
+.route { flex: none; }
+
+.timeline {
+  position: relative;
+  margin: 0;
+  padding: 0 0 0 22px;
+  list-style: none;
+}
+.timeline::before {    /* линия маршрута */
+  content: "";
+  position: absolute;
+  left: 5px;
+  top: 10px;
+  bottom: 10px;
+  width: 2px;
+  background: var(--line-2);
+}
+.tl-item {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  gap: 1px;
+  min-width: 0;
+  padding-bottom: 12px;
+}
+.tl-item:last-child { padding-bottom: 0; }
+.tl-item::before {     /* точка остановки */
+  content: "";
+  position: absolute;
+  left: -22px;
+  top: 4px;
+  width: 12px;
+  height: 12px;
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 0 0 3px #1c2a12;
+}
+.tl-end::before {
+  border-radius: 3px;
+  background: var(--panel);
+  border: 2px solid var(--accent);
+  box-shadow: none;
+}
+.tl-item small {
+  color: var(--muted);
+  font-size: 11.5px;
+  letter-spacing: .06em;
+  text-transform: uppercase;
+}
+.tl-item b {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  font-size: 17px;
+  font-weight: 800;
+}
+
+.events {
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+.ev-list {
+  flex: 1 1 auto;
+  min-height: 0;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  overflow: hidden;
+}
+
+.ev {
+  display: grid;
+  grid-template-columns: auto auto minmax(0, 1fr);
+  align-items: baseline;
+  gap: 8px;
+  padding: 7px 0;
+  border-bottom: 1px solid #1a2822;
+  font-size: 13.5px;
+  line-height: 1.3;
+}
+.ev-dot {
+  align-self: center;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--muted);
+}
+.ev-ok .ev-dot   { background: var(--ok); }
+.ev-warn .ev-dot { background: var(--warn); }
+.ev-err .ev-dot  { background: var(--err); }
+
+.ev time {
+  color: var(--muted);
+  font-family: var(--mono);
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+.ev-text {
+  min-width: 0;
+  overflow-wrap: anywhere;  /* длинное событие переносится, а не обрезается */
+}
+.ev-empty {
+  padding: 6px 0;
+  color: var(--muted);
+  font-size: 13px;
+}
+
+/* ------------------------------------------------------------ подвал */
+
+.foot {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  min-width: 0;
+  padding: 8px 8px 8px 16px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  color: var(--muted);
+  font-size: 12px;
+}
+.foot > span {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.foot .btn { margin-left: auto; }
+
+/* ------------------------------------ связь потеряна: данные устарели */
+
+body.is-stale .kpis,
+body.is-stale .chassis,
+body.is-stale .side {
+  opacity: .45;
+  filter: grayscale(.6);
+}
+
+/* ------------------------------------------------------ адаптация */
+
+/* широкие экраны: показатели модуля в три колонки */
+@media (min-width: 1700px) {
+  .mod-metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+  .metric {
+    flex-direction: column;
+    align-items: flex-start;
+    justify-content: flex-start;
+    gap: 2px;
+  }
+  .metric-value b { font-size: clamp(26px, 2.3vw, 36px); }
+}
+
+/* низкие экраны (1024×600 и т. п.): подписи и отступы сокращаем */
+@media (max-height: 760px) {
+  .chassis-grid { grid-template-rows: 0 minmax(0, 1fr) minmax(0, 1fr) 0; row-gap: 6px; }
+  .brand small { display: none; }
+  .clock { font-size: 20px; }
+  .kpi { padding: 8px 12px 10px; }
+  .kpi-num { font-size: clamp(22px, 3vw, 30px); }
+  .mod { padding: 8px 10px; gap: 6px; }
+  .mod-title { display: none; }
+  .mod-id { font-size: 18px; }
+  .mod-metrics { gap: 2px; }
+  .metric-value b { font-size: 17px; }
+  .body::before { inset: 10px; }
+  .body-front { top: 14px; }
+  .body-rear  { bottom: 14px; }
+  .ev { padding: 5px 0; font-size: 12.5px; }
+}
+
+/* планшет вертикально и телефон: одна колонка, страница прокручивается */
+@media (max-width: 900px) {
+  body {
+    height: auto;
+    min-height: 100vh;
+    min-height: 100dvh;
+    overflow: visible;
+  }
+  .top { flex-wrap: wrap; }
+  .top-right { margin-left: 0; flex-wrap: wrap; }
+  .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .kpi-soc { grid-column: 1 / -1; }
+  .work { flex: none; grid-template-columns: minmax(0, 1fr); }
+
+  .chassis-grid {
+    flex: none;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    grid-template-rows: auto auto auto;
+    column-gap: 10px;
+    row-gap: 10px;
+  }
+  .body { grid-column: 1 / -1; grid-row: 1; min-height: 150px; }
+  .body-front { top: 12px; }
+  .body-rear  { bottom: 12px; }
+  .axle { display: none; }
+  .tag-fl { grid-column: 1; grid-row: 2; }
+  .tag-fr { grid-column: 2; grid-row: 2; }
+  .tag-rl { grid-column: 1; grid-row: 3; }
+  .tag-rr { grid-column: 2; grid-row: 3; }
+
+  .side { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); }
+  .events { min-height: 260px; }
+  .foot { flex-wrap: wrap; }
+}
+
+@media (max-width: 560px) {
+  .metric {
+    flex-direction: column;
+    align-items: flex-start;
+    justify-content: flex-start;
+    gap: 1px;
+  }
+  .metric-value b { font-size: 22px; }
+  .clock { font-size: 20px; }
+  .brand small { display: none; }
+  .mod-title { display: none; }
+  /* узкая карточка: код и чип состояния помещаются в одну строку */
+  .mod { padding: 12px 10px; }
+  .mod-head { gap: 6px; }
+  .mod-id { font-size: 22px; }
+  .mod-head .chip { padding: 3px 7px; font-size: 10.5px; }
+  .side { grid-template-columns: minmax(0, 1fr); }
+  .body-speed b { font-size: 30px; }
+  .foot > span { display: none; }
+  .foot .btn { width: 100%; margin-left: 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    transition: none !important;
+    animation: none !important;
+  }
+}
