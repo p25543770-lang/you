@@ -1,15 +1,17 @@
 /* ============================================================================
  * main.css — основной экран робота (киоск).
- * Слева колонка: режим и связь, маршрут, инженерный пульт, журнал событий, выход.
- * Справа: полоса тревог, ключевые показатели и шасси. Тёмная тема, крупные цифры.
- * От 1001 px — две колонки без прокрутки. Уже 1000 px колонка уходит под шасси,
- * страница прокручивается.
+ * Слева меню в стиле инженерного пульта: бренд, разделы, журнал событий, связь
+ * с бортом, оператор. Справа: шапка (маршрут, режим, часы, выход), полоса тревог,
+ * ключевые показатели АКБ и тяги, шасси. Тёмная тема, крупные цифры.
+ * От 1001 px — две колонки без прокрутки. Уже 1000 px меню становится строкой
+ * над экраном, страница прокручивается.
  * ========================================================================== */
 
 :root {
   --bg: #0a120f;
   --panel: #111c17;
   --panel-2: #16241e;
+  --side: #101b17;
   --line: #22342c;
   --line-2: #2d4439;
   --text: #e8f1ec;
@@ -21,7 +23,7 @@
   --idle: #6f8579;
   --radius: 16px;
   --gap: 10px;
-  --side-w: clamp(200px, 17vw, 268px);
+  --side-w: clamp(188px, 15.5vw, 216px);
   --mono: ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace;
 }
 
@@ -47,43 +49,48 @@ body {
 
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
+/* переход по пункту меню подсвечивает раздел один раз */
+:target { animation: target-flash 1.4s ease-out 1; }
+@keyframes target-flash {
+  from { box-shadow: 0 0 0 3px rgba(213, 255, 69, .7); }
+  to   { box-shadow: 0 0 0 0 rgba(213, 255, 69, 0); }
+}
+
 /* ------------------------------------------------------------- раскладка */
-/*
- * Слева пять блоков в столбик, журнал растягивается на всё свободное место.
- * Справа — главная часть, на всю высоту экрана.
- */
 
 .app {
   height: 100%;
   min-height: 0;
   display: grid;
   grid-template-columns: var(--side-w) minmax(0, 1fr);
-  grid-template-rows: auto auto auto minmax(0, 1fr) auto;
-  grid-template-areas:
-    "top     main"
-    "route   main"
-    "console main"
-    "events  main"
-    "foot    main";
+  grid-template-rows: minmax(0, 1fr);
   gap: var(--gap);
 }
 
-.top     { grid-area: top; }
-.route   { grid-area: route; }
-.console { grid-area: console; }
-.events  { grid-area: events; }
-.foot    { grid-area: foot; }
+/* слева: меню, журнал, связь, оператор — сверху вниз, журнал растягивается */
+.side {
+  min-height: 0;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  padding: 14px 12px 12px;
+  background: var(--side);
+  border: 1px solid var(--line);
+  border-radius: var(--radius);
+  overflow: hidden;
+}
 
+/* справа: шапка, тревоги, показатели, шасси */
 .main {
-  grid-area: main;
+  min-height: 0;
+  min-width: 0;
   display: flex;
   flex-direction: column;
   gap: var(--gap);
-  min-width: 0;
-  min-height: 0;
 }
 
-/* -------------------------------------------------------------- панели */
+/* -------------------------------------------------------- панели и кнопки */
 
 .panel {
   display: flex;
@@ -105,17 +112,9 @@ body {
   min-width: 0;
   margin-bottom: 4px;
 }
-.panel-head h1,
 .panel-head h2 {
   margin: 0;
   font-size: 13.5px;
-  font-weight: 800;
-  letter-spacing: .1em;
-  text-transform: uppercase;
-}
-.sec-title {
-  margin: 0;
-  font-size: 13px;
   font-weight: 800;
   letter-spacing: .1em;
   text-transform: uppercase;
@@ -130,8 +129,6 @@ body {
   font-size: 12px;
   text-align: right;
 }
-
-/* ------------------------------------- общие элементы: кнопки, чипы, точки */
 
 .btn {
   display: inline-flex;
@@ -149,8 +146,6 @@ body {
 }
 .btn-ghost { color: var(--text); background: transparent; border: 1px solid var(--line-2); }
 .btn-ghost:hover { background: var(--panel-2); }
-.btn-accent { color: #14200f; background: var(--accent); border: 1px solid var(--accent); }
-.btn-accent:hover { background: #c8f43a; }
 
 .chip {
   display: inline-flex;
@@ -172,140 +167,72 @@ body {
 .chip.err  { color: var(--err);    background: #2d1714; border-color: #4d2520; }
 .chip.idle { color: var(--idle); }
 
-.dot {
+/* ------------------------------------------------------------ меню слева */
+
+.brand { display: flex; align-items: center; gap: 11px; min-width: 0; padding: 2px 6px 12px; }
+
+.brandmark {
   flex: none;
-  width: 9px;
-  height: 9px;
-  border-radius: 50%;
-  background: currentColor;
-}
-
-/* ------------------------------------------------- слева: режим и связь */
-
-.top { gap: 10px; }
-
-.brand { display: flex; align-items: center; gap: 12px; min-width: 0; }
-
-.logo {
-  flex: none;
+  width: 38px;
+  height: 38px;
   display: grid;
   place-items: center;
-  width: 42px;
-  height: 42px;
-  border-radius: 12px;
+  border-radius: 10px;
   background: var(--accent);
-  color: #14200f;
+  color: #17211d;
 }
+.brand b { display: block; font-size: 14px; letter-spacing: .08em; }
+.brand small { display: block; margin-top: 3px; color: #84968e; font-size: 10px; white-space: nowrap; }
 
-.brand b { display: block; font-size: 19px; letter-spacing: .06em; }
-.brand small { display: block; margin-top: 2px; color: var(--muted); font-size: 11.5px; white-space: nowrap; }
+.nav { flex: none; display: flex; flex-direction: column; gap: 4px; }
 
-.mode {
-  align-self: flex-start;
-  max-width: 100%;
-  padding: 7px clamp(10px, 1vw, 14px);
-  border: 1px solid #3d5220;
-  border-radius: 999px;
-  background: #18230f;
-  color: var(--accent);
-  font-size: clamp(11px, .9vw, 12.5px);
-  font-weight: 800;
-  line-height: 1.25;
-  letter-spacing: .04em;
-  white-space: normal;   /* на узкой колонке переносится, а не обрезается */
-}
-.mode.is-other { color: var(--muted); background: #1a2420; border-color: var(--line-2); }
-
-.status {
+.nav a {
   display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 6px;
-  min-width: 0;
+  align-items: center;
+  gap: 11px;
+  min-height: 40px;
+  padding: 8px 10px;
+  border-radius: 8px;
+  color: #92a49c;
+  font-size: 13px;
+  font-weight: 600;
+  text-decoration: none;
 }
+.nav a:hover { background: #1a2a23; color: #e6f0ea; }
+.nav a.active { background: #203029; color: #fff; }
+.nav a.active .ico { color: var(--accent); }
+.ico { flex: none; }
 
-.clock {
-  font-size: 30px;
+.nav-text { display: flex; flex-direction: column; min-width: 0; line-height: 1.2; }
+.nav-text small { margin-top: 2px; color: #6f8579; font-size: 10.5px; font-weight: 500; }
+
+.nav-badge {
+  margin-left: auto;
+  padding: 2px 7px;
+  border-radius: 10px;
+  background: #e4503e;
+  color: #fff;
+  font-size: 10px;
+  font-style: normal;
   font-weight: 800;
-  line-height: 1.1;
-  letter-spacing: .02em;
-  font-variant-numeric: tabular-nums;
-  white-space: nowrap;
-}
-
-/* маршрут */
-
-.route .timeline { margin-top: 2px; }
-
-.timeline {
-  position: relative;
-  margin: 0;
-  padding: 0 0 0 22px;
-  list-style: none;
-}
-.timeline::before {    /* линия маршрута */
-  content: "";
-  position: absolute;
-  left: 5px;
-  top: 10px;
-  bottom: 10px;
-  width: 2px;
-  background: var(--line-2);
-}
-.tl-item {
-  position: relative;
-  display: flex;
-  flex-direction: column;
-  gap: 1px;
-  min-width: 0;
-  padding-bottom: 12px;
-}
-.tl-item:last-child { padding-bottom: 0; }
-.tl-item::before {     /* точка остановки */
-  content: "";
-  position: absolute;
-  left: -22px;
-  top: 4px;
-  width: 12px;
-  height: 12px;
-  border-radius: 50%;
-  background: var(--accent);
-  box-shadow: 0 0 0 3px #1c2a12;
-}
-.tl-end::before {
-  border-radius: 3px;
-  background: var(--panel);
-  border: 2px solid var(--accent);
-  box-shadow: none;
-}
-.tl-item small {
-  color: var(--muted);
-  font-size: 11.5px;
-  letter-spacing: .06em;
-  text-transform: uppercase;
-}
-.tl-item b {
-  min-width: 0;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  font-size: 17px;
-  font-weight: 800;
-}
-
-/* инженерный пульт */
-
-.console-text {
-  margin: 0;
-  color: var(--muted);
-  font-size: 12.5px;
   line-height: 1.4;
 }
-.console .btn { width: 100%; }
+.nav-badge.warn { background: var(--warn); color: #1a1408; }
 
-/* журнал событий */
+/* журнал событий — в середине меню, растягивается на свободную высоту */
 
-.events { min-height: 0; }
+.events {
+  flex: 1 1 auto;
+  min-height: 0;
+  padding: 12px 4px 0;
+  background: none;
+  border: 0;
+  border-top: 1px solid #1f2e27;
+  border-radius: 0;
+}
+.events .panel-head { margin-bottom: 2px; }
+.events .panel-head h2 { color: var(--muted); font-size: 11px; letter-spacing: .12em; }
+.events .panel-meta { font-size: 11px; }
 
 .ev-list {
   flex: 1 1 auto;
@@ -320,16 +247,16 @@ body {
   display: grid;
   grid-template-columns: auto auto minmax(0, 1fr);
   align-items: baseline;
-  gap: 8px;
-  padding: 7px 0;
+  gap: 7px;
+  padding: 6px 0;
   border-bottom: 1px solid #1a2822;
-  font-size: 13.5px;
+  font-size: 12.5px;
   line-height: 1.3;
 }
 .ev-dot {
   align-self: center;
-  width: 8px;
-  height: 8px;
+  width: 7px;
+  height: 7px;
   border-radius: 50%;
   background: var(--muted);
 }
@@ -340,7 +267,7 @@ body {
 .ev time {
   color: var(--muted);
   font-family: var(--mono);
-  font-size: 12px;
+  font-size: 11px;
   font-variant-numeric: tabular-nums;
 }
 .ev-text {
@@ -350,18 +277,156 @@ body {
 .ev-empty {
   padding: 6px 0;
   color: var(--muted);
-  font-size: 13px;
+  font-size: 12.5px;
 }
 
-/* выход и характеристики */
+/* связь с бортом — карточка над оператором */
 
-.foot { gap: 8px; }
-.foot .btn { width: 100%; }
-.specs {
+.side-status {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  min-width: 0;
+  padding: 10px 12px;
+  border: 1px solid #2c3c35;
+  border-radius: 10px;
+  background: #17241f;
+}
+.side-status.err { border-color: #4d2520; }
+.side-status-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  min-width: 0;
+  font-size: 12px;
+  font-weight: 700;
+}
+.side-status-title > span:last-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.side-status small {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #72877d;
+  font-size: 10.5px;
+}
+.link-state { color: var(--muted); font-weight: 800; }
+.side-status.ok .link-state  { color: var(--ok); }
+.side-status.err .link-state { color: var(--err); }
+
+.pulse {
+  flex: none;
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--idle);
+  box-shadow: 0 0 0 4px #6f858522;
+}
+.side-status.ok .pulse  { background: var(--ok);  box-shadow: 0 0 0 4px #7ddc5222; }
+.side-status.err .pulse { background: var(--err); box-shadow: 0 0 0 4px #ff6a5522; }
+
+/* оператор смены */
+
+.profile {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  min-width: 0;
+  padding-top: 12px;
+  border-top: 1px solid #293831;
+}
+.profile > div { min-width: 0; }
+.profile b { display: block; font-size: 11.5px; }
+.profile small {
+  display: block;
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: #84968e;
+  font-size: 10px;
+}
+
+.avatar {
+  flex: none;
+  width: 30px;
+  height: 30px;
+  display: grid;
+  place-items: center;
+  border-radius: 50%;
+  background: var(--accent);
+  color: #1a2923;
+  font-size: 10.5px;
+  font-weight: 800;
+}
+
+/* -------------------------------------------------------- шапка справа */
+
+.top {
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px 16px;
+  min-width: 0;
+  padding: 2px 2px 0;
+}
+.top-title { min-width: 0; flex: 1 1 auto; }
+.top-title h1 {
   margin: 0;
+  font-size: 20px;
+  font-weight: 800;
+  line-height: 1.2;
+}
+.route-line {
+  margin: 3px 0 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--muted);
-  font-size: 11.5px;
-  line-height: 1.4;
+  font-size: 12.5px;
+}
+.route-line b { color: var(--text); font-size: 14px; font-weight: 700; }
+.route-arrow { margin: 0 6px; color: var(--accent); font-weight: 700; }
+
+.top-status {
+  flex: none;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.mode {
+  flex: 0 1 auto;
+  max-width: 100%;
+  padding: 6px clamp(10px, 1vw, 14px);
+  border: 1px solid #3d5220;
+  border-radius: 999px;
+  background: #18230f;
+  color: var(--accent);
+  font-size: clamp(11px, .9vw, 12.5px);
+  font-weight: 800;
+  line-height: 1.25;
+  letter-spacing: .04em;
+  white-space: normal;   /* на узком экране переносится, а не обрезается */
+}
+.mode.is-other { color: var(--muted); background: #1a2420; border-color: var(--line-2); }
+
+.clock {
+  font-size: 28px;
+  font-weight: 800;
+  line-height: 1.1;
+  letter-spacing: .02em;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 /* ------------------------------------------------------------ тревоги */
@@ -372,7 +437,8 @@ body {
   align-items: center;
   gap: 10px;
   min-width: 0;
-  padding: 9px 14px;
+  min-height: 36px;
+  padding: 7px 14px;
   border: 1px solid #4d2520;
   border-radius: 12px;
   background: #2a1613;
@@ -381,8 +447,10 @@ body {
   font-weight: 700;
 }
 .alerts.warn { border-color: #4a3b17; background: #2a2212; color: #f7deb0; }
+.alerts.ok { border-color: #20402a; background: #14271a; color: #bfe9c9; font-weight: 600; }
 .alerts-dot { flex: none; width: 10px; height: 10px; border-radius: 50%; background: var(--err); }
 .alerts.warn .alerts-dot { background: var(--warn); }
+.alerts.ok .alerts-dot { background: var(--ok); }
 .alerts-text { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .alerts-more { flex: none; margin-left: auto; color: var(--muted); font-size: 12px; font-weight: 700; }
 
@@ -706,30 +774,62 @@ body {
   letter-spacing: .04em;
 }
 
-/* ------------------------------------ связь потеряна: данные устарели */
+/* ------------------------------------------ связь потеряна: данные устарели */
 
 body.is-stale .kpis,
 body.is-stale .chassis,
-body.is-stale .route {
+body.is-stale #route {
   opacity: .45;
   filter: grayscale(.6);
 }
 
-/* ------------------------------------------------------ адаптация */
+/* подпись под шасси: характеристики (на тесных экранах скрыта) */
 
-/* низкие экраны (высота до 820 px), две колонки: без описаний и характеристик */
-@media (min-width: 1001px) and (max-height: 820px) {
-  .brand small,
-  .console-text,
-  .specs { display: none; }
-  .clock { font-size: 24px; }
-  .route .tl-item b { font-size: 15px; }
-  .kpi { padding: 9px 12px 11px; }
+.specs {
+  flex: none;
+  margin: 0;
+  padding: 0 4px;
+  color: var(--muted);
+  font-size: 11.5px;
+  line-height: 1.4;
 }
 
-/* совсем низкие (1024×600): подписи и отступы модулей сокращаем */
+/* ------------------------------------------------------ адаптация */
+
+/* низкие экраны (высота до 820 px), две колонки: без характеристик, компактнее */
+@media (min-width: 1001px) and (max-height: 820px) {
+  .specs { display: none; }
+  .clock { font-size: 24px; }
+  .kpi { padding: 9px 12px 11px; }
+  .nav a { min-height: 36px; }
+}
+
+/* совсем низкие (1024×600): меню, шапка и модули плотнее */
 @media (min-width: 1001px) and (max-height: 760px) {
-  .chassis-grid { --card-h: 170px; row-gap: 10px; }
+  .app, .main { gap: 8px; }
+  .side { gap: 8px; padding: 10px 10px 10px; }
+  .brand { padding-bottom: 8px; }
+  .brandmark { width: 34px; height: 34px; }
+  .brand b { font-size: 13px; }
+  .nav { gap: 2px; }
+  .nav a { min-height: 32px; padding: 6px 9px; gap: 9px; font-size: 12.5px; }
+  .nav-text small { display: none; }
+  .events { padding-top: 8px; }
+  .events .panel-meta { display: none; }
+  .ev { padding: 4px 0; font-size: 12px; }
+  .side-status { padding: 7px 10px; }
+  .profile { padding-top: 8px; }
+  .avatar { width: 26px; height: 26px; }
+  .top-title h1 { font-size: 17px; }
+  .route-line { font-size: 12px; }
+  .route-line b { font-size: 13px; }
+  .clock { font-size: 22px; }
+  .mode { padding: 4px 10px; }
+  .chip { padding: 4px 9px; font-size: 12px; }
+  .btn { min-height: 36px; }
+  .alerts { min-height: 32px; padding: 5px 12px; }
+  .kpi { padding: 8px 12px 9px; }
+  .chassis-grid { --card-h: 160px; row-gap: 8px; }
   .mod { padding: 8px 10px; gap: 6px; }
   .mod-title { display: none; }
   .mod-id { font-size: 18px; }
@@ -739,50 +839,9 @@ body.is-stale .route {
   .body-front { top: 14px; }
   .body-rear  { bottom: 14px; }
   .kpi-num { font-size: clamp(22px, 3vw, 30px); }
-  .ev { padding: 5px 0; font-size: 12.5px; }
 }
 
-/* ещё ниже (до 760 px): колонка плотнее, маршрут в одну строку, журнал виден */
-@media (min-width: 1001px) and (max-height: 760px) {
-  .app { gap: 8px; }
-  .panel { padding: 10px 12px; }
-  .top { gap: 8px; }
-  .logo { width: 36px; height: 36px; }
-  .brand b { font-size: 17px; }
-  .mode { padding: 5px 10px; }
-  .status { gap: 4px; }
-  .chip { padding: 4px 9px; font-size: 12px; }
-  .sec-title { font-size: 12px; letter-spacing: .06em; }
-  .events .panel-meta { display: none; }
-  .clock { font-size: 22px; }
-  .console,
-  .foot { gap: 6px; }
-  .route .timeline {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: baseline;
-    gap: 4px 8px;
-    padding: 0;
-  }
-  .route .timeline::before,
-  .route .tl-item::before { display: none; }
-  .route .tl-item {
-    flex-direction: row;
-    align-items: baseline;
-    gap: 0;
-    padding-bottom: 0;
-  }
-  .route .tl-item small { display: none; }
-  .route .tl-item b { font-size: 14px; }
-  .route .tl-item:not(:last-child)::after {
-    content: "→";
-    margin: 0 6px;
-    color: var(--muted);
-    font-weight: 700;
-  }
-}
-
-/* планшет вертикально и телефон: колонка уходит под шасси, страница прокручивается */
+/* планшет вертикально и телефон: меню становится строкой, страница прокручивается */
 @media (max-width: 1000px) {
   body {
     height: auto;
@@ -792,29 +851,55 @@ body.is-stale .route {
   }
   .app {
     height: auto;
-    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
-    grid-template-rows: none;
-    grid-template-areas:
-      "top top"
-      "route console"
-      "main main"
-      "events events"
-      "foot foot";
+    display: flex;
+    flex-direction: column;
+    gap: var(--gap);
   }
-  .top { flex-direction: row; flex-wrap: wrap; align-items: center; gap: 10px 14px; }
-  .brand { flex: 1 1 auto; }
-  .status { flex-direction: row; flex-wrap: wrap; align-items: center; }
-  .clock { margin-left: auto; }
-  .events { max-height: 260px; }
-  .ev-list { overflow-y: auto; }
-  .foot { flex-direction: row; flex-wrap: wrap; align-items: center; }
-  .foot .btn { width: auto; }
-  .specs { flex: 1 1 260px; }
-  .alerts-text { white-space: normal; }
-  .kpis { grid-template-columns: repeat(2, minmax(0, 1fr)); }
-  .kpi-soc { grid-column: 1 / -1; }
+  /* меню и главная часть становятся обычными блоками одного столбца; порядок задаём здесь */
+  .side,
+  .main { display: contents; }
 
-  .chassis { flex: none; }
+  .brand { order: 1; padding: 2px 4px; }
+  .nav {
+    order: 2;
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
+    gap: 6px;
+    padding: 8px;
+    background: var(--side);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+  }
+  .nav a { min-height: 36px; min-width: 0; padding: 7px 10px; background: #14201b; }
+  .nav-text small { display: none; }
+  .top { order: 3; flex-wrap: wrap; }
+  .top-status { flex-wrap: wrap; }
+  .clock { margin-left: auto; }
+  .alerts { order: 4; }
+  .alerts-text { white-space: normal; }
+  .kpis { order: 5; grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .kpi-soc { grid-column: 1 / -1; }
+  .chassis { order: 6; flex: none; }
+  .events {
+    order: 7;
+    flex: none;
+    max-height: 260px;
+    padding: 12px 14px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+  }
+  .ev-list { overflow-y: auto; }
+  .side-status { order: 8; }
+  .profile {
+    order: 9;
+    padding: 12px 14px;
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+  }
+  .specs { order: 10; }
+
   .chassis-grid {
     flex: none;
     grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
@@ -833,18 +918,21 @@ body.is-stale .route {
   .tag-rr { grid-column: 2; grid-row: 3; }
 }
 
-/* телефон: всё в один столбик */
-@media (max-width: 560px) {
-  .app {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-areas:
-      "top"
-      "route"
-      "console"
-      "main"
-      "events"
-      "foot";
+/* узкий планшет и телефон: меню одной прокручиваемой строкой, подписи не переносятся */
+@media (max-width: 720px) {
+  .nav {
+    display: flex;
+    flex-wrap: nowrap;
+    overflow-x: auto;
+    scrollbar-width: none;
   }
+  .nav::-webkit-scrollbar { display: none; }
+  .nav a { flex: 0 0 auto; white-space: nowrap; }
+}
+
+/* телефон: всё в один столбец */
+@media (max-width: 560px) {
+  .top-status { width: 100%; justify-content: space-between; }
   .metric {
     flex-direction: column;
     align-items: flex-start;
@@ -861,7 +949,6 @@ body.is-stale .route {
   .mod-id { font-size: 22px; }
   .mod-head .chip { padding: 3px 7px; font-size: 10.5px; }
   .body-speed b { font-size: 30px; }
-  .foot .btn { width: 100%; }
 }
 
 @media (prefers-reduced-motion: reduce) {

@@ -7,11 +7,12 @@
  *   • демо-данные — только при адресе с параметром ?demo=1 (показ без робота).
  *
  * Что показывает экран:
- *   шапка (режим, источник данных, связь с бортом, часы, выход);
- *   полоса тревог — появляется, только если что-то требует внимания;
+ *   меню слева: разделы (пункты ведут к разделам экрана, «Сервис» — к пульту),
+ *   журнал событий за сеанс, связь с бортом и источник данных;
+ *   шапка: маршрут, режим, часы, выход;
+ *   полоса тревог: при проблемах — тревоги, без них — строка «тревог нет»;
  *   ключевые показатели АКБ и тяги;
- *   шасси: четыре модуля по углам (угол руля, обороты, температура, состояние);
- *   маршрут и журнал событий, которые экран заметил за сеанс.
+ *   шасси: четыре модуля по углам (угол руля, обороты, температура, состояние).
  *
  * Журнал пишет только переходы: связь, связь с бортом, уровень АКБ, режим,
  * источник и состояние модулей (в норме ↔ проблема). Ход в норме не логируется.
@@ -35,6 +36,7 @@
   const MODULES = ['FL', 'FR', 'RL', 'RR'];
   const LEVEL_SEV = { 'НОРМА': 'ok', 'НИЗКИЙ': 'warn', 'КРИТИЧЕСКИЙ': 'err' };
   const LEVEL_WORD = { 'НОРМА': 'норма', 'НИЗКИЙ': 'низкий', 'КРИТИЧЕСКИЙ': 'критический' };
+  const SOURCE_NAME = { sim: 'симуляция', serial: 'UART ×4 · 20 Гц', ros: 'ROS 2', demo: 'демо-данные' };
 
   const params = new URLSearchParams(window.location.search);
   const DEMO = params.get('demo') === '1';
@@ -314,27 +316,44 @@
     setTone(chip, 'chip', tone);
     if (chip && chip.title !== link.error) chip.title = link.error;
 
-    let linkText = 'связь с бортом: —';
+    // связь с бортом — карточка над оператором в меню слева: «Связь с бортом» и «есть · симуляция»
+    let state = '—';
     let linkTone = '';
+    let meta = 'нет данных';
     if (view.live) {
       const ok = d.linkOk !== false;
-      linkText = ok ? 'связь с бортом: есть' : 'связь с бортом: нет';
+      state = ok ? 'есть' : 'нет';
       linkTone = ok ? 'ok' : 'err';
+      meta = SOURCE_NAME[view.source] || 'источник: ' + (view.source || '—');
+    } else if (view.hasData) {
+      meta = 'сервер недоступен';
     }
-    setText($('link-text'), linkText);
-    setTone($('link-chip'), 'chip', linkTone);
+    setText($('link-state'), state);
+    setText($('link-meta'), meta);
+    setTone($('link-card'), 'side-status', linkTone);
   }
 
   function renderAlerts(view) {
     const box = $('alerts');
     if (!box) return;
     const list = buildAlerts(view);
-    box.hidden = list.length === 0;
-    if (!list.length) return;
+    // счётчик на пункте «Безопасность» в меню: скрыт, когда тревог нет
+    const badge = $('nav-alerts');
+    setText(badge, String(list.length));
+    if (badge) badge.hidden = list.length === 0;
+
+    if (!list.length) {                       // всё в норме: полоса остаётся спокойной
+      setTone(box, 'alerts', 'ok');
+      setText($('alerts-text'), 'тревог нет · связь с бортом, АКБ и модули в норме');
+      setText($('alerts-more'), '');
+      setTone(badge, 'nav-badge', '');
+      return;
+    }
     const top = list.some((a) => a.sev === 'err') ? 'err' : 'warn';
     setTone(box, 'alerts', top === 'warn' ? 'warn' : '');
     setText($('alerts-text'), list.slice(0, 3).map((a) => a.text).join(' · '));
     setText($('alerts-more'), list.length > 3 ? '+' + (list.length - 3) : '');
+    setTone(badge, 'nav-badge', top === 'warn' ? 'warn' : '');
   }
 
   function renderKpis(d, b) {
@@ -482,8 +501,21 @@
     }
   }
 
+  // Пункт меню подсвечивается по адресу: #chassis → «Ходовая», без адреса → «Пульт».
+  function syncNav() {
+    const hash = window.location.hash || '#';
+    document.querySelectorAll('.nav a[href^="#"]').forEach((a) => {
+      const on = a.getAttribute('href') === hash;
+      a.classList.toggle('active', on);
+      if (on) a.setAttribute('aria-current', 'true');
+      else a.removeAttribute('aria-current');
+    });
+  }
+
   function boot() {
     initLinks();
+    syncNav();
+    window.addEventListener('hashchange', syncNav);
     loop();
   }
 

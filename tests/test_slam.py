@@ -227,6 +227,17 @@ def test_main_screen_has_logout_and_console_links(client, operator):
     assert 'href="/console"' in text
 
 
+def test_main_screen_side_menu_points_to_real_sections(client, operator):
+    """Меню слева в стиле пульта: семь пунктов; ссылки-якоря ведут к существующим
+    разделам экрана (иначе пункт ничего не открывает)."""
+    login(client)
+    text = client.get("/").get_data(as_text=True)
+    for label in ("Пульт", "Ходовая", "Миссия", "Сенсоры", "Безопасность", "Журнал", "Сервис"):
+        assert label in text, label
+    for target in re.findall(r'href="#([^"]+)"', text):
+        assert f'id="{target}"' in text, target
+
+
 def test_main_screen_polls_state_with_relative_url(client, operator):
     """Относительный путь нужен, чтобы экран работал и под /main.html,
     и за прокси предпросмотра, где префикс может отличаться."""
