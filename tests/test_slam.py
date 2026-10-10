@@ -228,12 +228,14 @@ def test_main_screen_has_logout_and_console_links(client, operator):
 
 
 def test_main_screen_side_menu_points_to_real_sections(client, operator):
-    """Меню слева в стиле пульта: семь пунктов; ссылки-якоря ведут к существующим
-    разделам экрана (иначе пункт ничего не открывает)."""
+    """Меню слева: два пункта — «Пульт» (наверх экрана) и «Сервис» (инженерный пульт);
+    якоря, если появятся, должны вести к существующим разделам экрана."""
     login(client)
     text = client.get("/").get_data(as_text=True)
-    for label in ("Пульт", "Ходовая", "Миссия", "Сенсоры", "Безопасность", "Журнал", "Сервис"):
+    for label in ("Пульт", "Сервис"):
         assert label in text, label
+    for label in ("Ходовая", "Миссия", "Сенсоры", "Безопасность", "Журнал"):
+        assert f'<span class="nav-text">{label}</span>' not in text, label
     for target in re.findall(r'href="#([^"]+)"', text):
         assert f'id="{target}"' in text, target
 

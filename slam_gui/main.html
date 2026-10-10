@@ -14,9 +14,9 @@
   экран не выдумывает значения: показывает последние полученные, помечает их
   «устарели» и выводит тревогу. Демо-данные включаются только адресом с ?demo=1.
 
-  Раскладка: слева меню в стиле инженерного пульта — разделы, журнал событий,
-  связь с бортом, оператор смены. Пункты меню ведут к разделам этого экрана;
-  «Сервис» открывает инженерный пульт (/console). Справа — шапка (маршрут, режим,
+  Раскладка: слева меню в стиле инженерного пульта — пункт «Пульт» (наверх экрана),
+  журнал событий, связь с бортом, оператор смены. «Сервис» открывает инженерный
+  пульт (/console). Справа — шапка (маршрут, режим,
   часы, выход), полоса тревог, ключевые показатели АКБ и тяги, шасси (корпус по
   центру, оси с колёсами, модули в углах). На узком экране меню становится строкой
   над экраном, журнал и связь уходят вниз.
@@ -45,27 +45,6 @@
         <a class="active" href="#" aria-current="true">
           <svg class="ico" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/></svg>
           <span class="nav-text">Пульт</span>
-        </a>
-        <a href="#chassis">
-          <svg class="ico" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><circle cx="12" cy="12" r="3"/></svg>
-          <span class="nav-text">Ходовая</span>
-        </a>
-        <a href="#route">
-          <svg class="ico" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 20V8l8-4 8 4v12"/><path d="M12 22V10"/></svg>
-          <span class="nav-text">Миссия</span>
-        </a>
-        <a href="#kpis">
-          <svg class="ico" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 3v4M12 17v4M3 12h4M17 12h4"/><circle cx="12" cy="12" r="3"/></svg>
-          <span class="nav-text">Сенсоры</span>
-        </a>
-        <a href="#alerts">
-          <svg class="ico" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M12 3l8 4v6c0 5-3.5 8-8 9-4.5-1-8-4-8-9V7l8-4z"/></svg>
-          <span class="nav-text">Безопасность</span>
-          <em class="nav-badge" id="nav-alerts" hidden>0</em>
-        </a>
-        <a href="#events">
-          <svg class="ico" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M6 4h12v16H6z"/><path d="M9 8h6M9 12h6M9 16h3"/></svg>
-          <span class="nav-text">Журнал</span>
         </a>
         <a id="console-link" href="/console">
           <svg class="ico" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="3" y="4" width="18" height="14" rx="2"/><path d="M7 9h4M7 13h7M15 9h2"/><path d="M8 21h8"/></svg>

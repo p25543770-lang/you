@@ -207,19 +207,6 @@ body {
 .nav-text { display: flex; flex-direction: column; min-width: 0; line-height: 1.2; }
 .nav-text small { margin-top: 2px; color: #6f8579; font-size: 10.5px; font-weight: 500; }
 
-.nav-badge {
-  margin-left: auto;
-  padding: 2px 7px;
-  border-radius: 10px;
-  background: #e4503e;
-  color: #fff;
-  font-size: 10px;
-  font-style: normal;
-  font-weight: 800;
-  line-height: 1.4;
-}
-.nav-badge.warn { background: var(--warn); color: #1a1408; }
-
 /* журнал событий — в середине меню, растягивается на свободную высоту */
 
 .events {
@@ -996,7 +983,7 @@ body.is-stale #route {
   .nav {
     order: 2;
     display: grid;
-    grid-template-columns: repeat(4, minmax(0, 1fr));
+    grid-template-columns: repeat(2, minmax(0, 1fr));
     gap: 6px;
     padding: 8px;
     background: var(--side);

@@ -337,16 +337,10 @@
     const box = $('alerts');
     if (!box) return;
     const list = buildAlerts(view);
-    // счётчик на пункте «Безопасность» в меню: скрыт, когда тревог нет
-    const badge = $('nav-alerts');
-    setText(badge, String(list.length));
-    if (badge) badge.hidden = list.length === 0;
-
     if (!list.length) {                       // всё в норме: полоса остаётся спокойной
       setTone(box, 'alerts', 'ok');
       setText($('alerts-text'), 'тревог нет · связь с бортом, АКБ и модули в норме');
       setText($('alerts-more'), '');
-      setTone(badge, 'nav-badge', '');
       return;
     }
     const top = list.some((a) => a.sev === 'err') ? 'err' : 'warn';
