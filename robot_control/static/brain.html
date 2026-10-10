@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>ROS + ИИ — симуляция</title>
+<style>
+  :root { --bg:#0e1116; --panel:#161b22; --line:#2a313c; --txt:#d6dde6; --dim:#8b96a5; --acc:#3fb950; --warn:#e3b341; --bad:#f85149; --cyan:#58a6ff; }
+  * { box-sizing: border-box; }
+  body { margin:0; background:var(--bg); color:var(--txt); font:14px/1.4 system-ui, sans-serif; }
+  header { display:flex; align-items:center; gap:16px; padding:10px 16px; border-bottom:1px solid var(--line); }
+  header h1 { font-size:16px; margin:0; font-weight:600; }
+  header .sub { color:var(--dim); font-size:12px; }
+  header .spacer { flex:1; }
+  button { background:var(--panel); color:var(--txt); border:1px solid var(--line); padding:6px 12px; border-radius:6px; cursor:pointer; }
+  button:hover { border-color:var(--cyan); }
+  main { display:grid; grid-template-columns: minmax(420px, 1.2fr) minmax(360px, 1fr); gap:12px; padding:12px; }
+  .card { background:var(--panel); border:1px solid var(--line); border-radius:8px; padding:10px 12px; }
+  .card h2 { font-size:12px; text-transform:uppercase; letter-spacing:.06em; color:var(--dim); margin:0 0 8px; font-weight:600; }
+  canvas { width:100%; height:auto; display:block; background:#0b0e13; border-radius:6px; }
+  .metrics { display:grid; grid-template-columns: repeat(4, 1fr); gap:8px; }
+  .metric .v { font-size:20px; font-weight:600; font-variant-numeric: tabular-nums; }
+  .metric .k { color:var(--dim); font-size:11px; }
+  .neurons { display:grid; grid-template-columns: repeat(8, 1fr); gap:4px; }
+  .neuron { aspect-ratio:1; border-radius:4px; border:1px solid var(--line); font-size:9px; color:#0b0e13; display:flex; align-items:center; justify-content:center; font-variant-numeric: tabular-nums; }
+  .legend { color:var(--dim); font-size:11px; margin-top:6px; }
+  table { width:100%; border-collapse:collapse; font-size:12px; }
+  th, td { text-align:left; padding:4px 6px; border-bottom:1px solid var(--line); }
+  th { color:var(--dim); font-weight:500; }
+  td.num { text-align:right; font-variant-numeric: tabular-nums; }
+  .ok { color:var(--acc); } .warn { color:var(--warn); } .bad { color:var(--bad); }
+  .note { color:var(--dim); font-size:12px; margin-top:6px; }
+  .bars { display:grid; grid-template-columns: 60px 1fr 52px; gap:4px 8px; align-items:center; font-size:12px; }
+  .bar { height:8px; background:#0b0e13; border-radius:4px; position:relative; overflow:hidden; }
+  .bar > i { position:absolute; top:0; bottom:0; background:var(--cyan); }
+  @media (max-width: 960px) { main { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>ROS + ИИ — симуляция поведения</h1>
+  <span class="sub" id="sub">подключение…</span>
+  <span class="spacer"></span>
+  <button id="reset" title="Перезапустить миссию с начала">Сброс</button>
+</header>
+<main>
+  <section class="card">
+    <h2>Склад: карта, лидар, траектория</h2>
+    <canvas id="map" width="1120" height="720"></canvas>
+    <div class="legend">
+      <span style="color:#3fb950">●</span> робот &nbsp;
+      <span style="color:#58a6ff">—</span> траектория &nbsp;
+      <span style="color:#e3b341">✕</span> цель &nbsp;
+      <span style="color:#8b96a5">· луч лидара 4 м</span>
+    </div>
+  </section>
+  <section style="display:flex; flex-direction:column; gap:12px;">
+    <div class="card">
+      <h2>Робот и миссия</h2>
+      <div class="metrics">
+        <div class="metric"><div class="v" id="m-goals">0</div><div class="k">точек пройдено</div></div>
+        <div class="metric"><div class="v" id="m-cycles">0</div><div class="k">кругов маршрута</div></div>
+        <div class="metric"><div class="v" id="m-coll">0</div><div class="k">касаний</div></div>
+        <div class="metric"><div class="v" id="m-time">0</div><div class="k">время симуляции, с</div></div>
+        <div class="metric"><div class="v" id="m-speed">0.00</div><div class="k">скорость, м/с</div></div>
+        <div class="metric"><div class="v" id="m-steer">0.0</div><div class="k">руль, °</div></div>
+        <div class="metric"><div class="v" id="m-odo">0.0</div><div class="k">путь, м</div></div>
+        <div class="metric"><div class="v" id="m-goal">—</div><div class="k">текущая цель</div></div>
+      </div>
+    </div>
+    <div class="card">
+      <h2 id="nn-title">ИИ: нейроны скрытого слоя</h2>
+      <div class="neurons" id="neurons"></div>
+      <div class="legend">цвет: <span style="color:#f85149">−1</span> → <span style="color:#161b22">0</span> → <span style="color:#3fb950">+1</span> (активность после tanh)</div>
+      <h2 style="margin-top:12px">Входы и выходы сети</h2>
+      <div class="bars" id="io"></div>
+      <div class="note" id="val"></div>
+    </div>
+    <div class="card">
+      <h2>Граф ROS 2 (топики)</h2>
+      <table>
+        <thead><tr><th>топик</th><th>тип</th><th class="num">Гц</th><th class="num">сообщ.</th></tr></thead>
+        <tbody id="topics"></tbody>
+      </table>
+      <div class="note" id="nodes"></div>
+    </div>
+  </section>
+</main>
+<script src="/static/js/brain.js"></script>
+</body>
+</html>
