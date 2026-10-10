@@ -587,7 +587,8 @@
   // R — включить или выключить режим управления: лидар обводится красным.
   // WASD / стрелки — движение, пробел — стоп. Команда только показывается:
   // отправки на робота в бэкенде пока нет.
-  const DRIVE = { on: false, keys: {}, vx: 0, wz: 0 };
+  const DRIVE = { on: false, keys: {}, vx: 0, wz: 0, steer: 0 };
+  const STEER_RATE = 50;       // градусы в секунду: скорость поворота колёс с клавиатуры
   const DRIVE_VMAX = 0.5;      // м/с
   const DRIVE_WMAX = 1.0;      // рад/с
   const DRIVE_STEER_MAX = 110; // градусы: предел поворота колеса при полном A/D
@@ -616,13 +617,24 @@
         return;
       }
       // Передние и задние колёса поворачивают в противоположные стороны, без крабового хода:
-      // A → передние влево (−), задние вправо (+).
-      const s = -(DRIVE.wz / DRIVE_WMAX) * DRIVE_STEER_MAX;
-      const angle = id[0] === 'F' ? s : -s;
+      // A → передние влево (−), задние вправо (+). Угол DRIVE.steer меняется плавно.
+      const angle = id[0] === 'F' ? DRIVE.steer : -DRIVE.steer;
       w.style.transform = 'rotate(' + angle.toFixed(1) + 'deg)';
       w.classList.toggle('is-driving', DRIVE.vx !== 0);
       w.classList.toggle('is-reverse', DRIVE.vx < 0);
     });
+  }
+
+  // Поворот колёс догоняет цель с ограниченной скоростью: короткое нажатие даёт малый угол.
+  function steerTick(dt) {
+    if (!DRIVE.on) {
+      DRIVE.steer = 0;
+      return;
+    }
+    const target = -(DRIVE.wz / DRIVE_WMAX) * DRIVE_STEER_MAX;
+    const step = STEER_RATE * dt;
+    if (DRIVE.steer < target) DRIVE.steer = Math.min(target, DRIVE.steer + step);
+    else DRIVE.steer = Math.max(target, DRIVE.steer - step);
   }
 
   function driveTick() {
@@ -672,6 +684,7 @@
     window.addEventListener('keydown', (e) => { if (!isTyping(e)) driveKey(e, true); });
     window.addEventListener('keyup', (e) => { if (!isTyping(e)) driveKey(e, false); });
     window.addEventListener('blur', () => { driveStop(); driveTick(); });
+    setInterval(() => { steerTick(0.05); applyDriveToWheels(); }, 50);
     setDrive(false);
     loop();
   }
