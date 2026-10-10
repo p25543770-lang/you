@@ -356,20 +356,19 @@ def parse_master_line(line):
 class MasterSource:
     """Мастер-Arduino по одному UART: строки "@TLM" из motor_master.ino.
 
-    Мастер знает только свой мотор (угол, движение, калибровку). Остальные
-    модули и АКБ он не передаёт — их значения пустые, а не выдуманные.
+    Мастер передаёт телеметрию своего мотора (FL) и трёх узлов (FR, RL, RR),
+    которые он опрашивает по I2C. Модуля, который не отвечает, нет в ответе:
+    его значения пустые, а не выдуманные.
     """
 
     name = "master"
     STALE_S = 1.0
 
-    def __init__(self, port, module="FL", baud=115200):
+    def __init__(self, port, baud=115200):
         self.port = port
-        self.module = module.upper()
         self.baud = baud
         self.lock = threading.Lock()
-        self.tlm = None
-        self.seen = 0.0
+        self.frames = {}                 # модуль → (последний кадр, время)
         self._stop = False
         threading.Thread(target=self._reader, daemon=True).start()
 
@@ -379,8 +378,7 @@ class MasterSource:
         if frame is None:
             return False
         with self.lock:
-            self.tlm = frame
-            self.seen = time.time() if now is None else now
+            self.frames[frame["mod"]] = (frame, time.time() if now is None else now)
         return True
 
     def _reader(self):
@@ -392,7 +390,7 @@ class MasterSource:
         while not self._stop:
             try:
                 with serial.Serial(self.port, self.baud, timeout=0.5) as dev:
-                    print("· master: %s открыт (модуль %s)" % (self.port, self.module))
+                    print("· master: %s открыт" % self.port)
                     while not self._stop:
                         raw = dev.readline()
                         if raw:
@@ -404,12 +402,15 @@ class MasterSource:
     def read(self, now=None):
         now = time.time() if now is None else now
         with self.lock:
-            frame = self.tlm
-            seen = self.seen
-        link = frame is not None and (now - seen) < self.STALE_S
+            frames = dict(self.frames)
         motors = []
+        link = False
         for mid in MODULE_NAMES.values():
-            if link and mid == self.module:
+            entry = frames.get(mid)
+            fresh = entry is not None and (now - entry[1]) < self.STALE_S
+            if fresh:
+                link = True
+                frame = entry[0]
                 motors.append({"id": mid, "title": MODULE_TITLES[mid],
                                "angle": round(frame["deg"], 2), "rpm": None, "temp": None,
                                "homed": frame["cal"], "online": True, "fault": None,

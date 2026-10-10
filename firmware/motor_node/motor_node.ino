@@ -1,8 +1,17 @@
 #include <Wire.h>
 
-const int SLAVE_ADDRESSES[] = {2, 3, 4}; 
-const int NUM_SLAVES = 3;
-const char* SLAVE_MODULE_IDS[] = {"FR", "RL", "RR"};   // модули слейвов по адресам выше
+// ============================================================
+// Узел мотора (слейв). Одна плата = один модуль: FR, RL или RR.
+//
+// Мастер (motor_master.ino) рассылает сюда ту же строку команды, что получил
+// в Serial: "c 30", "d 45 f", "k", "h", "s", "g", "p", "z", "c c".
+// Мастер опрашивает узел запросом чтения и получает строку телеметрии:
+//   "шаг,цель,движение,калибровка,идёт_калибровка,оптодатчик,цикл\n"
+// Например: "-1234,0,1,1,0,0,0\n" (шаги; 133.33 шага = 1°).
+// ============================================================
+
+// --- Адрес на шине I2C: 2 = FR, 3 = RL, 4 = RR (как в мастере) ---
+const int MY_ADDRESS = 2;
 
 // --- Распиновка ---
 const int PUL = 6;
@@ -10,40 +19,29 @@ const int DIR = 7;
 const int ENA = 8;
 const int OPTO_PIN = 18;
 
-// --- Настройки скорости ---
+// --- Настройки скорости и калибровки (как у мастера) ---
 const unsigned long STEP_PERIOD_US = 100;
 const unsigned long CALIB_STEP_PERIOD_US = 2000;
 const float STEPS_PER_DEGREE = 133.333333;
-
-// --- Настройки калибровки ---
 const int CALIB_SEARCH_DEGREES = 100;
 const int CALIB_SLOW_SEARCH_DEGREES = 20;
 const bool OPTO_ACTIVE_LOW = true;
 
-// --- Телеметрия для веб-сервера (строка "@TLM ..." каждые TLM_PERIOD_MS) ---
-const char* MODULE_ID = "FL";          // какой модуль это мастер: FL / FR / RL / RR
-const unsigned long TLM_PERIOD_MS = 200;
-bool calibrated = false;               // true после поиска нуля по оптодатчику
-unsigned long last_tlm_ms = 0;
-
-// --- Переменные состояния мотора ---
+// --- Состояние мотора ---
 volatile long current_step = 0;
 volatile long target_step = 0;
 volatile bool is_moving = false;
 
-// --- Переменные циклического режима ---
 bool is_cycling = false;
 long cycle_start_step = 0;
 long cycle_offset_steps = 0;
 bool cycle_direction_forward = true;
+bool calibrated = false;            // true после поиска нуля по оптодатчику
 
 unsigned long last_step_time = 0;
 bool pulse_state = false;
 unsigned long step_period_current = STEP_PERIOD_US;
 
-String inputString = "";
-
-// --- Машина состояний калибровки ---
 enum CalibState {
   CALIB_IDLE,
   CALIB_FAST_RIGHT,
@@ -57,36 +55,71 @@ volatile CalibState calib_state = CALIB_IDLE;
 long calib_right_edge = 0;
 long calib_left_edge = 0;
 long calib_zero_point = 0;
-long calib_start_step = 0;  // Позиция в начале фазы поиска
+long calib_start_step = 0;
+
+// --- Команда с шины: обработчик прерывания только копирует байты ---
+volatile bool rx_ready = false;
+char rx_buf[48];
 
 void processCommand(String cmd);
 void handleCalibration();
-void sendTelemetry();
-void pollSlaves();
+
+void onCommandReceived(int count) {
+  uint8_t n = 0;
+  while (Wire.available() && n < sizeof(rx_buf) - 1) {
+    rx_buf[n++] = (char)Wire.read();
+  }
+  while (Wire.available()) Wire.read();   // лишнее — выкидываем
+  rx_buf[n] = '\0';
+  rx_ready = true;
+}
+
+// --- Запрос телеметрии мастером: ответ короткой строкой, целыми числами ---
+void onTelemetryRequested() {
+  char buf[32];
+  bool opto;
+  if (OPTO_ACTIVE_LOW) {
+    opto = (digitalRead(OPTO_PIN) == LOW);
+  } else {
+    opto = (digitalRead(OPTO_PIN) == HIGH);
+  }
+  int n = snprintf(buf, sizeof(buf), "%ld,%ld,%d,%d,%d,%d,%d\n",
+                   (long)current_step, (long)target_step,
+                   is_moving ? 1 : 0,
+                   calibrated ? 1 : 0,
+                   calib_state != CALIB_IDLE ? 1 : 0,
+                   opto ? 1 : 0,
+                   is_cycling ? 1 : 0);
+  Wire.write((const uint8_t*)buf, n);
+}
 
 void setup() {
-  Serial.begin(115200);
-  inputString.reserve(64);
-  
-  Wire.begin();
-  Wire.setClock(400000);
-  
+  Wire.begin(MY_ADDRESS);
+  Wire.onReceive(onCommandReceived);
+  Wire.onRequest(onTelemetryRequested);
+
   pinMode(PUL, OUTPUT);
   pinMode(DIR, OUTPUT);
   pinMode(ENA, OUTPUT);
   digitalWrite(ENA, HIGH);
-  
   pinMode(OPTO_PIN, INPUT_PULLUP);
-  
-  Serial.println(F("--- MASTER: Система с калибровкой ---"));
-  Serial.println(F("Команды: c [градусы], c c, d [градусы] [f/b], h, s, g, p, z, k"));
 }
 
 void loop() {
+  if (rx_ready) {
+    noInterrupts();
+    String cmd = String(rx_buf);
+    rx_ready = false;
+    interrupts();
+    cmd.trim();
+    cmd.toLowerCase();
+    if (cmd.length() > 0) processCommand(cmd);
+  }
+
   if (calib_state != CALIB_IDLE) {
     handleCalibration();
   }
-  
+
   long local_current, local_target;
   bool local_moving;
   unsigned long current_period;
@@ -109,134 +142,32 @@ void loop() {
         else current_step--;
         local_current = current_step;
         interrupts();
-        
+
         if (local_current == local_target) {
           noInterrupts();
           is_moving = false;
           interrupts();
-          
+
           if (is_cycling) {
             if (cycle_direction_forward) {
-              digitalWrite(DIR, HIGH); 
+              digitalWrite(DIR, HIGH);
               noInterrupts();
               target_step = cycle_start_step;
               is_moving = true;
               interrupts();
               cycle_direction_forward = false;
             } else {
-              digitalWrite(DIR, LOW); 
+              digitalWrite(DIR, LOW);
               noInterrupts();
               target_step = cycle_start_step + cycle_offset_steps;
               is_moving = true;
               interrupts();
               cycle_direction_forward = true;
             }
-          } else if (calib_state == CALIB_IDLE) {
-            float current_angle = (float)local_current / STEPS_PER_DEGREE;
-            Serial.print(F("Цель достигнута. Угол: "));
-            Serial.print(current_angle, 2);
-            Serial.println(F("°"));
           }
         }
       }
     }
-  }
-
-  // телеметрия для сервера: раз в TLM_PERIOD_MS
-  unsigned long now_ms = millis();
-  if (now_ms - last_tlm_ms >= TLM_PERIOD_MS) {
-    last_tlm_ms = now_ms;
-    sendTelemetry();
-  }
-
-  while (Serial.available() > 0) {
-    char inChar = (char)Serial.read();
-    if (inChar == '\n' || inChar == '\r') {
-      inputString.trim();
-      if (inputString.length() > 0) {
-        for (int i = 0; i < NUM_SLAVES; i++) {
-          Wire.beginTransmission(SLAVE_ADDRESSES[i]);
-          Wire.write(inputString.c_str());
-          Wire.endTransmission();
-        }
-        processCommand(inputString);
-      }
-      inputString = "";
-    } else {
-      if (inputString.length() < 60) inputString += inChar;
-    }
-  }
-}
-
-// Строка для сервера: "@TLM mod=FL deg=-9.25 tgt=0.00 moving=1 cal=1 cycle=0 calib=0 opto=0 t=12345"
-void printTlm(const char* mod, long c, long t, bool m, bool cal, bool cycle, bool calib, bool opto) {
-  Serial.print(F("@TLM mod="));
-  Serial.print(mod);
-  Serial.print(F(" deg="));
-  Serial.print((float)c / STEPS_PER_DEGREE, 2);
-  Serial.print(F(" tgt="));
-  Serial.print((float)t / STEPS_PER_DEGREE, 2);
-  Serial.print(F(" moving="));
-  Serial.print(m ? 1 : 0);
-  Serial.print(F(" cal="));
-  Serial.print(cal ? 1 : 0);
-  Serial.print(F(" cycle="));
-  Serial.print(cycle ? 1 : 0);
-  Serial.print(F(" calib="));
-  Serial.print(calib ? 1 : 0);
-  Serial.print(F(" opto="));
-  Serial.print(opto ? 1 : 0);
-  Serial.print(F(" t="));
-  Serial.println(millis());
-}
-
-void sendTelemetry() {
-  noInterrupts();
-  long c = current_step;
-  long t = target_step;
-  bool m = is_moving;
-  interrupts();
-  bool opto;
-  if (OPTO_ACTIVE_LOW) {
-    opto = (digitalRead(OPTO_PIN) == LOW);
-  } else {
-    opto = (digitalRead(OPTO_PIN) == HIGH);
-  }
-  printTlm(MODULE_ID, c, t, m, calibrated, is_cycling, calib_state != CALIB_IDLE, opto);
-  pollSlaves();
-}
-
-// Опрос узлов FR, RL, RR: запрос на адрес, ответ "шаг,цель,движение,кал,калиб,опто,цикл\n"
-bool parseFields(const char* s, long* v, int count) {
-  for (int i = 0; i < count; i++) {
-    char* end;
-    v[i] = strtol(s, &end, 10);
-    if (end == s) return false;
-    s = end;
-    if (i < count - 1) {
-      if (*s != ',') return false;
-      s++;
-    }
-  }
-  return true;
-}
-
-void pollSlaves() {
-  for (int i = 0; i < NUM_SLAVES; i++) {
-    int got = Wire.requestFrom(SLAVE_ADDRESSES[i], 32);
-    if (got <= 0) continue;                 // узел не ответил — строку не печатаем
-    char buf[40];
-    int len = 0;
-    while (Wire.available()) {
-      char ch = (char)Wire.read();
-      if (ch == '\n') break;
-      if (len < 39) buf[len++] = ch;
-    }
-    while (Wire.available()) Wire.read();
-    buf[len] = '\0';
-    long v[7];
-    if (!parseFields(buf, v, 7)) continue;  // битая строка — пропускаем
-    printTlm(SLAVE_MODULE_IDS[i], v[0], v[1], v[2] == 1, v[3] == 1, v[6] == 1, v[4] == 1, v[5] == 1);
   }
 }
 
@@ -247,12 +178,12 @@ void handleCalibration() {
   } else {
     opto_triggered = (digitalRead(OPTO_PIN) == HIGH);
   }
-  
+
   long local_current;
   noInterrupts();
   local_current = current_step;
   interrupts();
-  
+
   switch (calib_state) {
     case CALIB_FAST_RIGHT:
       if (opto_triggered) {
@@ -260,10 +191,7 @@ void handleCalibration() {
         calib_right_edge = current_step;
         is_moving = false;
         interrupts();
-        
-        Serial.print(F("Калибровка: Быстрый поиск вправо - найдено на шаге "));
-        Serial.println(calib_right_edge);
-        
+
         step_period_current = CALIB_STEP_PERIOD_US;
         digitalWrite(DIR, HIGH);
         noInterrupts();
@@ -274,11 +202,10 @@ void handleCalibration() {
       } else {
         long steps_done = local_current - calib_start_step;
         if (steps_done > (long)(CALIB_SEARCH_DEGREES * STEPS_PER_DEGREE)) {
-          Serial.println(F("Калибровка: Не найдено вправо, едем влево на 200°..."));
           noInterrupts();
           is_moving = false;
           interrupts();
-          
+
           digitalWrite(DIR, HIGH);
           noInterrupts();
           calib_start_step = current_step;
@@ -289,17 +216,14 @@ void handleCalibration() {
         }
       }
       break;
-      
+
     case CALIB_FAST_LEFT:
       if (opto_triggered) {
         noInterrupts();
         calib_left_edge = current_step;
         is_moving = false;
         interrupts();
-        
-        Serial.print(F("Калибровка: Быстрый поиск влево - найдено на шаге "));
-        Serial.println(calib_left_edge);
-        
+
         step_period_current = CALIB_STEP_PERIOD_US;
         digitalWrite(DIR, LOW);
         noInterrupts();
@@ -309,17 +233,14 @@ void handleCalibration() {
         calib_state = CALIB_SLOW_LEFT;
       }
       break;
-      
+
     case CALIB_SLOW_RIGHT:
       if (opto_triggered) {
         noInterrupts();
         calib_right_edge = current_step;
         is_moving = false;
         interrupts();
-        
-        Serial.print(F("Калибровка: Медленный подход справа - точная точка "));
-        Serial.println(calib_right_edge);
-        
+
         digitalWrite(DIR, HIGH);
         noInterrupts();
         target_step = current_step - (long)(2 * CALIB_SLOW_SEARCH_DEGREES * STEPS_PER_DEGREE);
@@ -328,21 +249,15 @@ void handleCalibration() {
         calib_state = CALIB_SLOW_LEFT;
       }
       break;
-      
+
     case CALIB_SLOW_LEFT:
       if (opto_triggered) {
         noInterrupts();
         calib_left_edge = current_step;
         is_moving = false;
         interrupts();
-        
-        Serial.print(F("Калибровка: Медленный подход слева - точная точка "));
-        Serial.println(calib_left_edge);
-        
+
         calib_zero_point = (calib_right_edge + calib_left_edge) / 2;
-        Serial.print(F("Калибровка: Точка 0 = "));
-        Serial.println(calib_zero_point);
-        
         step_period_current = STEP_PERIOD_US;
         if (calib_zero_point > current_step) {
           digitalWrite(DIR, LOW);
@@ -356,7 +271,7 @@ void handleCalibration() {
         calib_state = CALIB_MOVE_TO_ZERO;
       }
       break;
-      
+
     case CALIB_MOVE_TO_ZERO:
       if (local_current == target_step && !is_moving) {
         noInterrupts();
@@ -364,43 +279,35 @@ void handleCalibration() {
         target_step = 0;
         is_moving = false;
         interrupts();
-        
+
         calibrated = true;
         calib_state = CALIB_IDLE;
-        Serial.println(F("Калибровка ЗАВЕРШЕНА! Точка 0 установлена."));
       }
       break;
-      
+
     default:
       break;
   }
 }
 
 void processCommand(String cmd) {
-  cmd.toLowerCase();
-  
   if (cmd == "k") {
-    if (calib_state != CALIB_IDLE) {
-      Serial.println(F("Калибровка уже запущена!"));
-      return;
-    }
-    
+    if (calib_state != CALIB_IDLE) return;
     is_cycling = false;
     noInterrupts();
     is_moving = false;
     interrupts();
-    
+
     step_period_current = STEP_PERIOD_US;
     digitalWrite(DIR, LOW);
-    
+
     noInterrupts();
     calib_start_step = current_step;
     target_step = current_step + (long)(CALIB_SEARCH_DEGREES * STEPS_PER_DEGREE);
     is_moving = true;
     interrupts();
-    
+
     calib_state = CALIB_FAST_RIGHT;
-    Serial.println(F("Калибровка: Быстрый поиск вправо на 100°..."));
   }
   else if (cmd.startsWith("c ")) {
     String param = cmd.substring(2);
@@ -410,55 +317,36 @@ void processCommand(String cmd) {
         is_cycling = false;
         noInterrupts();
         is_moving = false;
-        long copy_step = current_step;
         interrupts();
-        float current_angle = (float)copy_step / STEPS_PER_DEGREE;
-        Serial.print(F("ЦИКЛ ВЫКЛ. Угол: "));
-        Serial.print(current_angle, 2);
-        Serial.println(F("°"));
-      } else {
-        Serial.println(F("Цикл и так выключен."));
       }
     } else {
       float degrees = param.toFloat();
-      if (degrees <= 0) {
-        Serial.println(F("Ошибка: Угол > 0!"));
-        return;
-      }
+      if (degrees <= 0) return;
       noInterrupts();
       cycle_start_step = current_step;
       interrupts();
       cycle_offset_steps = round(degrees * STEPS_PER_DEGREE);
       is_cycling = true;
       cycle_direction_forward = true;
-      digitalWrite(DIR, LOW); 
+      digitalWrite(DIR, LOW);
       noInterrupts();
       target_step = cycle_start_step + cycle_offset_steps;
       is_moving = true;
       interrupts();
-      Serial.print(F("ЦИКЛ качания на "));
-      Serial.print(degrees, 2);
-      Serial.println(F("°"));
     }
   }
   else if (cmd.startsWith("d ")) {
     is_cycling = false;
     int firstSpace = cmd.indexOf(' ');
     int secondSpace = cmd.indexOf(' ', firstSpace + 1);
-    if (secondSpace == -1) {
-      Serial.println(F("Шаблон: d [градусы] [f/b]"));
-      return;
-    }
+    if (secondSpace == -1) return;
     String degStr = cmd.substring(firstSpace + 1, secondSpace);
     String dirStr = cmd.substring(secondSpace + 1);
     degStr.trim();
     dirStr.trim();
     if (dirStr.length() > 1) dirStr = dirStr.substring(0, 1);
     float degrees = degStr.toFloat();
-    if (degrees <= 0) {
-      Serial.println(F("Ошибка: Угол > 0!"));
-      return;
-    }
+    if (degrees <= 0) return;
     long steps = round(degrees * STEPS_PER_DEGREE);
     if (dirStr == "f") {
       digitalWrite(DIR, LOW);
@@ -466,9 +354,6 @@ void processCommand(String cmd) {
       target_step = current_step + steps;
       is_moving = true;
       interrupts();
-      Serial.print(F("ВПЕРЕД (F) на "));
-      Serial.print(degrees, 2);
-      Serial.println(F("°"));
     }
     else if (dirStr == "b") {
       digitalWrite(DIR, HIGH);
@@ -476,12 +361,6 @@ void processCommand(String cmd) {
       target_step = current_step - steps;
       is_moving = true;
       interrupts();
-      Serial.print(F("НАЗАД (B) на "));
-      Serial.print(degrees, 2);
-      Serial.println(F("°"));
-    }
-    else {
-      Serial.println(F("Ошибка направления! f или b"));
     }
   }
   else if (cmd == "h") {
@@ -489,16 +368,11 @@ void processCommand(String cmd) {
     noInterrupts();
     long current = current_step;
     interrupts();
-    if (current == 0) {
-      Serial.println(F("Уже в 0°."));
-      return;
-    }
+    if (current == 0) return;
     if (0 > current) {
       digitalWrite(DIR, LOW);
-      Serial.println(F("Домой: ВПЕРЕД..."));
     } else {
       digitalWrite(DIR, HIGH);
-      Serial.println(F("Домой: НАЗАД..."));
     }
     noInterrupts();
     target_step = 0;
@@ -509,38 +383,14 @@ void processCommand(String cmd) {
     is_cycling = false;
     noInterrupts();
     is_moving = false;
-    long copy_step = current_step;
     interrupts();
-    float current_angle = (float)copy_step / STEPS_PER_DEGREE;
-    Serial.print(F("ПАУЗА. Угол: "));
-    Serial.print(current_angle, 2);
-    Serial.println(F("°"));
   }
   else if (cmd == "g") {
     noInterrupts();
     if (current_step != target_step) {
       is_moving = true;
-      Serial.println(F("ПРОДОЛЖЕНИЕ..."));
-    } else {
-      Serial.println(F("Уже в цели."));
     }
     interrupts();
-  }
-  else if (cmd == "p") {
-    noInterrupts();
-    long c = current_step;
-    long t = target_step;
-    bool m = is_moving;
-    interrupts();
-    Serial.print(F("Текущий: "));
-    Serial.print((float)c / STEPS_PER_DEGREE, 2);
-    if (is_cycling) {
-      Serial.println(F("° [ЦИКЛ]"));
-    } else {
-      Serial.print(F("° | Целевой: "));
-      Serial.print((float)t / STEPS_PER_DEGREE, 2);
-      Serial.println(m ? F("° [ДВИЖ]") : F("° [СТОИТ]"));
-    }
   }
   else if (cmd == "z") {
     is_cycling = false;
@@ -550,9 +400,6 @@ void processCommand(String cmd) {
     is_moving = false;
     interrupts();
     calibrated = false;   // ноль задан вручную, а не по оптодатчику
-    Serial.println(F("ОБНУЛЕНА."));
   }
-  else {
-    Serial.println(F("Неизв. команда"));
-  }
+  // "p" на узле ничего не печатает: состояние мастер получает запросом телеметрии
 }

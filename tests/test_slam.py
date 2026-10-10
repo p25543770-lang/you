@@ -335,19 +335,22 @@ def test_master_line_parses_tlm_and_ignores_text():
     assert backend.parse_master_line("@TLM mod=FL deg=abc") is None
 
 
-def test_master_source_reports_only_its_own_module():
-    """Мастер знает только свой мотор; остальные модули и АКБ — пустые, без выдумок."""
+def test_master_source_reports_each_module_and_empty_for_silent_ones():
+    """Мастер передаёт FL и узлы FR/RL/RR; модуль, который молчит, — пустой, без выдумок."""
     backend = _load_backend()
-    src = backend.MasterSource("/dev/null", module="FL")   # порт не открывается в тесте
+    src = backend.MasterSource("/dev/null")                 # порт не открывается в тесте
     src.feed("@TLM mod=FL deg=30.00 tgt=30.00 moving=0 cal=1 cycle=0 calib=0 opto=0 t=1", now=100.0)
+    src.feed("@TLM mod=FR deg=-5.50 tgt=0.00 moving=1 cal=0 cycle=0 calib=1 opto=0 t=2", now=100.0)
     out = src.read(now=100.5)
     fl = next(m for m in out["motors"] if m["id"] == "FL")
     fr = next(m for m in out["motors"] if m["id"] == "FR")
+    rl = next(m for m in out["motors"] if m["id"] == "RL")
     assert fl["angle"] == 30.0 and fl["online"] is True and fl["homed"] is True
     assert fl["rpm"] is None and fl["temp"] is None
-    assert fr["online"] is False and fr["angle"] is None
+    assert fr["angle"] == -5.5 and fr["moving"] is True and fr["homed"] is False
+    assert rl["online"] is False and rl["angle"] is None
     assert out["linkOk"] is True and out["mode"] == "МАСТЕР НА СВЯЗИ"
     assert out["battery"]["volts"] is None and out["speedMps"] is None
-    stale = src.read(now=102.0)                               # старше STALE_S — связи нет
+    stale = src.read(now=102.0)                             # старше STALE_S — связи нет
     assert stale["linkOk"] is False
-    assert next(m for m in stale["motors"] if m["id"] == "FL")["online"] is False
+    assert all(m["online"] is False for m in stale["motors"])

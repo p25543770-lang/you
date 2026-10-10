@@ -110,10 +110,8 @@ def make_source(mode: str = "auto", ports=None):
     if mode == "ros":
         return mod.RosSource()
     if mode == "master":
-        # мастер-Arduino на одном UART: RC_SLAM_PORT (по умолчанию /dev/ttyACM0), RC_SLAM_MODULE — FL/FR/RL/RR
-        port = os.environ.get("RC_SLAM_PORT", "/dev/ttyACM0").strip()
-        module = os.environ.get("RC_SLAM_MODULE", "FL").strip().upper()
-        return mod.MasterSource(port, module=module)
+        # мастер-Arduino на одном UART (RC_SLAM_PORT, по умолчанию /dev/ttyACM0)
+        return mod.MasterSource(os.environ.get("RC_SLAM_PORT", "/dev/ttyACM0").strip())
 
     if mode != "auto":
         log.warning("неизвестный RC_SLAM_SOURCE=%r — использую auto", mode)
