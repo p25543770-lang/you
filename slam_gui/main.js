@@ -581,10 +581,74 @@
     });
   }
 
+  /* ------------------------------------------------------------ ручное управление */
+
+  // R — включить или выключить режим управления: лидар обводится красным.
+  // WASD / стрелки — движение, пробел — стоп. Команда только показывается:
+  // отправки на робота в бэкенде пока нет.
+  const DRIVE = { on: false, keys: {}, vx: 0, wz: 0 };
+  const DRIVE_VMAX = 0.5;      // м/с
+  const DRIVE_WMAX = 1.0;      // рад/с
+  const DRIVE_CODES = ['KeyW', 'KeyA', 'KeyS', 'KeyD', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'];
+
+  function isTyping(e) {
+    const t = e.target;
+    return !!t && (t.tagName === 'INPUT' || t.tagName === 'TEXTAREA' || t.isContentEditable);
+  }
+
+  function driveStop() {
+    DRIVE.keys = {};
+    DRIVE.vx = 0;
+    DRIVE.wz = 0;
+  }
+
+  function driveTick() {
+    const k = DRIVE.keys;
+    const fwd = DRIVE.on && (k.KeyW || k.ArrowUp);
+    const back = DRIVE.on && (k.KeyS || k.ArrowDown);
+    const left = DRIVE.on && (k.KeyA || k.ArrowLeft);
+    const right = DRIVE.on && (k.KeyD || k.ArrowRight);
+    DRIVE.vx = (fwd ? DRIVE_VMAX : 0) - (back ? DRIVE_VMAX : 0);
+    DRIVE.wz = (left ? DRIVE_WMAX : 0) - (right ? DRIVE_WMAX : 0);
+    setText($('drive-cmd'), 'vx ' + DRIVE.vx.toFixed(2) + ' м/с · wz ' + DRIVE.wz.toFixed(2) + ' рад/с');
+  }
+
+  function setDrive(on) {
+    DRIVE.on = on;
+    driveStop();
+    const panel = $('lidar');
+    if (panel) panel.classList.toggle('is-control', on);
+    const hint = $('drive-hint');
+    if (hint) hint.hidden = !on;
+    driveTick();
+  }
+
+  function driveKey(e, down) {
+    if (e.code === 'KeyR') {
+      if (down && !e.repeat) setDrive(!DRIVE.on);
+      return;
+    }
+    if (!DRIVE.on) return;
+    if (e.code === 'Space') {
+      e.preventDefault();
+      driveStop();
+      driveTick();
+      return;
+    }
+    if (!DRIVE_CODES.includes(e.code)) return;
+    e.preventDefault();
+    DRIVE.keys[e.code] = down;
+    driveTick();
+  }
+
   function boot() {
     initLinks();
     syncNav();
     window.addEventListener('hashchange', syncNav);
+    window.addEventListener('keydown', (e) => { if (!isTyping(e)) driveKey(e, true); });
+    window.addEventListener('keyup', (e) => { if (!isTyping(e)) driveKey(e, false); });
+    window.addEventListener('blur', () => { driveStop(); driveTick(); });
+    setDrive(false);
     loop();
   }
 
@@ -592,5 +656,5 @@
   else boot();
 
   // для проверок в браузере и отладки
-  window.RS_MAIN = { render, currentView, buildAlerts, moduleState, journal, link };
+  window.RS_MAIN = { render, currentView, buildAlerts, moduleState, journal, link, DRIVE, setDrive };
 })();

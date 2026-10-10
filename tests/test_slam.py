@@ -310,3 +310,13 @@ def test_ros_source_exposes_fresh_lidar_only():
 
     src.scan_at = time.time() - 10
     assert src.read()["lidar"] is None
+
+
+def test_main_screen_manual_drive_toggle_on_r(client, operator):
+    """R включает режим WASD на главном экране: лидар обводится красным, команда не уходит на сервер."""
+    login(client)
+    js = client.get("/main.js").get_data(as_text=True)
+    assert "'KeyR'" in js and "'KeyW'" in js and "'Space'" in js
+    assert "fetch(" not in js.split("function driveKey", 1)[1].split("function boot", 1)[0]
+    css = client.get("/main.css").get_data(as_text=True)
+    assert ".lidar.is-control" in css

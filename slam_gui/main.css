@@ -822,6 +822,15 @@ body {
   pointer-events: none;
 }
 .lidar-empty[hidden] { display: none; }
+/* ручное управление (R): лидар обведён красным, подсказка и команда в шапке панели */
+.lidar.is-control { outline: 2px solid #e04a3a; outline-offset: -2px; }
+.drive-hint {
+  margin-left: auto;
+  color: var(--muted);
+  font-size: 11.5px;
+}
+.drive-hint b { color: #e6efe9; font-weight: 700; font-variant-numeric: tabular-nums; }
+.drive-hint[hidden] { display: none; }
 .lidar-stats {
   margin: 0;
   align-self: center;
