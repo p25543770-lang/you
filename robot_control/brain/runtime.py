@@ -25,6 +25,7 @@ from pathlib import Path
 from .bus import Bus, Node
 from .episode import GOAL_RADIUS_M, SENSOR_NOISE_M
 from .network import DEFAULT_NEURONS, N_INPUTS, WEIGHTS_FILE, Brain, features, load_weights
+from .planner import PathFollower, build_grid, path_length
 from .world import (
     ARENA_H, ARENA_W, BASE_SHELVES, BASE_WAYPOINTS, START_POSE, V_MAX,
     Robot, arena_segments, shelves_to_segments,
@@ -98,8 +99,47 @@ class MissionNode(Node):
         self.publish("/goal", {"stamp": t, "index": s.goal_idx, "x": gx, "y": gy})
 
 
+class PlannerNode(Node):
+    """Планировщик: /odom + /goal → /local_goal (опережающая точка), /path (план)."""
+
+    def __init__(self, bus: Bus, sim: "BrainSim"):
+        super().__init__(bus, "planner")
+        self.sim = sim
+        self.pose = None
+        self.goal = None
+        self.follower = PathFollower(build_grid(ARENA_W, ARENA_H, sim.shelves))
+        self.subscribe("/odom", lambda m: setattr(self, "pose", m))
+        self.subscribe("/goal", self._on_goal)
+        self.create_timer(5.0, self._tick)
+
+    def _on_goal(self, msg):
+        self.goal = msg
+
+    def _tick(self, t: float) -> None:
+        if not (self.pose and self.goal):
+            return
+        replans_before = self.follower.replans
+        x, y = self.follower.update((self.pose["x"], self.pose["y"]),
+                                    (self.goal["x"], self.goal["y"]), t)
+        self.publish("/local_goal", {"stamp": t, "x": round(x, 3), "y": round(y, 3)})
+        if self.follower.replans != replans_before:
+            self.publish("/path", {"stamp": t, "poses": [
+                {"x": round(px, 3), "y": round(py, 3)} for px, py in self.follower.path]})
+
+    def stats(self) -> dict:
+        ms = self.follower.plan_ms
+        return {
+            "replans": self.follower.replans,
+            "failures": self.follower.failures,
+            "planMsMean": round(sum(ms) / len(ms), 2) if ms else 0.0,
+            "planMsMax": round(max(ms), 2) if ms else 0.0,
+            "pathPoints": len(self.follower.path or []),
+            "pathLengthM": round(path_length(self.follower.path or []), 2),
+        }
+
+
 class BrainNode(Node):
-    """ИИ-контроллер: /scan + /odom + /goal → /cmd_vel."""
+    """ИИ-контроллер: /scan + /odom + /local_goal (от планировщика) → /cmd_vel."""
 
     def __init__(self, bus: Bus, sim: "BrainSim", brain: Brain):
         super().__init__(bus, "brain")
@@ -112,7 +152,7 @@ class BrainNode(Node):
         self.last_inputs = [0.0] * N_INPUTS
         self.subscribe("/scan", lambda m: setattr(self, "scan", m["ranges"]))
         self.subscribe("/odom", lambda m: setattr(self, "odom", m))
-        self.subscribe("/goal", lambda m: setattr(self, "goal", m))
+        self.subscribe("/local_goal", lambda m: setattr(self, "goal", m))
         self.create_timer(20.0, self._tick)
 
     def _tick(self, t: float) -> None:
@@ -189,6 +229,8 @@ class BrainSim:
                               ("/odom", "nav_msgs/Odometry"),
                               ("/scan", "sensor_msgs/LaserScan"),
                               ("/goal", "geometry_msgs/PoseStamped"),
+                              ("/path", "nav_msgs/Path"),
+                              ("/local_goal", "geometry_msgs/PointStamped"),
                               ("/brain/activity", "std_msgs/Float32MultiArray"),
                               ("/modules/state", "rus_slam/ModuleState")]:
                 self.bus.declare(name, typ)
@@ -200,9 +242,10 @@ class BrainSim:
             self.trail: list = []
             self.world = WorldNode(self.bus, self)
             self.mission = MissionNode(self.bus, self)
+            self.planner_node = PlannerNode(self.bus, self)
             self.brain_node = BrainNode(self.bus, self, Brain(self.n_neurons, self.weights))
             self.modules = ModulesNode(self.bus, self)
-            self.nodes = [self.world, self.mission, self.brain_node, self.modules]
+            self.nodes = [self.world, self.mission, self.planner_node, self.brain_node, self.modules]
 
     def _tick(self) -> None:
         self.sim_t += PHYSICS_DT
@@ -264,6 +307,9 @@ class BrainSim:
                 },
                 "lidar": self.last_lidar,
                 "trail": self.trail[-TRAIL_LEN:],
+                "path": [list(p) for p in ((self.planner_node.follower.path or []))],
+                "localGoal": self.bus.topics["/local_goal"].last,
+                "planner": self.planner_node.stats(),
                 "goal": {"index": self.goal_idx, "x": gx, "y": gy},
                 "mission": {"reached": self.reached_total, "cycles": self.cycles},
                 "activity": {
@@ -282,6 +328,7 @@ class BrainSim:
                     for t in self.bus.topics.values()
                 ],
                 "nodes": [n.name for n in self.nodes],
+
                 "validation": self.validation,
                 "running": bool(self._thread and self._thread.is_alive()),
             }

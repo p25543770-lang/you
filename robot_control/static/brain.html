@@ -50,6 +50,8 @@
     <div class="legend">
       <span style="color:#3fb950">●</span> робот &nbsp;
       <span style="color:#58a6ff">—</span> траектория &nbsp;
+      <span style="color:#3fb950">┅</span> план A* &nbsp;
+      <span style="color:#d2a8ff">●</span> опережающая точка &nbsp;
       <span style="color:#e3b341">✕</span> цель &nbsp;
       <span style="color:#8b96a5">· луч лидара 4 м</span>
     </div>
@@ -66,6 +68,8 @@
         <div class="metric"><div class="v" id="m-steer">0.0</div><div class="k">руль, °</div></div>
         <div class="metric"><div class="v" id="m-odo">0.0</div><div class="k">путь, м</div></div>
         <div class="metric"><div class="v" id="m-goal">—</div><div class="k">текущая цель</div></div>
+        <div class="metric"><div class="v" id="m-replans">0</div><div class="k">перепланирований</div></div>
+        <div class="metric"><div class="v" id="m-planms">0.0</div><div class="k">план A*, мс (среднее)</div></div>
       </div>
     </div>
     <div class="card">

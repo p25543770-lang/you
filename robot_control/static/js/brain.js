@@ -61,6 +61,17 @@
       ctx.stroke();
     }
 
+    // план планировщика (A*, после сглаживания) и опережающая точка
+    if (s.path && s.path.length > 1) {
+      ctx.strokeStyle = "#3fb950"; ctx.lineWidth = 3; ctx.setLineDash([10, 6]);
+      ctx.beginPath();
+      s.path.forEach(function (pt, i) {
+        var p = toPx(pt[0], pt[1], H, scale);
+        if (i === 0) ctx.moveTo(p[0], p[1]); else ctx.lineTo(p[0], p[1]);
+      });
+      ctx.stroke(); ctx.setLineDash([]);
+    }
+
     // лидар: 16 лучей, i=0 — по курсу, далее против часовой
     var r = s.robot;
     var th = r.thetaDeg * Math.PI / 180;
@@ -79,6 +90,12 @@
     ctx.beginPath(); ctx.arc(rp[0], rp[1], 0.35 * scale, 0, 2 * Math.PI); ctx.fill();
     ctx.beginPath(); ctx.moveTo(rp[0], rp[1]);
     ctx.lineTo(rp[0] + Math.cos(th) * 0.5 * scale, rp[1] - Math.sin(th) * 0.5 * scale); ctx.stroke();
+
+    if (s.localGoal) {
+      var lp = toPx(s.localGoal.x, s.localGoal.y, H, scale);
+      ctx.fillStyle = "#d2a8ff";
+      ctx.beginPath(); ctx.arc(lp[0], lp[1], 6, 0, 2 * Math.PI); ctx.fill();
+    }
 
     // цель (как круг радиуса 0.6 м)
     var gp = toPx(s.goal.x, s.goal.y, H, scale);
@@ -165,6 +182,8 @@
     $("m-speed").textContent = fmt(s.robot.v, 2);
     $("m-steer").textContent = fmt(s.robot.steerDeg, 1);
     $("m-odo").textContent = fmt(s.robot.odometer, 1);
+    $("m-replans").textContent = s.planner.replans;
+    $("m-planms").textContent = fmt(s.planner.planMsMean, 1);
     $("m-goal").textContent = "№" + (s.goal.index + 1) + " (" + fmt(s.goal.x, 1) + ", " + fmt(s.goal.y, 1) + ")";
     var v = s.validation;
     $("val").textContent = v

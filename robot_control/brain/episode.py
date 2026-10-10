@@ -11,8 +11,9 @@ import random
 from dataclasses import dataclass, field
 
 from .network import Brain, features
+from .planner import PathFollower, build_grid
 from .world import (
-    BASE_SHELVES, BASE_WAYPOINTS, START_POSE, Robot, arena_segments,
+    ARENA_H, ARENA_W, BASE_SHELVES, BASE_WAYPOINTS, START_POSE, Robot, arena_segments,
     random_layout, shelves_to_segments,
 )
 
@@ -28,6 +29,7 @@ class EpisodeResult:
     final_dist: float = 0.0
     progress_m: float = 0.0
     near_steps: int = 0        # шаги с препятствием ближе 0.5 м
+    replans: int = 0
     score: float = 0.0
     time_s: float = 0.0
     path: list = field(default_factory=list)
@@ -43,11 +45,14 @@ def layout(seed: int | None):
 
 
 def run_episode(brain: Brain, seed: int | None, duration_s: float = 45.0,
-                noise_seed: int = 0, keep_path: bool = False) -> EpisodeResult:
+                noise_seed: int = 0, keep_path: bool = False,
+                planned: bool = True) -> EpisodeResult:
+    """planned=True: сеть получает опережающую точку планировщика, а не дальнюю цель."""
     shelves, waypoints, segs = layout(seed)
     rng = random.Random(noise_seed)
     robot = Robot(*START_POSE)
     brain.reset()
+    follower = PathFollower(build_grid(ARENA_W, ARENA_H, shelves)) if planned else None
     res = EpisodeResult()
     idx = 0
     progress_m = 0.0           # сумма продвижения к текущей точке, м
@@ -67,12 +72,16 @@ def run_episode(brain: Brain, seed: int | None, duration_s: float = 45.0,
         if prev_dist is not None:
             progress_m += max(0.0, prev_dist - dist)   # вознаграждаем только приближение
         prev_dist = dist
-        rel = math.atan2(math.sin(math.atan2(dy, dx) - robot.theta),
-                         math.cos(math.atan2(dy, dx) - robot.theta))
         lidar = robot.lidar(segs, SENSOR_NOISE_M, rng)
+        # сеть рулит на опережающую точку плана (или прямо на цель без планировщика)
+        target = follower.update((robot.x, robot.y), (gx, gy), res.time_s) if follower else (gx, gy)
+        tx, ty = target[0] - robot.x, target[1] - robot.y
+        tdist = math.hypot(tx, ty)
+        rel = math.atan2(math.sin(math.atan2(ty, tx) - robot.theta),
+                         math.cos(math.atan2(ty, tx) - robot.theta))
         if min(lidar) < 0.5:
             res.near_steps += 1
-        v, steer = brain.step(features(lidar, rel, dist, robot.v))
+        v, steer = brain.step(features(lidar, rel, tdist, robot.v))
         robot.step(v, steer, CONTROL_DT, segs)
         res.time_s += CONTROL_DT
         if keep_path and step % 4 == 0:
@@ -82,6 +91,7 @@ def run_episode(brain: Brain, seed: int | None, duration_s: float = 45.0,
         gx, gy = waypoints[idx]
         res.final_dist = math.hypot(gx - robot.x, gy - robot.y)
     res.progress_m = progress_m
+    res.replans = follower.replans if follower else 0
     # плотная награда: за каждый метр к цели, за точку — бонус, за касание — штраф
     res.score = (100.0 * res.reached + 10.0 * progress_m
                  - 20.0 * res.collisions - 0.02 * res.near_steps)
