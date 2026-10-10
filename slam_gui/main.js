@@ -456,6 +456,80 @@
     });
   }
 
+  /* ------------------------------------------------------------ лидар */
+
+  const LIDAR_RANGE_M = 10;        // радиус карты, м
+  const LIDAR_RING_M = 2;          // шаг колец, м
+
+  // Точки приходят как [{a: угол, рад (0 — вперёд, против часовой), r: дистанция, м}].
+  // Без данных карта остаётся пустой: ничего не выдумываем.
+  function lidarPoints(d) {
+    if (!Array.isArray(d.lidar)) return [];
+    return d.lidar.filter((p) => p && Number.isFinite(p.a) && Number.isFinite(p.r) && p.r >= 0);
+  }
+
+  function renderLidar(d) {
+    const canvas = $('lidar-canvas');
+    if (!canvas) return;
+    const pts = lidarPoints(d);
+    const has = pts.length > 0;
+    const near = has ? Math.min(...pts.map((p) => p.r)) : null;
+
+    setText($('lidar-meta'), has ? '360° · ' + pts.length + ' точек' : 'нет данных');
+    setText($('lidar-count'), has ? String(pts.length) : '—');
+    setText($('lidar-near'), near === null ? '—' : fmt(near, 2) + ' м');
+    $('lidar-empty').hidden = has;
+    drawLidar(canvas, pts);
+  }
+
+  function drawLidar(canvas, pts) {
+    const ctx = canvas.getContext && canvas.getContext('2d');
+    if (!ctx) return;
+    const dpr = window.devicePixelRatio || 1;
+    const w = canvas.clientWidth;
+    const h = canvas.clientHeight;
+    if (!w || !h) return;
+    if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
+      canvas.width = Math.round(w * dpr);
+      canvas.height = Math.round(h * dpr);
+    }
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    ctx.clearRect(0, 0, w, h);
+
+    const cx = w / 2;
+    const cy = h / 2;
+    const R = Math.max(10, Math.min(w, h) / 2 - 6);
+    const k = R / LIDAR_RANGE_M;
+
+    ctx.strokeStyle = '#2b4037';
+    ctx.lineWidth = 1;
+    for (let m = LIDAR_RING_M; m <= LIDAR_RANGE_M; m += LIDAR_RING_M) {
+      ctx.beginPath();
+      ctx.arc(cx, cy, m * k, 0, Math.PI * 2);
+      ctx.stroke();
+    }
+    ctx.beginPath();                       // оси: вперёд и вбок
+    ctx.moveTo(cx, cy - R); ctx.lineTo(cx, cy + R);
+    ctx.moveTo(cx - R, cy); ctx.lineTo(cx + R, cy);
+    ctx.stroke();
+
+    ctx.fillStyle = '#9fe36b';
+    pts.forEach((p) => {
+      const r = Math.min(p.r, LIDAR_RANGE_M) * k;
+      const x = cx - r * Math.sin(p.a);
+      const y = cy - r * Math.cos(p.a);
+      ctx.fillRect(x - 1.5, y - 1.5, 3, 3);
+    });
+
+    ctx.fillStyle = '#e6efe9';            // робот: треугольник носом вперёд
+    ctx.beginPath();
+    ctx.moveTo(cx, cy - 7);
+    ctx.lineTo(cx + 5, cy + 5);
+    ctx.lineTo(cx - 5, cy + 5);
+    ctx.closePath();
+    ctx.fill();
+  }
+
   function renderRoute(d) {
     const parts = String(d.route || '').split('→').map((s) => s.trim()).filter(Boolean);
     setText($('route-from'), parts[0] || '—');
@@ -475,6 +549,7 @@
     renderAlerts(view);
     renderKpis(d, b);
     renderChassis(view, d, motors);
+    renderLidar(d);
     renderRoute(d);
     renderEvents();
     document.body.classList.toggle('is-stale', !view.live);

@@ -224,6 +224,25 @@
         </div>
       </section>
 
+      <!-- лидар 360°: карта препятствий вокруг робота (данные — поле lidar в /api/state, когда источник его передаёт) -->
+      <section class="panel lidar" id="lidar" aria-labelledby="lidar-title">
+        <header class="panel-head">
+          <h2 id="lidar-title">Лидар 360°</h2>
+          <span class="panel-meta" id="lidar-meta">—</span>
+        </header>
+        <div class="lidar-body">
+          <div class="lidar-map">
+            <canvas id="lidar-canvas" aria-label="Карта лидара"></canvas>
+            <p class="lidar-empty" id="lidar-empty">данных лидара нет</p>
+          </div>
+          <dl class="lidar-stats">
+            <div><dt>точек</dt><dd id="lidar-count">—</dd></div>
+            <div><dt>ближайшее</dt><dd id="lidar-near">—</dd></div>
+            <div><dt>дальность</dt><dd>10 м</dd></div>
+          </dl>
+        </div>
+      </section>
+
       <p class="specs">рулевые NEMA 23 · тяговые BLDC 260 Вт · АКБ LiFePO4 12S3P, 714 Вт·ч</p>
     </main>
   </div>
