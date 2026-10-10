@@ -97,7 +97,7 @@ def make_source(mode: str = "auto", ports=None):
     """Источник данных робота.
 
     ``auto``: ROS 2, если есть rclpy; иначе UART-модули, если есть pyserial и
-    живой порт; иначе симуляция — интерфейс работает и на пустом столе.
+    живой порт; иначе пустой источник (без выдуманных данных).
     """
     mod = load_backend()
     mode = (mode or "auto").strip().lower()
@@ -121,8 +121,8 @@ def make_source(mode: str = "auto", ports=None):
         log.info("источник данных: UART-модули %s", ", ".join(live))
         return mod.SerialSource(live)
 
-    log.info("источник данных: симуляция (железо не найдено)")
-    return mod.SimSource()
+    log.info("источник данных: робот не подключён — значения пустые (симуляция только по RC_SLAM_SOURCE=sim)")
+    return mod.NoSource()
 
 
 def build_state(mode="auto", ports=None, lock_file=None, pin=None,

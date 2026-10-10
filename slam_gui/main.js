@@ -36,7 +36,7 @@
   const MODULES = ['FL', 'FR', 'RL', 'RR'];
   const LEVEL_SEV = { 'НОРМА': 'ok', 'НИЗКИЙ': 'warn', 'КРИТИЧЕСКИЙ': 'err' };
   const LEVEL_WORD = { 'НОРМА': 'норма', 'НИЗКИЙ': 'низкий', 'КРИТИЧЕСКИЙ': 'критический' };
-  const SOURCE_NAME = { sim: 'симуляция', serial: 'UART ×4 · 20 Гц', ros: 'ROS 2', demo: 'демо-данные' };
+  const SOURCE_NAME = { sim: 'симуляция', serial: 'UART ×4 · 20 Гц', ros: 'ROS 2', demo: 'демо-данные', none: 'робот не подключён' };
 
   const params = new URLSearchParams(window.location.search);
   const DEMO = params.get('demo') === '1';
@@ -310,7 +310,10 @@
     let text = 'ожидание сервера';
     let tone = '';
     if (view.demo) { text = 'демо-данные'; tone = 'warn'; }
-    else if (view.live) { text = 'сервер · ' + view.source; tone = 'ok'; }
+    else if (view.live) {
+      text = 'сервер · ' + (SOURCE_NAME[view.source] || view.source);
+      tone = view.source === 'none' ? 'warn' : 'ok';
+    }
     else if (view.hasData) { text = 'сервер недоступен'; tone = 'err'; }
     setText(chip, text);
     setTone(chip, 'chip', tone);

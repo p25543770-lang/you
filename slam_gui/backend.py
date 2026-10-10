@@ -304,6 +304,24 @@ class SimSource:
         }
 
 
+class NoSource:
+    """Робот не подключён: ни одного выдуманного значения, все поля пустые (null)."""
+
+    name = "none"
+
+    def read(self):
+        motors = [{"id": mid, "title": MODULE_TITLES[mid], "angle": None, "rpm": None,
+                   "temp": None, "homed": None, "online": False, "fault": None}
+                  for mid in MODULE_NAMES.values()]
+        battery = {"soc": None, "volts": None, "amps": None, "watts": None,
+                   "remainingWh": None, "rangeKm": None, "state": None, "level": None,
+                   "tempC": None, "cellMin": None, "cellMax": None,
+                   "thresholds": {"lowV": PACK["lowV"], "criticalV": PACK["criticalV"]}}
+        return {"motors": motors, "battery": battery, "cargo": {},
+                "mode": None, "route": None, "speedMps": None, "powerKw": None,
+                "linkOk": False}
+
+
 class SerialSource:
     """Реальные модули: 4 UART, кадры телеметрии 16 Б (20 Гц)."""
 
@@ -808,10 +826,11 @@ def make_source(kind, ports):
         return SerialSource(ports or ["/dev/ttyUSB0", "/dev/ttyUSB1", "/dev/ttyUSB2", "/dev/ttyUSB3"])
     if kind == "ros":
         return RosSource()
+    if kind == "sim":
+        return SimSource()
     if kind == "auto":
-        src = RosSource()
-        return src if not getattr(src, "fallback", None) else src
-    return SimSource()
+        return RosSource()
+    return NoSource()
 
 
 def build_app(args):
@@ -825,7 +844,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description="RUS SLAM: основной экран робота и API")
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--port", type=int, default=8080)
-    ap.add_argument("--source", choices=["sim", "serial", "ros", "auto"], default="sim",
+    ap.add_argument("--source", choices=["sim", "serial", "ros", "auto"], default="auto",
                     help="источник данных (по умолчанию sim — стенд)")
     ap.add_argument("--ports", default="", help="UART-порты для --source serial, через запятую")
     ap.add_argument("--pin", default=DEFAULT_PIN, help="заводской PIN отсека (по умолчанию 2580)")
