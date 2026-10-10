@@ -711,6 +711,14 @@ body {
   transform: translateX(-50%);
   pointer-events: none;
 }
+/* режим R: колесо, которое сейчас получает команду движения; при S стрелка уходит назад */
+.wheel.is-driving .wheel-dir { animation: wheel-dir .6s ease-in-out infinite alternate; }
+.wheel.is-reverse .wheel-dir {
+  top: auto;
+  bottom: -13px;
+  transform: translateX(-50%) rotate(180deg);
+}
+@keyframes wheel-dir { from { opacity: .35; } to { opacity: 1; } }
 .wheel[data-tone="move"] { color: var(--accent); }
 .wheel[data-tone="ok"]   { color: var(--ok); }
 .wheel[data-tone="warn"] { color: var(--warn); }
