@@ -590,7 +590,7 @@
   const DRIVE = { on: false, keys: {}, vx: 0, wz: 0 };
   const DRIVE_VMAX = 0.5;      // м/с
   const DRIVE_WMAX = 1.0;      // рад/с
-  const DRIVE_STEER_MAX = 30;  // градусы: поворот колёс при полном A/D
+  const DRIVE_STEER_MAX = 110; // градусы: предел поворота колеса при полном A/D
   const DRIVE_WHEELS = ['FL', 'FR', 'RL', 'RR'];
   const DRIVE_CODES = ['KeyW', 'KeyA', 'KeyS', 'KeyD', 'ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight'];
 
@@ -615,7 +615,10 @@
         w.classList.remove('is-driving', 'is-reverse');
         return;
       }
-      const angle = -(DRIVE.wz / DRIVE_WMAX) * DRIVE_STEER_MAX;   // A → влево (отрицательный угол)
+      // Передние и задние колёса поворачивают в противоположные стороны, без крабового хода:
+      // A → передние влево (−), задние вправо (+).
+      const s = -(DRIVE.wz / DRIVE_WMAX) * DRIVE_STEER_MAX;
+      const angle = id[0] === 'F' ? s : -s;
       w.style.transform = 'rotate(' + angle.toFixed(1) + 'deg)';
       w.classList.toggle('is-driving', DRIVE.vx !== 0);
       w.classList.toggle('is-reverse', DRIVE.vx < 0);
