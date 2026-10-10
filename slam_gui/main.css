@@ -556,7 +556,7 @@ body {
   --card: clamp(200px, 19vw, 280px);
   --axle: clamp(36px, 3.6vw, 62px);
   --body: clamp(176px, 16.5vw, 290px);
-  --card-h: clamp(150px, 17vh, 300px);
+  --card-h: clamp(130px, 13vh, 230px);
   flex: none;
   display: grid;
   grid-template-columns: var(--card) var(--axle) var(--body) var(--axle) var(--card);
@@ -584,10 +584,10 @@ body {
   align-self: stretch;
   display: flex;
   flex-direction: column;
-  gap: 10px;
+  gap: 7px;
   min-width: 0;
   min-height: var(--card-h);
-  padding: 14px 16px;
+  padding: 10px 14px;
   background: var(--panel-2);
   border: 1px solid var(--line);
   border-radius: 14px;
@@ -620,7 +620,7 @@ body {
   display: grid;
   grid-template-columns: minmax(0, 1fr);
   align-content: space-evenly;
-  gap: 6px;
+  gap: 3px;
 }
 
 /* «подпись — значение» в строку */
@@ -810,8 +810,8 @@ body {
   inset: 0;
   margin: 0;
   display: flex;
-  align-items: center;
-  justify-content: center;
+  align-items: flex-start;     /* надпись в углу, не поверх маркера робота */
+  justify-content: flex-start;
   color: var(--muted);
   font-size: 13px;
   pointer-events: none;
