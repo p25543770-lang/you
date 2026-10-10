@@ -552,19 +552,19 @@ body {
 .chassis { flex: 1 1 auto; }
 
 .chassis-grid {
-  --card: clamp(200px, 21vw, 360px);
-  --axle: clamp(40px, 4.6vw, 96px);
-  --body: clamp(140px, 15vw, 300px);
-  --card-h: clamp(170px, 30vh, 320px);
+  --card: clamp(176px, 15vw, 230px);
+  --axle: clamp(30px, 3vw, 56px);
+  --body: clamp(150px, 13vw, 240px);
+  --card-h: clamp(170px, 28vh, 320px);
   flex: 1 1 auto;
   min-height: 0;
   display: grid;
   grid-template-columns: var(--card) var(--axle) var(--body) var(--axle) var(--card);
-  grid-template-rows: auto auto;
-  align-content: center;
+  grid-template-rows: minmax(0, 1fr) minmax(0, 1fr);   /* два ряда делят всю высоту панели: карточки выше */
+  align-content: stretch;
   justify-content: center;
-  column-gap: 12px;
-  row-gap: 16px;
+  column-gap: 10px;
+  row-gap: 14px;
 }
 
 .body      { grid-column: 3; grid-row: 1 / span 2; }
