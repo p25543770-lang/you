@@ -222,12 +222,43 @@ class SimSource:
 
     name = "sim"
 
+    # Сценарий склада, цикл 120 с: разгон, ход прямо, поворот, торможение, стоянка, ход.
+    V_CRUISE = 0.7          # м/с, потолок скорости
+    STEER_LIMIT = 30.0      # градусы, предел рулевого угла модуля
+    STEER_RATE = 35.0       # градусы в секунду: скорость рулевого привода (NEMA 23 с редуктором)
+
     def __init__(self):
         self.t0 = time.time()
         self.soc = 78.0
         self.last = time.time()
+        self.steer = 0.0            # текущий угол колёс (передние), градусы
+        self.bat_temp = 26.0
         self.motors = [{"id": mid, "title": MODULE_TITLES[mid], "angle": 0.0,
-                        "rpm": 0.0, "temp": 36.0, "homed": True} for mid in MODULE_NAMES.values()]
+                        "rpm": 0.0, "temp": 32.0, "homed": True} for mid in MODULE_NAMES.values()]
+
+    @classmethod
+    def _plan(cls, t):
+        """Условный сценарий: (скорость м/с, целевой угол колёс, градусы)."""
+        seg = t % 120.0
+        if seg < 8:
+            v = cls.V_CRUISE * seg / 8.0                      # разгон
+        elif seg < 40:
+            v = cls.V_CRUISE                                  # ход прямо
+        elif seg < 48:
+            v = cls.V_CRUISE * (48.0 - seg) / 8.0             # торможение
+        elif seg < 58:
+            v = 0.0                                           # стоянка у стеллажа
+        elif seg < 110:
+            v = 0.5                                           # ход к выгрузке
+        else:
+            v = 0.5 * (120.0 - seg) / 10.0                    # подход и остановка
+        if 20.0 <= seg < 26.0:
+            target = -24.0                                    # поворот влево
+        elif 60.0 <= seg < 68.0:
+            target = 30.0                                     # поворот вправо
+        else:
+            target = 0.0
+        return max(0.0, v), target
 
     def read(self):
         now = time.time()
@@ -235,18 +266,32 @@ class SimSource:
         self.last = now
         t = now - self.t0
 
-        speed = 0.55 + 0.45 * math.sin(t / 9.0)          # условная скорость 0,1…1,0
+        v, target = self._plan(t)
+        # рулевой привод: угол догоняет цель с ограниченной скоростью
+        step = self.STEER_RATE * dt
+        self.steer += max(-step, min(step, target - self.steer))
+        self.steer = max(-self.STEER_LIMIT, min(self.STEER_LIMIT, self.steer))
+
+        wheel_rpm = v / (2.0 * math.pi * WHEEL_R_M) * 60.0    # обороты колеса по скорости
+        turn = abs(self.steer) / self.STEER_LIMIT
+        amps = 0.9 + 5.0 * (v / self.V_CRUISE) + 1.5 * turn + 0.15 * math.sin(t * 3.1)
+        amps = max(0.5, amps)
+
         for i, m in enumerate(self.motors):
-            m["angle"] = math.sin(t / (2.6 + i * 0.4)) * 34.0
-            m["rpm"] = speed * 260.0 + math.sin(t * 2 + i) * 3.0
-            m["temp"] = 34.0 + abs(m["rpm"]) / 40.0 + math.sin(t / 5 + i) * 1.4
-        amps = 6.0 + 12.0 * abs(math.sin(t / 9.0))
+            front = m["id"][0] == "F"
+            m["angle"] = round((self.steer if front else -self.steer) + 0.3 * math.sin(t / 3 + i), 1)
+            m["rpm"] = round(max(0.0, wheel_rpm + 1.2 * math.sin(t * 2 + i)), 1)
+            target_temp = 30.0 + 18.0 * (v / self.V_CRUISE) + 4.0 * turn
+            m["temp"] = round(m["temp"] + (target_temp - m["temp"]) * dt / 150.0, 1)
+
         self.soc = max(4.0, self.soc - amps * dt / 3600.0 * 100.0 / PACK["capacityAh"])
+        bat_target = 24.0 + 6.0 * (amps / 12.0)
+        self.bat_temp += (bat_target - self.bat_temp) * dt / 300.0
         volts = voltage_from_soc(self.soc) - amps * PACK["internalR"]
-        return self._payload(self.motors, volts, amps, speed)
+        return self._payload(self.motors, volts, amps, round(v, 2))
 
     def _payload(self, motors, volts, amps, speed):
-        battery = pack_state(volts, amps, self.soc)
+        battery = pack_state(volts, amps, self.soc, temp_c=self.bat_temp)
         return {
             "motors": motors,
             "battery": battery,
