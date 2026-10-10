@@ -36,7 +36,7 @@
   const MODULES = ['FL', 'FR', 'RL', 'RR'];
   const LEVEL_SEV = { 'НОРМА': 'ok', 'НИЗКИЙ': 'warn', 'КРИТИЧЕСКИЙ': 'err' };
   const LEVEL_WORD = { 'НОРМА': 'норма', 'НИЗКИЙ': 'низкий', 'КРИТИЧЕСКИЙ': 'критический' };
-  const SOURCE_NAME = { sim: 'симуляция', serial: 'UART ×4 · 20 Гц', ros: 'ROS 2', demo: 'демо-данные', none: 'робот не подключён' };
+  const SOURCE_NAME = { sim: 'симуляция', serial: 'UART ×4 · 20 Гц', ros: 'ROS 2', demo: 'демо-данные', master: 'мастер · UART', none: 'робот не подключён' };
 
   const params = new URLSearchParams(window.location.search);
   const DEMO = params.get('demo') === '1';

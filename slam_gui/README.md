@@ -46,3 +46,19 @@ python3 tests/backend.test.py     # 40 проверок бэкенда и API
 Откройте `index.html` или поднимите static-сервер из этой папки:
 `python3 -m http.server 8080 --directory .`. Полное описание — `docs/GUI.md`,
 план окна «Сервис» — `docs/SERVICE_CONSOLE.md`.
+
+## Мастер-Arduino по одному UART (`RC_SLAM_SOURCE=master`)
+
+Прошивка `firmware/motor_master/motor_master.ino` работает на мастере; слейвы получают команды по I2C, как и раньше.
+Раз в 200 мс мастер печатает в порт строку телеметрии:
+
+```
+@TLM mod=FL deg=-9.25 tgt=0.00 moving=1 cal=1 cycle=0 calib=0 opto=0 t=12345
+```
+
+Остальные строки монитора (текст для человека) сервер игнорирует. Команды с пульта на мастер пока не отправляются.
+
+Запуск: `RC_SLAM_SOURCE=master RC_SLAM_PORT=/dev/ttyACM0 RC_SLAM_MODULE=FL ./scripts/serve.sh`
+(`RC_SLAM_MODULE` — какой модуль это мастер: FL, FR, RL или RR; по умолчанию FL).
+Требуется `pip install pyserial`. Мастер передаёт только свой мотор: угол, движение, калибровку.
+Обороты, температура, АКБ и остальные три модуля пустые, пока слейвы не передают данные.

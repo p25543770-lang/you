@@ -96,6 +96,7 @@ def _autodetect_ports():
 def make_source(mode: str = "auto", ports=None):
     """Источник данных робота.
 
+    ``master``: один UART мастер-Arduino (строки "@TLM", см. firmware/motor_master).
     ``auto``: ROS 2, если есть rclpy; иначе UART-модули, если есть pyserial и
     живой порт; иначе пустой источник (без выдуманных данных).
     """
@@ -108,6 +109,11 @@ def make_source(mode: str = "auto", ports=None):
         return mod.SerialSource(list(ports or DEFAULT_PORTS))
     if mode == "ros":
         return mod.RosSource()
+    if mode == "master":
+        # мастер-Arduino на одном UART: RC_SLAM_PORT (по умолчанию /dev/ttyACM0), RC_SLAM_MODULE — FL/FR/RL/RR
+        port = os.environ.get("RC_SLAM_PORT", "/dev/ttyACM0").strip()
+        module = os.environ.get("RC_SLAM_MODULE", "FL").strip().upper()
+        return mod.MasterSource(port, module=module)
 
     if mode != "auto":
         log.warning("неизвестный RC_SLAM_SOURCE=%r — использую auto", mode)

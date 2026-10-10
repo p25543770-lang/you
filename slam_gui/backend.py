@@ -322,6 +322,109 @@ class NoSource:
                 "linkOk": False}
 
 
+TLM_PREFIX = "@TLM "
+
+
+def parse_master_line(line):
+    """Строка монитора мастера "@TLM mod=FL deg=-9.25 moving=1 ..." → dict.
+
+    Остальные строки монитора (текст для человека) возвращают None.
+    """
+    line = (line or "").strip()
+    if not line.startswith(TLM_PREFIX):
+        return None
+    fields = {}
+    for token in line[len(TLM_PREFIX):].split():
+        key, sep, value = token.partition("=")
+        if sep:
+            fields[key] = value
+    try:
+        return {
+            "mod": fields["mod"].upper(),
+            "deg": float(fields["deg"]),
+            "tgt": float(fields.get("tgt", "0")),
+            "moving": fields.get("moving") == "1",
+            "cal": fields.get("cal") == "1",
+            "cycle": fields.get("cycle") == "1",
+            "calib": fields.get("calib") == "1",
+            "opto": fields.get("opto") == "1",
+        }
+    except (KeyError, ValueError):
+        return None
+
+
+class MasterSource:
+    """Мастер-Arduino по одному UART: строки "@TLM" из motor_master.ino.
+
+    Мастер знает только свой мотор (угол, движение, калибровку). Остальные
+    модули и АКБ он не передаёт — их значения пустые, а не выдуманные.
+    """
+
+    name = "master"
+    STALE_S = 1.0
+
+    def __init__(self, port, module="FL", baud=115200):
+        self.port = port
+        self.module = module.upper()
+        self.baud = baud
+        self.lock = threading.Lock()
+        self.tlm = None
+        self.seen = 0.0
+        self._stop = False
+        threading.Thread(target=self._reader, daemon=True).start()
+
+    def feed(self, line, now=None):
+        """Принимает строку монитора; True, если это телеметрия."""
+        frame = parse_master_line(line)
+        if frame is None:
+            return False
+        with self.lock:
+            self.tlm = frame
+            self.seen = time.time() if now is None else now
+        return True
+
+    def _reader(self):
+        try:
+            import serial                    # pyserial, только для реального железа
+        except ImportError:
+            print("! master: pyserial не установлен (pip install pyserial) — порт %s выключен" % self.port)
+            return
+        while not self._stop:
+            try:
+                with serial.Serial(self.port, self.baud, timeout=0.5) as dev:
+                    print("· master: %s открыт (модуль %s)" % (self.port, self.module))
+                    while not self._stop:
+                        raw = dev.readline()
+                        if raw:
+                            self.feed(raw.decode("utf-8", "replace"))
+            except Exception as exc:          # noqa: BLE001 — порт может пропасть
+                print("! master %s: %s — повтор через 2 с" % (self.port, exc))
+                time.sleep(2.0)
+
+    def read(self, now=None):
+        now = time.time() if now is None else now
+        with self.lock:
+            frame = self.tlm
+            seen = self.seen
+        link = frame is not None and (now - seen) < self.STALE_S
+        motors = []
+        for mid in MODULE_NAMES.values():
+            if link and mid == self.module:
+                motors.append({"id": mid, "title": MODULE_TITLES[mid],
+                               "angle": round(frame["deg"], 2), "rpm": None, "temp": None,
+                               "homed": frame["cal"], "online": True, "fault": None,
+                               "moving": frame["moving"]})
+            else:
+                motors.append({"id": mid, "title": MODULE_TITLES[mid], "angle": None,
+                               "rpm": None, "temp": None, "homed": None,
+                               "online": False, "fault": None})
+        out = NoSource().read()              # АКБ, скорость, маршрут — пока не передаются
+        out["motors"] = motors
+        out["mode"] = "МАСТЕР НА СВЯЗИ" if link else None
+        out["linkOk"] = link
+        return out
+
+
 class SerialSource:
     """Реальные модули: 4 UART, кадры телеметрии 16 Б (20 Гц)."""
 

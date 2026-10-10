@@ -320,3 +320,34 @@ def test_main_screen_manual_drive_toggle_on_r(client, operator):
     assert "fetch(" not in js.split("function driveKey", 1)[1].split("function boot", 1)[0]
     css = client.get("/main.css").get_data(as_text=True)
     assert ".lidar.is-control" in css
+
+
+def test_master_line_parses_tlm_and_ignores_text():
+    """Строка "@TLM ..." разбирается; обычный текст монитора мастера игнорируется."""
+    backend = _load_backend()
+    frame = backend.parse_master_line(
+        "@TLM mod=fl deg=-9.25 tgt=0.00 moving=1 cal=1 cycle=0 calib=0 opto=0 t=12345\r\n")
+    assert frame["mod"] == "FL"
+    assert frame["deg"] == -9.25
+    assert frame["moving"] is True and frame["cal"] is True
+    assert frame["cycle"] is False and frame["opto"] is False
+    assert backend.parse_master_line("Цель достигнута. Угол: 12.00°") is None
+    assert backend.parse_master_line("@TLM mod=FL deg=abc") is None
+
+
+def test_master_source_reports_only_its_own_module():
+    """Мастер знает только свой мотор; остальные модули и АКБ — пустые, без выдумок."""
+    backend = _load_backend()
+    src = backend.MasterSource("/dev/null", module="FL")   # порт не открывается в тесте
+    src.feed("@TLM mod=FL deg=30.00 tgt=30.00 moving=0 cal=1 cycle=0 calib=0 opto=0 t=1", now=100.0)
+    out = src.read(now=100.5)
+    fl = next(m for m in out["motors"] if m["id"] == "FL")
+    fr = next(m for m in out["motors"] if m["id"] == "FR")
+    assert fl["angle"] == 30.0 and fl["online"] is True and fl["homed"] is True
+    assert fl["rpm"] is None and fl["temp"] is None
+    assert fr["online"] is False and fr["angle"] is None
+    assert out["linkOk"] is True and out["mode"] == "МАСТЕР НА СВЯЗИ"
+    assert out["battery"]["volts"] is None and out["speedMps"] is None
+    stale = src.read(now=102.0)                               # старше STALE_S — связи нет
+    assert stale["linkOk"] is False
+    assert next(m for m in stale["motors"] if m["id"] == "FL")["online"] is False
