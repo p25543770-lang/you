@@ -711,6 +711,24 @@ body {
   background: #3b5248;
   transform: translate(-50%, -50%);
 }
+.wheel { color: #6f877d; }                   /* цвет стрелки направления (currentColor) */
+.wheel-dir {                                  /* стрелка «вперёд» поверх колеса, поворачивается вместе с ним */
+  position: absolute;
+  left: 50%;
+  top: -13px;
+  width: 0;
+  height: 0;
+  border-left: 6px solid transparent;
+  border-right: 6px solid transparent;
+  border-bottom: 9px solid currentColor;
+  transform: translateX(-50%);
+  pointer-events: none;
+}
+.wheel[data-tone="move"] { color: var(--accent); }
+.wheel[data-tone="ok"]   { color: var(--ok); }
+.wheel[data-tone="warn"] { color: var(--warn); }
+.wheel[data-tone="err"]  { color: var(--err); }
+.wheel[data-tone="idle"] { color: var(--idle); }
 .wheel[data-tone="move"] { border-color: var(--accent); }
 .wheel[data-tone="ok"]   { border-color: var(--ok); }
 .wheel[data-tone="warn"] { border-color: var(--warn); }
