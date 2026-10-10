@@ -555,8 +555,8 @@ body {
 .chassis-grid {
   --card: clamp(200px, 19vw, 280px);
   --axle: clamp(36px, 3.6vw, 62px);
-  --body: clamp(160px, 15vw, 260px);
-  --card-h: clamp(150px, 21vh, 340px);
+  --body: clamp(176px, 16.5vw, 290px);
+  --card-h: clamp(150px, 17vh, 300px);
   flex: none;
   display: grid;
   grid-template-columns: var(--card) var(--axle) var(--body) var(--axle) var(--card);
