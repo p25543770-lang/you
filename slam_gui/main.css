@@ -675,7 +675,7 @@ body {
   border: 2px solid #3b5248;
   border-radius: 12px;
   background: linear-gradient(180deg, #0c1612, #101d18);
-  transition: transform .25s linear, border-color .3s ease;
+  transition: transform .1s linear, border-color .3s ease;   /* поворот колеса быстрее, чем раньше (.25s) */
 }
 .wheel::before {       /* ось колеса: видно, куда он повёрнут */
   content: "";
