@@ -553,10 +553,10 @@ body {
 .chassis { flex: none; }   /* блок шасси стоит сразу под показателями, высота по содержимому */
 
 .chassis-grid {
-  --card: clamp(186px, 16vw, 240px);
-  --axle: clamp(30px, 3vw, 56px);
-  --body: clamp(150px, 13vw, 240px);
-  --card-h: clamp(150px, 20vh, 340px);
+  --card: clamp(200px, 19vw, 280px);
+  --axle: clamp(36px, 3.6vw, 62px);
+  --body: clamp(160px, 15vw, 260px);
+  --card-h: clamp(150px, 21vh, 340px);
   flex: none;
   display: grid;
   grid-template-columns: var(--card) var(--axle) var(--body) var(--axle) var(--card);
