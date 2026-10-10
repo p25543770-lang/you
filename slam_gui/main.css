@@ -550,19 +550,18 @@ body {
  * зазоров между модулями нет. Колёса поворачиваются на угол руля.
  */
 
-.chassis { flex: 1 0 auto; }   /* растёт на свободное место, но не сжимается ниже содержимого */
+.chassis { flex: none; }   /* блок шасси стоит сразу под показателями, высота по содержимому */
 
 .chassis-grid {
-  --card: clamp(176px, 15vw, 230px);
+  --card: clamp(186px, 16vw, 240px);
   --axle: clamp(30px, 3vw, 56px);
   --body: clamp(150px, 13vw, 240px);
-  --card-h: clamp(150px, 20vh, 320px);
-  flex: 1 0 auto;
-  min-height: 0;
+  --card-h: clamp(150px, 20vh, 340px);
+  flex: none;
   display: grid;
   grid-template-columns: var(--card) var(--axle) var(--body) var(--axle) var(--card);
-  grid-template-rows: minmax(auto, 1fr) minmax(auto, 1fr);   /* два ряда делят свободную высоту, но не ниже содержимого */
-  align-content: stretch;
+  grid-template-rows: auto auto;
+  align-content: start;
   justify-content: center;
   column-gap: 10px;
   row-gap: 14px;
@@ -764,7 +763,7 @@ body {
   gap: 2px;
 }
 .body-speed b {
-  font-size: clamp(30px, 4.4vw, 64px);
+  font-size: clamp(28px, 3.6vw, 60px);
   font-weight: 900;
   line-height: 1;
   font-variant-numeric: tabular-nums;
@@ -779,7 +778,8 @@ body {
 
 .lidar {
   flex: none;
-  height: clamp(100px, 14vh, 220px);
+  flex: 1 1 auto;                /* лидар занимает всё, что осталось внизу */
+  min-height: clamp(110px, 14vh, 220px);
   padding: 10px 14px;
   background: var(--panel);
   border: 1px solid var(--line);
@@ -914,7 +914,7 @@ body.is-stale #route {
   .mod { gap: 4px; padding: 8px 12px; }
   .mod-metrics { gap: 2px; }
   .metric-value b { font-size: 18px; }
-  .lidar { height: clamp(124px, 19vh, 240px); gap: 4px; padding: 8px 14px; }
+  .lidar { min-height: clamp(110px, 16vh, 240px); gap: 4px; padding: 8px 14px; }
   .lidar .panel-head h2 { font-size: 12px; }
   .lidar-stats { gap: 6px; }
   .lidar-stats dt { font-size: 10px; }
@@ -961,7 +961,7 @@ body.is-stale #route {
   .kpis { order: 5; grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .kpi-soc { grid-column: 1 / -1; }
   .chassis { order: 6; flex: none; }
-  .lidar { order: 7; flex: none; }
+  .lidar { order: 7; flex: none; height: 240px; }
   .events {
     order: 8;
     flex: none;

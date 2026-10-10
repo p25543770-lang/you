@@ -337,14 +337,36 @@ class SerialSource:
         }
 
 
+LIDAR_MAX_AGE_S = 1.0     # скан старше — на экран не отдаём (карта пустая)
+
+
+def scan_points(msg):
+    """sensor_msgs/LaserScan -> [{a, r}]: a в радианах из [-pi, pi] (0 — вперёд, против часовой),
+    r в метрах. Недостоверные лучи (inf, nan, вне range_min..range_max) пропускаются."""
+    points = []
+    lo = float(msg.range_min)
+    hi = float(msg.range_max)
+    inc = float(msg.angle_increment)
+    for i, r in enumerate(msg.ranges):
+        r = float(r)
+        if not math.isfinite(r) or r < lo or r > hi:
+            continue
+        a = float(msg.angle_min) + i * inc
+        a = math.atan2(math.sin(a), math.cos(a))       # в [-pi, pi]
+        points.append({"a": round(a, 4), "r": round(r, 3)})
+    return points
+
+
 class RosSource:
-    """ROS 2 (rclpy): /modules/state, /battery. Если rclpy нет — падаем в sim."""
+    """ROS 2 (rclpy): /modules/state, /battery, /screen/motors, /scan (лидар). Если rclpy нет — падаем в sim."""
 
     name = "ros"
 
     def __init__(self):
         self.ok = False
         self.data = {}
+        self.scan = []
+        self.scan_at = 0.0
         try:
             import rclpy                                            # noqa: F401
             from rclpy.node import Node
@@ -359,6 +381,8 @@ class RosSource:
         import rclpy
         from rclpy.node import Node
         from std_msgs.msg import Float32, String
+        from sensor_msgs.msg import LaserScan
+        from rclpy.qos import qos_profile_sensor_data
 
         source = self
 
@@ -369,6 +393,7 @@ class RosSource:
                 self.create_subscription(Float32, "/battery/voltage", source._on_volts, 10)
                 self.create_subscription(Float32, "/battery/current", source._on_amps, 10)
                 self.create_subscription(String, "/screen/motors", source._on_motors, 10)
+                self.create_subscription(LaserScan, "/scan", source._on_scan, qos_profile_sensor_data)
 
         rclpy.init(args=None)
         node = Bridge()
@@ -397,6 +422,13 @@ class RosSource:
         except Exception:                                            # noqa: BLE001
             pass
 
+    def _on_scan(self, msg):
+        try:
+            self.scan = scan_points(msg)
+            self.scan_at = time.time()
+        except Exception:                                            # noqa: BLE001
+            pass
+
     def read(self):
         if self.fallback:
             return self.fallback.read()
@@ -412,6 +444,8 @@ class RosSource:
             "speedMps": d.get("speedMps") or 0.0,
             "powerKw": round((volts * abs(amps)) / 1000.0, 2),
             "linkOk": self.ok,
+            # лидар в реальном времени: свежий скан или None (карта пустая)
+            "lidar": self.scan if self.scan and time.time() - self.scan_at < LIDAR_MAX_AGE_S else None,
         }
 
 

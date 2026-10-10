@@ -475,7 +475,7 @@
     const has = pts.length > 0;
     const near = has ? Math.min(...pts.map((p) => p.r)) : null;
 
-    setText($('lidar-meta'), has ? '360° · ' + pts.length + ' точек' : 'нет данных');
+    setText($('lidar-meta'), has ? 'в реальном времени · ' + pts.length + ' точек' : 'нет скана');
     setText($('lidar-count'), has ? String(pts.length) : '—');
     setText($('lidar-near'), near === null ? '—' : fmt(near, 2) + ' м');
     $('lidar-empty').hidden = has;

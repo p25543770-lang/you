@@ -259,3 +259,52 @@ def test_main_screen_keeps_session_token_for_console(client, operator):
     login(client)
     js = client.get("/main.js").get_data(as_text=True)
     assert "'/console?st='" in js
+
+
+def _load_backend():
+    """slam_gui/backend.py грузится по пути, как в robot_control/slam.py."""
+    import importlib.util
+    from pathlib import Path
+
+    path = Path(__file__).resolve().parents[1] / "slam_gui" / "backend.py"
+    spec = importlib.util.spec_from_file_location("rus_slam_backend_test", str(path))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_scan_points_skips_bad_beams_and_normalizes_angles():
+    """LaserScan -> точки: битые лучи пропускаются, угол в [-pi, pi]."""
+    import math
+    from types import SimpleNamespace
+
+    backend = _load_backend()
+    msg = SimpleNamespace(
+        angle_min=0.0,
+        angle_increment=math.pi / 2,
+        range_min=0.1,
+        range_max=10.0,
+        ranges=[2.0, float("inf"), float("nan"), 0.05, 4.0, 12.0],
+    )
+    pts = backend.scan_points(msg)
+    assert [p["r"] for p in pts] == [2.0, 4.0]
+    # луч с индексом 4: 4 * pi/2 = 2pi, нормализован к 0
+    assert abs(pts[1]["a"]) < 1e-3
+    assert all(-math.pi <= p["a"] <= math.pi for p in pts)
+
+
+def test_ros_source_exposes_fresh_lidar_only():
+    """В /api/state попадает свежий скан; старый или отсутствующий даёт None."""
+    import time
+
+    backend = _load_backend()
+    src = object.__new__(backend.RosSource)
+    src.ok = True
+    src.fallback = None
+    src.data = {}
+    src.scan = [{"a": 0.0, "r": 2.5}]
+    src.scan_at = time.time()
+    assert src.read()["lidar"] == [{"a": 0.0, "r": 2.5}]
+
+    src.scan_at = time.time() - 10
+    assert src.read()["lidar"] is None
