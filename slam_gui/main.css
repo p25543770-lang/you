@@ -922,6 +922,40 @@ body.is-stale #route {
   .lidar-stats div:last-child { display: none; }
 }
 
+/* шасси мини-схемой (десктоп): 2×2 модули, карточки в три строки, высота по содержимому */
+@media (min-width: 1001px) {
+  .chassis-grid {
+    --card: clamp(200px, 19vw, 280px);
+    --axle: clamp(34px, 3.2vw, 56px);
+    --body: clamp(120px, 11vw, 200px);
+    --card-h: 0px;
+    row-gap: 8px;
+    column-gap: 10px;
+  }
+  .mod { gap: 3px; padding: 6px 10px; }
+  .mod .meter { display: none; }
+  .mod-head { flex-wrap: nowrap; }
+  .mod-id { font-size: 18px; }
+  .mod-title {
+    order: 0;
+    flex: 1 1 0;
+    font-size: 11.5px;
+  }
+  .mod-head .chip { padding: 2px 7px; font-size: 10px; }
+  .mod-metrics { grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 4px; align-content: start; }
+  .metric { flex-direction: column; align-items: flex-start; gap: 0; }
+  .metric-label { font-size: 10px; }
+  .metric-value b { font-size: 15px; }
+  .metric-value small { display: none; }
+  .body-speed b { font-size: clamp(22px, 2.4vw, 36px); }
+  .body-speed small { font-size: 10.5px; }
+  .body-end { font-size: 9.5px; }
+  .body-front { top: 10px; }
+  .body-rear  { bottom: 10px; }
+  .wheel { height: min(70%, 90px); }
+  .lidar { flex: 1 1 auto; }
+}
+
 /* планшет вертикально и телефон: меню становится строкой, страница прокручивается */
 @media (max-width: 1000px) {
   body {
