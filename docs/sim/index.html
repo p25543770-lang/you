@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="ru"><head><meta charset="utf-8">
+<title>Симуляция робота: что смотреть</title>
+<style>
+ body{font-family:system-ui,sans-serif;max-width:760px;margin:24px auto;padding:0 16px;color:#222;line-height:1.5}
+ h1{font-size:26px} h2{font-size:19px;margin-top:28px}
+ .card{border:1px solid #ddd;border-radius:8px;padding:12px 16px;margin:10px 0;background:#fafafa}
+ a.btn{display:inline-block;margin-top:6px;padding:6px 12px;background:#2e86c1;color:#fff;border-radius:5px;text-decoration:none}
+ .muted{color:#666;font-size:14px}
+ .bad{color:#c0392b}
+ code{background:#eee;padding:1px 5px;border-radius:3px}
+</style></head><body>
+<h1>Симуляция робота: что смотреть</h1>
+<p>Робот едет по складу, используя только данные лидара. Корпус показан оранжевым прямоугольником,
+красный цвет — касание стены или стеллажа. Зелёный пунктир — где робот думает, что он находится.
+Синяя линия — запланированный путь, крестики — касания.</p>
+
+<h2>1. Большая карта, корпус 0.60 × 0.75 м (актуальная версия)</h2>
+<div class="card">
+ <b>Склад 24 × 14 м, 10 точек маршрута.</b><br>
+ <span class="bad">Результат: робот не проходит маршрут</span> — 2 из 10 точек (seed 1) и 1 из 10 (seed 0),
+ касания 5 и 159, ошибка оценки позы около 0.7 м.<br>
+ <a class="btn" href="big_seed1.html">Открыть seed 1</a>
+ <a class="btn" href="big_seed0.html">Открыть seed 0</a>
+</div>
+
+<h2>2. Старая карта, корпус 0.45 × 0.80 м</h2>
+<div class="card">
+ <b>Склад 14 × 9 м, 8 точек маршрута.</b><br>
+ Робот прошёл все 8 точек, но с 13 касаниями и ошибкой позы до 0.7 м.<br>
+ <a class="btn" href="seed1.html">Открыть</a>
+</div>
+
+<h2>Файлы данных</h2>
+<p class="muted">Это данные для страниц выше (кадры, пути, раскладка). Открывать их отдельно не нужно:</p>
+<div class="card muted">
+ <code>big_seed0.json</code>, <code>big_seed1.json</code> — большая карта<br>
+ <code>seed1.json</code> — старая карта<br>
+ <code>README.md</code> — описание и команды пересборки
+</div>
+</body></html>
