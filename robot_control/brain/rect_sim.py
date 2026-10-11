@@ -184,7 +184,8 @@ def big_layout(seed: int, n_waypoints: int = 10):
     return shelves, waypoints
 
 
-def run_rect_mission(seed: int, n_waypoints: int = 10, time_factor: float = 3.0) -> RectResult:
+def run_rect_mission(seed: int, n_waypoints: int = 10, time_factor: float = 3.0,
+                     use_true_pose: bool = False) -> RectResult:
     shelves, waypoints = big_layout(seed, n_waypoints)
     segs = rect_segments(0.0, 0.0, BIG_W, BIG_H) + shelves_to_segments(shelves)
     rng = random.Random(seed * 7919 + 3)
@@ -225,6 +226,8 @@ def run_rect_mission(seed: int, n_waypoints: int = 10, time_factor: float = 3.0)
         if mp.occ:
             pf.correct(mp, ranges)
         est = list(pf.estimate())
+        if use_true_pose:                       # диагностика: идеальная локализация
+            est = [robot.x, robot.y, robot.theta]
         mp.integrate(est[0], est[1], est[2], ranges)
         return ranges
 
