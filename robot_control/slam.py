@@ -96,8 +96,9 @@ def _autodetect_ports():
 def make_source(mode: str = "auto", ports=None):
     """Источник данных робота.
 
+    ``master``: один UART мастер-Arduino (строки "@TLM", см. firmware/motor_master).
     ``auto``: ROS 2, если есть rclpy; иначе UART-модули, если есть pyserial и
-    живой порт; иначе симуляция — интерфейс работает и на пустом столе.
+    живой порт; иначе пустой источник (без выдуманных данных).
     """
     mod = load_backend()
     mode = (mode or "auto").strip().lower()
@@ -108,6 +109,9 @@ def make_source(mode: str = "auto", ports=None):
         return mod.SerialSource(list(ports or DEFAULT_PORTS))
     if mode == "ros":
         return mod.RosSource()
+    if mode == "master":
+        # мастер-Arduino на одном UART (RC_SLAM_PORT, по умолчанию /dev/ttyACM0)
+        return mod.MasterSource(os.environ.get("RC_SLAM_PORT", "/dev/ttyACM0").strip())
 
     if mode != "auto":
         log.warning("неизвестный RC_SLAM_SOURCE=%r — использую auto", mode)
@@ -121,8 +125,8 @@ def make_source(mode: str = "auto", ports=None):
         log.info("источник данных: UART-модули %s", ", ".join(live))
         return mod.SerialSource(live)
 
-    log.info("источник данных: симуляция (железо не найдено)")
-    return mod.SimSource()
+    log.info("источник данных: робот не подключён — значения пустые (симуляция только по RC_SLAM_SOURCE=sim)")
+    return mod.NoSource()
 
 
 def build_state(mode="auto", ports=None, lock_file=None, pin=None,

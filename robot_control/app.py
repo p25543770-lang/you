@@ -38,6 +38,7 @@ from .auth import (
     hash_password,
 )
 from .config import Config
+from .brain.web import create_brain_blueprint
 from .slam import build_state, create_blueprint
 
 log = logging.getLogger("robot_control")
@@ -264,6 +265,12 @@ def create_app(config: Config | None = None) -> Flask:
                 ),
                 503,
             )
+
+    # --------------- Симуляция ROS + ИИ (страница /brain) ----------------- #
+    # Симуляция поднимается лениво — при первом открытии страницы.
+    brain_holder: dict = {}
+    app.extensions["rc_brain"] = brain_holder
+    app.register_blueprint(create_brain_blueprint(brain_holder, guard=login_required))
 
     # ------------------------------ Маршруты ----------------------------- #
     @app.get("/healthz")
