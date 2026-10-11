@@ -141,9 +141,14 @@ class OccMap:
             self._near = dist
         return self._near
 
-    def to_grid(self, inflate: float, borders: bool = True) -> P.Grid:
-        """Сетка для планировщика: занятые клетки раздуты на inflate; границы склада известны."""
+    def to_grid(self, inflate: float, borders: bool = True, unknown_blocked: bool = False) -> P.Grid:
+        """Сетка для планировщика: занятые клетки раздуты на inflate; границы склада известны.
+        unknown_blocked=True — неизвестные клетки считаем занятыми (осторожный план)."""
         blocked = bytearray(self.nx * self.ny)
+        if unknown_blocked:
+            for k, v in enumerate(self.l):
+                if v == 0.0:
+                    blocked[k] = 1
         r_cells = int(math.ceil(inflate / CELL))
         disc = [(di, dj) for di in range(-r_cells, r_cells + 1) for dj in range(-r_cells, r_cells + 1)
                 if math.hypot(di, dj) * CELL <= inflate]

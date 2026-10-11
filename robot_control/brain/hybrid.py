@@ -85,7 +85,8 @@ def _arc(grid: P.Grid, x: float, y: float, theta: float, steer_deg: float, direc
 
 
 def plan_hybrid(grid: P.Grid, start: Pose, goal_xy, max_expansions: int = MAX_EXPANSIONS,
-                weight: float = HEUR_WEIGHT):
+                weight: float = HEUR_WEIGHT, extra_cost=None):
+    """extra_cost(x, y) -> штраф за дугу, которая заканчивается в (x, y). None — без штрафа."""
     """Путь из позы start к точке goal_xy: список Pose (первая — старт) или None."""
     goal_cell = P._nearest_free(grid, *grid.cell_of(*goal_xy))
     if goal_cell is None:
@@ -126,6 +127,8 @@ def plan_hybrid(grid: P.Grid, start: Pose, goal_xy, max_expansions: int = MAX_EX
                 if not math.isfinite(heur(nx_, ny_)):
                     continue
                 cost = ARC_M * (REVERSE_PENALTY if direction < 0 else 1.0)
+                if extra_cost is not None:
+                    cost += extra_cost(nx_, ny_)
                 cost += STEER_CHANGE_PENALTY * abs(steer - steer_prev)
                 if direction != dir_prev:
                     cost += SWITCH_PENALTY

@@ -31,8 +31,14 @@ HALF_W = BODY_W / 2
 HALF_L = BODY_L / 2
 CIRCUMRADIUS = math.hypot(HALF_W, HALF_L)     # радиус описанной окружности корпуса
 BIG_W, BIG_H = 24.0, 14.0                       # большая карта склада, м
-PLAN_INFLATE_M = CIRCUMRADIUS + 0.10           # центр держится дальше описанной окружности от препятствий
-PLAN_TIGHT_M = CIRCUMRADIUS - 0.05             # запас только на случай, когда робот прижат к стене
+# Безопасность: центр не ближе описанной окружности корпуса (+ допуск) к препятствию —
+# корпус тогда заведомо не касается стены. Это жёсткое ограничение планировщика.
+SAFE_INFLATE_M = CIRCUMRADIUS + 0.03
+# Зазор 30 см — мягкое требование: близость к стене штрафуется в стоимости дуги.
+CLEAR_TARGET_M = 0.30
+PROX_COST_K = 0.6                              # вес штрафа за близость
+PLAN_INFLATE_M = SAFE_INFLATE_M
+PLAN_TIGHT_M = SAFE_INFLATE_M
 V_CRUISE = 0.4                                 # м/с, аккуратная езда
 STEER_SMOOTH = 0.5                             # доля новой команды руля за шаг (мягче поворот)
 DT = 0.05
@@ -184,6 +190,44 @@ def big_layout(seed: int, n_waypoints: int = 10):
     return shelves, waypoints
 
 
+def plan_explore(mp: OccMap, pose: H.Pose, goal, robot_xy):
+    """План по известной карте: неизвестное — занято. Если пути к цели нет, идём к границе
+    известного (клетка рядом с неизвестным), ближайшей к цели. Так робот исследует склад,
+    не врезаясь в ещё не замеченные препятствия."""
+    grid = mp.to_grid(SAFE_INFLATE_M, unknown_blocked=True)
+    dist = mp.dist_field(10)
+
+    def prox(x, y):
+        # расстояние центра до препятствия; штраф растёт, когда зазор корпуса < 30 см
+        dd = dist.get(mp.cell(x, y)[1] * mp.nx + mp.cell(x, y)[0])
+        dm = (dd * 0.1) if dd is not None else 1.0
+        gap = (CIRCUMRADIUS + CLEAR_TARGET_M) - dm
+        return PROX_COST_K * max(0.0, gap) / CLEAR_TARGET_M
+
+    path = H.plan_hybrid(grid, pose, goal, extra_cost=prox)
+    if path is not None:
+        return path
+    # граница известного: свободная клетка с соседом неизвестным
+    fr = []
+    for j in range(grid.ny):
+        for i in range(grid.nx):
+            k = j * grid.nx + i
+            if grid.blocked[k] or mp.l[k] == 0.0:
+                continue
+            for di, dj in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+                ii, jj = i + di, j + dj
+                if 0 <= ii < mp.nx and 0 <= jj < mp.ny and mp.l[jj * mp.nx + ii] == 0.0:
+                    cx, cy = grid.center(i, j)
+                    fr.append((math.hypot(cx - goal[0], cy - goal[1]) + 0.3 * math.hypot(cx - robot_xy[0], cy - robot_xy[1]), cx, cy))
+                    break
+    fr.sort()
+    for _, cx, cy in fr[:6]:
+        path = H.plan_hybrid(grid, pose, (cx, cy), extra_cost=prox)
+        if path is not None:
+            return path
+    return None
+
+
 def run_rect_mission(seed: int, n_waypoints: int = 10, time_factor: float = 3.0,
                      use_true_pose: bool = False) -> RectResult:
     shelves, waypoints = big_layout(seed, n_waypoints)
@@ -252,8 +296,7 @@ def run_rect_mission(seed: int, n_waypoints: int = 10, time_factor: float = 3.0,
             path = None
         if path is None:
             pose = H.Pose(est[0], est[1], est[2], 1)
-            grid = mp.to_grid(PLAN_INFLATE_M)
-            path = H.plan_hybrid(grid, pose, (gx, gy))
+            path = plan_explore(mp, pose, (gx, gy), (robot.x, robot.y))
             if path is None:
                 res.plan_failures += 1
                 grid_t = mp.to_grid(PLAN_TIGHT_M)
