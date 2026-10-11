@@ -1,6 +1,6 @@
 """Симуляция с прямоугольным корпусом 9:16 и хитбоксом. Робот едет только по лидару.
 
-Корпус: прямоугольник 0.45 × 0.80 м (ширина × длина, соотношение 9:16), центр в точке (x, y).
+Корпус: прямоугольник 0.60 × 0.75 м (ширина × длина), центр в точке (x, y).
 Столкновение — пересечение прямоугольника корпуса со стенами и стеллажами (отрезки).
 Лидар, одометрия, карта, локализация (частичный фильтр), планирование (Hybrid A*) и трекинг —
 те же модули, что в lidar_nav.py. Ничего из этого не читает истинную позу, кроме физики
@@ -19,17 +19,22 @@ from . import hybrid as H
 from . import planner as P
 from .controller import PathTracker, PurePursuit
 from .lidar_nav import OccMap, Odometry, ParticleLocalizer, _wrap
-from .missions import BACK_STEPS, BACK_V, GOAL_RADIUS_M, REPLAN_DEV_M, STUCK_S, STUCK_V, hard_layout
-from .world import (ARENA_H, ARENA_W, LIDAR_BEAMS, LIDAR_RANGE_M, START_POSE, STEER_LIMIT_DEG,
-                    STEER_RATE_DEG_S, V_MAX, WHEELBASE_M, Robot, arena_segments, shelves_to_segments)
+from .missions import BACK_STEPS, BACK_V, GOAL_RADIUS_M, REPLAN_DEV_M, STUCK_S, STUCK_V
+import random as _random
 
-BODY_W = 0.45             # м, ширина корпуса
-BODY_L = 0.80             # м, длина корпуса (9:16 = 0.45 : 0.80)
+from .world import (LIDAR_BEAMS, LIDAR_RANGE_M, START_POSE, STEER_LIMIT_DEG, STEER_RATE_DEG_S,
+                    V_MAX, WHEELBASE_M, Robot, rect_segments, shelves_to_segments)
+
+BODY_W = 0.60             # м, ширина корпуса
+BODY_L = 0.75             # м, длина корпуса
 HALF_W = BODY_W / 2
 HALF_L = BODY_L / 2
 CIRCUMRADIUS = math.hypot(HALF_W, HALF_L)     # радиус описанной окружности корпуса
-PLAN_INFLATE_M = CIRCUMRADIUS                  # планировщик держит описанную окружность от препятствий
-PLAN_TIGHT_M = 0.36                            # запас только на случай, когда робот прижат к стене
+BIG_W, BIG_H = 24.0, 14.0                       # большая карта склада, м
+PLAN_INFLATE_M = CIRCUMRADIUS + 0.10           # центр держится дальше описанной окружности от препятствий
+PLAN_TIGHT_M = CIRCUMRADIUS - 0.05             # запас только на случай, когда робот прижат к стене
+V_CRUISE = 0.4                                 # м/с, аккуратная езда
+STEER_SMOOTH = 0.5                             # доля новой команды руля за шаг (мягче поворот)
 DT = 0.05
 SCAN_EVERY = 2
 LIDAR_NOISE = 0.02
@@ -138,21 +143,61 @@ class RectResult:
     shelves: list = field(default_factory=list)
     map_occ: list = field(default_factory=list)
     collision_events: list = field(default_factory=list)
+    arena: list = field(default_factory=list)
 
 
-def run_rect_mission(seed: int, n_waypoints: int = 8, time_factor: float = 3.0) -> RectResult:
-    shelves, waypoints = hard_layout(seed, n_waypoints)
-    segs = arena_segments() + shelves_to_segments(shelves)
+def big_layout(seed: int, n_waypoints: int = 10):
+    """Большой склад 24×14 м: колонны стеллажей с проходами и поперечные стеллажи-перегородки.
+    Точки маршрута достижимы из предыдущей по сетке с запасом планировщика."""
+    rng = _random.Random(seed)
+    shelves = []
+    for k in range(6):
+        x0 = 2.5 + k * 3.6
+        y = 1.2 + rng.uniform(0.0, 0.6)
+        while y < BIG_H - 2.2:
+            if rng.random() < 0.8:                       # 20% проходов поперёк
+                h = rng.uniform(1.8, 2.8)
+                w = rng.uniform(0.9, 1.3)
+                xx = x0 + rng.uniform(-0.25, 0.25)
+                shelves.append((xx, y, xx + w, min(BIG_H - 1.0, y + h)))
+            y += rng.uniform(3.2, 3.8) if rng.random() < 0.5 else rng.uniform(2.0, 2.6)
+    for _ in range(4):                                   # поперечные перегородки
+        x0 = rng.uniform(4.0, BIG_W - 6.0)
+        y0 = rng.uniform(1.5, BIG_H - 3.0)
+        shelves.append((x0, y0, x0 + rng.uniform(1.5, 2.5), y0 + 0.9))
+    shelves = [(max(1.0, a), max(1.0, b), min(BIG_W - 1.0, c), min(BIG_H - 1.0, d))
+               for a, b, c, d in shelves if c - a > 0.5 and d - b > 0.5]
+    grid = P.build_grid(BIG_W, BIG_H, shelves, inflate=PLAN_INFLATE_M)
+    waypoints = []
+    prev = START_POSE[:2]
+    tries = 0
+    while len(waypoints) < n_waypoints and tries < 20000:
+        tries += 1
+        cand = (rng.uniform(1.0, BIG_W - 1.0), rng.uniform(1.0, BIG_H - 1.0))
+        gi, gj = grid.cell_of(*cand)
+        if not grid.free(gi, gj) or math.hypot(cand[0] - prev[0], cand[1] - prev[1]) < 4.0:
+            continue
+        if P.plan(grid, prev, cand) is None:
+            continue
+        waypoints.append(cand)
+        prev = cand
+    return shelves, waypoints
+
+
+def run_rect_mission(seed: int, n_waypoints: int = 10, time_factor: float = 3.0) -> RectResult:
+    shelves, waypoints = big_layout(seed, n_waypoints)
+    segs = rect_segments(0.0, 0.0, BIG_W, BIG_H) + shelves_to_segments(shelves)
     rng = random.Random(seed * 7919 + 3)
     robot = RectRobot(*START_POSE)
-    mp = OccMap()
+    mp = OccMap(BIG_W, BIG_H)
     odo = Odometry(rng)
     pf = ParticleLocalizer(START_POSE, rng)
     ctrl = PurePursuit()
-    res = RectResult(seed=seed, waypoints=[list(w) for w in waypoints], shelves=[list(s) for s in shelves])
+    res = RectResult(seed=seed, waypoints=[list(w) for w in waypoints], shelves=[list(s) for s in shelves],
+                     arena=[BIG_W, BIG_H])
 
     planned = 0.0
-    true_grid = P.build_grid(ARENA_W, ARENA_H, shelves, inflate=PLAN_INFLATE_M)
+    true_grid = P.build_grid(BIG_W, BIG_H, shelves, inflate=PLAN_INFLATE_M)
     pos = START_POSE[:2]
     for wp in waypoints:
         cp = P.plan(true_grid, pos, wp)
@@ -170,7 +215,7 @@ def run_rect_mission(seed: int, n_waypoints: int = 8, time_factor: float = 3.0) 
     back = 0
     low_since = None
     errs = []
-    collide_now = False
+    prev_steer = 0.0
 
     def sense():
         nonlocal est
@@ -231,7 +276,9 @@ def run_rect_mission(seed: int, n_waypoints: int = 8, time_factor: float = 3.0) 
                 continue
         else:
             low_since = None
-        ok_move = not robot.step(out.v, out.steer_deg, DT, segs)
+        steer_cmd = prev_steer + STEER_SMOOTH * (out.steer_deg - prev_steer)
+        prev_steer = steer_cmd
+        ok_move = not robot.step(min(out.v, V_CRUISE), steer_cmd, DT, segs)
         if not ok_move:
             back = BACK_STEPS
             path = None

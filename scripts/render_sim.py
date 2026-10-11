@@ -21,10 +21,10 @@ TEMPLATE = r"""<!doctype html>
  table td{padding:2px 8px 2px 0}
  .legend span{display:inline-block;width:12px;height:12px;margin-right:4px;vertical-align:middle}
 </style></head><body>
-<h2>Симуляция: робот 9:16 (0.45 × 0.80 м), движется только по лидару</h2>
+<h2>Симуляция: робот 0.60 × 0.75 м с хитбоксом, движется только по лидару</h2>
 <div id="wrap">
  <div>
-  <canvas id="c" width="1000" height="643"></canvas>
+  <canvas id="c"></canvas>
   <div class="row">
    <button id="play">Пауза</button>
    <button id="restart">В начало</button>
@@ -61,8 +61,9 @@ TEMPLATE = r"""<!doctype html>
 </div>
 <script>
 const DATA = __DATA__;
-const W = 14.0, H = 9.0;
+const W = DATA.arena[0], H = DATA.arena[1];
 const cv = document.getElementById('c'), ctx = cv.getContext('2d');
+cv.width = 1000; cv.height = Math.round(1000 * H / W);
 const S = cv.width / W;
 const BODY_W = DATA.body.w, BODY_L = DATA.body.l;
 const frames = DATA.frames.filter(f => f.t !== undefined);
