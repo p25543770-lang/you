@@ -36,6 +36,7 @@ BIG_W, BIG_H = 24.0, 14.0                       # большая карта ск
 SAFE_INFLATE_M = CIRCUMRADIUS + 0.03
 # Зазор 30 см — мягкое требование: близость к стене штрафуется в стоимости дуги.
 CLEAR_TARGET_M = 0.30
+ESCAPE_RADIUS_M = 0.6                         # зона вокруг робота, где запрет неизвестного снимается
 PROX_COST_K = 0.6                              # вес штрафа за близость
 PLAN_INFLATE_M = SAFE_INFLATE_M
 PLAN_TIGHT_M = SAFE_INFLATE_M
@@ -190,11 +191,33 @@ def big_layout(seed: int, n_waypoints: int = 10):
     return shelves, waypoints
 
 
+# Запасы, которые пробуем по очереди: полный, затем ослабленный (проход в узком месте, где
+# робот уже стоит). 0.33 м — почти физический предел: половина ширины корпуса 0.30 м + 3 см.
+PLAN_TIERS_M = (SAFE_INFLATE_M, CIRCUMRADIUS - 0.05, 0.33)
+
+
 def plan_explore(mp: OccMap, pose: H.Pose, goal, robot_xy):
+    """Перебирает запасы PLAN_TIERS_M по очереди, пока не найдётся путь."""
+    for infl in PLAN_TIERS_M:
+        path = _plan_explore_at(mp, pose, goal, robot_xy, infl)
+        if path is not None:
+            return path
+    return None
+
+
+def _plan_explore_at(mp: OccMap, pose: H.Pose, goal, robot_xy, infl: float):
     """План по известной карте: неизвестное — занято. Если пути к цели нет, идём к границе
     известного (клетка рядом с неизвестным), ближайшей к цели. Так робот исследует склад,
     не врезаясь в ещё не замеченные препятствия."""
-    grid = mp.to_grid(SAFE_INFLATE_M, unknown_blocked=True)
+    grid = mp.to_grid(infl, unknown_blocked=True)
+    # Робот стоит здесь, значит клетки рядом свободны: лидар их не отмечает (он их не «видит»),
+    # а запрет неизвестного и границы склада иначе заперли бы старт. Снимаем запрет, кроме занятых.
+    rx, ry = robot_xy
+    for k in range(grid.nx * grid.ny):
+        i, j = k % grid.nx, k // grid.nx
+        cx, cy = grid.center(i, j)
+        if math.hypot(cx - rx, cy - ry) <= ESCAPE_RADIUS_M and k not in mp.occ:
+            grid.blocked[k] = 0
     dist = mp.dist_field(10)
 
     def prox(x, y):
@@ -208,18 +231,30 @@ def plan_explore(mp: OccMap, pose: H.Pose, goal, robot_xy):
     if path is not None:
         return path
     # граница известного: свободная клетка с соседом неизвестным
+    # достижимые от робота клетки (BFS по свободным клеткам 8-связности)
+    ci, cj = grid.cell_of(rx, ry)
+    reach = set()
+    if grid.free(ci, cj):
+        reach.add((ci, cj))
+        q = [(ci, cj)]
+        while q:
+            i, j = q.pop()
+            for di in (-1, 0, 1):
+                for dj in (-1, 0, 1):
+                    n = (i + di, j + dj)
+                    if n not in reach and grid.free(*n):
+                        reach.add(n)
+                        q.append(n)
     fr = []
-    for j in range(grid.ny):
-        for i in range(grid.nx):
-            k = j * grid.nx + i
-            if grid.blocked[k] or mp.l[k] == 0.0:
-                continue
-            for di, dj in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-                ii, jj = i + di, j + dj
-                if 0 <= ii < mp.nx and 0 <= jj < mp.ny and mp.l[jj * mp.nx + ii] == 0.0:
-                    cx, cy = grid.center(i, j)
-                    fr.append((math.hypot(cx - goal[0], cy - goal[1]) + 0.3 * math.hypot(cx - robot_xy[0], cy - robot_xy[1]), cx, cy))
-                    break
+    for (i, j) in reach:
+        if mp.l[j * grid.nx + i] == 0.0:
+            continue
+        for di, dj in ((1, 0), (-1, 0), (0, 1), (0, -1)):
+            ii, jj = i + di, j + dj
+            if 0 <= ii < mp.nx and 0 <= jj < mp.ny and mp.l[jj * mp.nx + ii] == 0.0:
+                cx, cy = grid.center(i, j)
+                fr.append((math.hypot(cx - goal[0], cy - goal[1]) + 0.3 * math.hypot(cx - rx, cy - ry), cx, cy))
+                break
     fr.sort()
     for _, cx, cy in fr[:6]:
         path = H.plan_hybrid(grid, pose, (cx, cy), extra_cost=prox)
