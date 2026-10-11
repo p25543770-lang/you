@@ -192,6 +192,86 @@ class ScanMatcher:
         return best
 
 
+class ParticleLocalizer:
+    """Локализация частичным фильтром: частицы двигаются по одометрии с шумом,
+    вес — правдоподобие попаданий лучей по полю расстояний до препятствий карты."""
+
+    N = 60
+    SIGMA_HIT_M = 0.15
+    P_FLOOR = 0.05
+    MAX_D_CELLS = 8
+    PF_SIGMA_XY = 0.01        # м на метр пути
+    PF_SIGMA_TH = 0.004       # рад на шаг
+
+    def __init__(self, pose, rng: random.Random):
+        self.rng = rng
+        self.parts = [[pose[0], pose[1], pose[2]] for _ in range(self.N)]
+        self.w = [1.0 / self.N] * self.N
+
+    def motion(self, ds: float, dth: float):
+        r = self.rng
+        sxy = self.PF_SIGMA_XY * abs(ds) + 0.002
+        for p in self.parts:
+            d = ds + r.gauss(0.0, sxy)
+            p[0] += d * math.cos(p[2])
+            p[1] += d * math.sin(p[2])
+            p[2] = _wrap(p[2] + dth + r.gauss(0.0, self.PF_SIGMA_TH))
+
+    def correct(self, mp: OccMap, ranges):
+        dist = mp.dist_field(self.MAX_D_CELLS)
+        if not dist:
+            return
+        hits = [(b, r) for b, r in enumerate(ranges) if r < LIDAR_RANGE_M - 1e-6]
+        if not hits:
+            return
+        inv2s2 = 1.0 / (2.0 * self.SIGMA_HIT_M ** 2)
+        logw = []
+        for p in self.parts:
+            ll = 0.0
+            for b, r in hits:
+                a = p[2] + 2.0 * math.pi * b / LIDAR_BEAMS
+                i, j = mp.cell(p[0] + r * math.cos(a), p[1] + r * math.sin(a))
+                d = dist.get(j * mp.nx + i)
+                dm = (d * CELL) if d is not None else 0.5
+                ll += math.log(math.exp(-dm * dm * inv2s2) + self.P_FLOOR)
+            logw.append(ll)
+        m = max(logw)
+        w = [math.exp(l - m) for l in logw]
+        tot = sum(w)
+        self.w = [x / tot for x in w]
+        neff = 1.0 / sum(x * x for x in self.w)
+        if neff < self.N / 2:
+            self._resample()
+
+    def _resample(self):
+        n = self.N
+        step = 1.0 / n
+        u = self.rng.random() * step
+        new, c, i = [], self.w[0], 0
+        for k in range(n):
+            target = u + k * step
+            while target > c and i < n - 1:
+                i += 1
+                c += self.w[i]
+            p = self.parts[i]
+            new.append([p[0], p[1], p[2]])
+        self.parts = new
+        self.w = [step] * n
+
+    def estimate(self):
+        best = max(range(self.N), key=lambda k: self.w[k])
+        px, py = self.parts[best][0], self.parts[best][1]
+        sx = sy = sc = ss = sw = 0.0
+        for p, w in zip(self.parts, self.w):
+            if math.hypot(p[0] - px, p[1] - py) < 0.3:
+                sx += w * p[0]
+                sy += w * p[1]
+                sc += w * math.cos(p[2])
+                ss += w * math.sin(p[2])
+                sw += w
+        return (sx / sw, sy / sw, math.atan2(ss, sc))
+
+
 class Odometry:
     """Шумная одометрия: приращение в собственной системе координат робота."""
 
@@ -232,7 +312,8 @@ class NavResult:
 
 
 def run_lidar_mission(seed: int, n_waypoints: int = 8, lidar_noise: float = 0.02,
-                      time_factor: float = 3.0, use_true_pose: bool = False) -> NavResult:
+                      time_factor: float = 3.0, use_true_pose: bool = False,
+                      localizer: str = "pf") -> NavResult:
     """Миссия по неизвестной карте: мапим на ходу, едем по точкам из hard_layout(seed)."""
     shelves, waypoints = hard_layout(seed, n_waypoints)
     segs = arena_segments() + shelves_to_segments(shelves)
@@ -245,6 +326,7 @@ def run_lidar_mission(seed: int, n_waypoints: int = 8, lidar_noise: float = 0.02
     res = NavResult()
 
     est = [START_POSE[0], START_POSE[1], START_POSE[2]]     # оценённая поза
+    pf = ParticleLocalizer(START_POSE, rng) if localizer == "pf" else None
     # оценка длины — по истинной карте (только для лимита времени)
     true_grid = P.build_grid(ARENA_W, ARENA_H, shelves, inflate=H.COLLISION_INFLATE_M)
     pos = START_POSE[:2]
@@ -273,12 +355,18 @@ def run_lidar_mission(seed: int, n_waypoints: int = 8, lidar_noise: float = 0.02
             est = [robot.x, robot.y, robot.theta]
         else:
             ds, dth = odo.delta(robot.x, robot.y, robot.theta)
-            prior = (est[0] + ds * math.cos(est[2]), est[1] + ds * math.sin(est[2]), _wrap(est[2] + dth))
-            if mp.occ:
-                mx, my, mth = matcher.match(mp, prior, ranges)
-                est = [mx, my, _wrap(mth)]
+            if pf is not None:
+                pf.motion(ds, dth)
+                if mp.occ:
+                    pf.correct(mp, ranges)
+                est = list(pf.estimate())
             else:
-                est = [prior[0], prior[1], prior[2]]
+                prior = (est[0] + ds * math.cos(est[2]), est[1] + ds * math.sin(est[2]), _wrap(est[2] + dth))
+                if mp.occ:
+                    mx, my, mth = matcher.match(mp, prior, ranges)
+                    est = [mx, my, _wrap(mth)]
+                else:
+                    est = [prior[0], prior[1], prior[2]]
         mp.integrate(est[0], est[1], est[2], ranges)
 
     sense_and_update()
