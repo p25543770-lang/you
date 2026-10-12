@@ -58,7 +58,7 @@
     key: 'rus_slam_lock_v1',
     maxAttempts: 5,
     lockMs: 30000,
-    defaultPin: '2580',
+    defaultPin: '7232',
     onEvent: (action, ok) => {
       try {
         if (action === 'unlock') stats.noteLock(ok ? 'open' : 'denied');
@@ -94,7 +94,7 @@
       await this.refresh();
       this.refreshAudit();
       this.timer = setInterval(() => this.refresh(), 1000);
-      say('ok', 'замок ячейки: PIN и журнал на борту (сервер), PIN по умолчанию ' + (j.pinDefault || '2580'));
+      say('ok', 'замок ячейки: PIN и журнал на борту (сервер), PIN по умолчанию ' + (j.pinDefault || '7232'));
     },
 
     async refresh() {
@@ -191,8 +191,8 @@
     },
     async resetToDefault(cur) {
       if (lockSource.mode !== 'api') return localVault.resetToDefault(cur);
-      const res = await lockSource.setPin(cur, '2580');
-      if (res && res.ok) say('warn', 'замок борта: PIN сброшен к заводскому 2580');
+      const res = await lockSource.setPin(cur, '7232');
+      if (res && res.ok) say('warn', 'замок борта: PIN сброшен к заводскому 7232');
       return res;
     },
   };
@@ -1433,7 +1433,7 @@
     if ($('csl-pin-reset')) $('csl-pin-reset').addEventListener('click', async () => {
       const cur = $('csl-pin-cur') ? $('csl-pin-cur').value.trim() : '';
       const res = await vault.resetToDefault(cur);
-      setMsg(res.ok ? 'PIN сброшен к заводскому 2580' : (res.detail || 'Сброс не выполнен'), res.ok ? 'ok' : 'err');
+      setMsg(res.ok ? 'PIN сброшен к заводскому 7232' : (res.detail || 'Сброс не выполнен'), res.ok ? 'ok' : 'err');
       beep(res.ok ? 'lock' : 'err');
       renderLock();
     });
@@ -1562,7 +1562,7 @@
 
     Promise.resolve(vault.init()).then(() => {
       renderLock();
-      say('ok', 'сервисный пульт: замок ячейки готов (заводской PIN 2580)');
+      say('ok', 'сервисный пульт: замок ячейки готов (заводской PIN 7232)');
     }).catch((e) => console.error('console.js vault.init', e));
 
     ready = true;

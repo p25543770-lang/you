@@ -31,7 +31,7 @@ backend.py — сервер борта RUS SLAM: отдаёт экраны и д
 Примеры запуска:
     python3 gui/backend.py                          # только сервер (штатный режим)
     python3 gui/backend.py --source serial --ports /dev/ttyUSB0,/dev/ttyUSB1,/dev/ttyUSB2,/dev/ttyUSB3
-    python3 gui/backend.py --source ros --pin 2580
+    python3 gui/backend.py --source ros --pin 7232
     python3 gui/backend.py --kiosk                   # опция: дисплей на борту, браузер без рамок
     python3 gui/backend.py --open                    # опция: открыть страницу в браузере робота
 
@@ -65,7 +65,7 @@ LOCK_FILE = os.path.join(STATE_DIR, "lock.json")
 MAIN_PAGE = "/main.html"
 CONSOLE_PAGE = "/index.html"
 
-DEFAULT_PIN = "2580"
+DEFAULT_PIN = "7232"
 MAX_ATTEMPTS = 5
 LOCK_MS = 30_000
 
@@ -951,7 +951,7 @@ def main(argv=None):
     ap.add_argument("--source", choices=["sim", "serial", "ros", "auto"], default="auto",
                     help="источник данных (по умолчанию sim — стенд)")
     ap.add_argument("--ports", default="", help="UART-порты для --source serial, через запятую")
-    ap.add_argument("--pin", default=DEFAULT_PIN, help="заводской PIN отсека (по умолчанию 2580)")
+    ap.add_argument("--pin", default=DEFAULT_PIN, help="заводской PIN отсека (по умолчанию 7232)")
     ap.add_argument("--lock-file", default="", help="файл состояния замка (по умолчанию gui/state/lock.json)")
     ap.add_argument("--max-attempts", type=int, default=MAX_ATTEMPTS)
     ap.add_argument("--lock-sec", type=float, default=LOCK_MS / 1000.0)
