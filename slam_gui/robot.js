@@ -332,6 +332,13 @@
     const themesGrid = $('themes-grid');
     const themesBack = $('themes-back');
     const themesToStats = $('themes-to-stats');
+    const btnResetMap = $('btn-reset-map');
+    const resetView = $('reset-view');
+    const resetBack = $('reset-back');
+    const resetCancel = $('reset-cancel');
+    const resetConfirm = $('reset-confirm');
+    const resetConfirmCheck = $('reset-confirm-check');
+    const resetMsg = $('reset-msg');
 
     if (!overlay || !openBtn || !pinDots) return;
 
@@ -392,6 +399,7 @@
       setHidden(pinView, false);
       setHidden(ctrlView, true);
       setHidden(themesView, true);
+      setHidden(resetView, true);
       if (subtitle) subtitle.textContent = 'введи PIN-код — откроются функции';
       if (titleEl) titleEl.textContent = 'Управление роботом';
       setMsg('', '');
@@ -401,6 +409,7 @@
       setHidden(pinView, true);
       setHidden(ctrlView, false);
       setHidden(themesView, true);
+      setHidden(resetView, true);
       if (subtitle) subtitle.textContent = 'доступ открыт · выбери действие';
       if (titleEl) titleEl.textContent = 'Функции';
       refreshLockStatus();
@@ -429,6 +438,8 @@
       // сбрасываем авторизацию при возврате к статистике (и так по новой)
       pinVerified = null;
       if (lockTimer) { clearInterval(lockTimer); lockTimer = null; }
+      setHidden(resetView, true);
+      setHidden(themesView, true);
       // халтура: если отсек открыт — он остаётся открыт, просто прячем панель
       setMsg('', '');
       if (openBtn) openBtn.focus();
@@ -615,6 +626,86 @@
       setHidden(pinView, true);
       if (subtitle) subtitle.textContent = 'доступ открыт · выбери действие';
       if (titleEl) titleEl.textContent = 'Функции';
+    }
+    function showReset() {
+      setHidden(pinView, true);
+      setHidden(ctrlView, true);
+      setHidden(themesView, true);
+      setHidden(resetView, false);
+      if (subtitle) subtitle.textContent = 'сброс карты — подтверждение';
+      if (titleEl) titleEl.textContent = 'Сброс карты';
+      if (resetConfirmCheck) resetConfirmCheck.checked = false;
+      if (resetConfirm) resetConfirm.disabled = true;
+      if (resetMsg) { resetMsg.textContent = ''; resetMsg.className = 'reset-msg'; }
+      if (resetView) resetView.scrollTop = 0;
+      vibrate(10);
+    }
+    function hideResetToCtrl() {
+      setHidden(resetView, true);
+      setHidden(ctrlView, false);
+      setHidden(pinView, true);
+      setHidden(themesView, true);
+      if (subtitle) subtitle.textContent = 'доступ открыт · выбери действие';
+      if (titleEl) titleEl.textContent = 'Функции';
+    }
+    async function doResetMap() {
+      if (!resetConfirmCheck || !resetConfirmCheck.checked) {
+        if (resetMsg) { resetMsg.textContent = 'Поставь галочку подтверждения'; resetMsg.className = 'reset-msg err'; }
+        vibrate([30,30,30]);
+        return;
+      }
+      if (resetConfirm) { resetConfirm.disabled = true; resetConfirm.textContent = 'Сбрасываю…'; }
+      try {
+        try { await fetch('api/map/reset', { method: 'POST' }); } catch(e) {}
+        try { await fetch('api/kiosk_state', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'reset_map' }) }); } catch(e) {}
+        try { localStorage.removeItem('lidar_map'); localStorage.removeItem('slam_grid'); localStorage.removeItem('kiosk_lidar'); } catch(e) {}
+        try {
+          if (window.grid && window.grid.fill) { window.grid.fill(0); if (window.explored !== undefined) window.explored = 0; if (window.distDirty !== undefined) window.distDirty = true; }
+          if (window._lidarGrid && window._lidarGrid.fill) window._lidarGrid.fill(0);
+        } catch(e) {}
+        const lidarCanvas = document.getElementById('lidar-canvas');
+        if (lidarCanvas) {
+          const ctx = lidarCanvas.getContext('2d');
+          if (ctx) {
+            const dpr = window.devicePixelRatio || 1;
+            const w = lidarCanvas.clientWidth || 300, h = lidarCanvas.clientHeight || 300;
+            if (lidarCanvas.width !== Math.round(w*dpr) || lidarCanvas.height !== Math.round(h*dpr)) {
+              lidarCanvas.width = Math.round(w*dpr); lidarCanvas.height = Math.round(h*dpr);
+            }
+            ctx.setTransform(dpr,0,0,dpr,0,0);
+            ctx.clearRect(0,0,w,h);
+            ctx.fillStyle = '#101a16';
+            ctx.fillRect(0,0,w,h);
+            ctx.fillStyle = '#6f877d';
+            ctx.font = '12px Inter, sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('карта сброшена', w/2, h/2);
+            ctx.strokeStyle = '#2b4037';
+            ctx.lineWidth = 1;
+            ctx.beginPath(); ctx.arc(w/2, h/2, Math.min(w,h)/2 - 10, 0, Math.PI*2); ctx.stroke();
+          }
+        }
+        const countEl = document.getElementById('lidar-count');
+        const nearEl = document.getElementById('lidar-near');
+        const metaEl = document.getElementById('lidar-meta');
+        if (countEl) countEl.textContent = '—';
+        if (nearEl) nearEl.textContent = '—';
+        if (metaEl) metaEl.textContent = 'карта сброшена';
+        const emptyEl = document.getElementById('lidar-empty');
+        if (emptyEl) { emptyEl.textContent = 'карта сброшена — ждём новый скан'; emptyEl.hidden = false; }
+        if (resetMsg) { resetMsg.textContent = 'Карта лидара сброшена'; resetMsg.className = 'reset-msg ok'; }
+        vibrate([20,40,20]);
+        setTimeout(() => {
+          hideResetToCtrl();
+          setMsg('Карта лидара сброшена', 'ok');
+          setTimeout(() => { if (pinMsg && pinMsg.textContent.includes('Карта')) setMsg('', ''); }, 1800);
+        }, 900);
+      } catch (e) {
+        if (resetMsg) { resetMsg.textContent = 'Ошибка сброса'; resetMsg.className = 'reset-msg err'; }
+        vibrate([40,80,40]);
+      } finally {
+        if (resetConfirm) { resetConfirm.disabled = false; resetConfirm.textContent = 'Да, сбросить'; }
+      }
     }
     // применить сохранённую тему сразу (и на статистике без PIN)
     applyTheme(currentTheme);
@@ -837,6 +928,13 @@
     if (btnThemes) btnThemes.addEventListener('click', showThemes);
     if (themesBack) themesBack.addEventListener('click', hideThemesToCtrl);
     if (themesToStats) themesToStats.addEventListener('click', closeOverlay);
+    if (btnResetMap) btnResetMap.addEventListener('click', showReset);
+    if (resetBack) resetBack.addEventListener('click', hideResetToCtrl);
+    if (resetCancel) resetCancel.addEventListener('click', hideResetToCtrl);
+    if (resetConfirmCheck) resetConfirmCheck.addEventListener('change', () => {
+      if (resetConfirm) resetConfirm.disabled = !resetConfirmCheck.checked;
+    });
+    if (resetConfirm) resetConfirm.addEventListener('click', doResetMap);
     // mock cards (остальные — демо)
     overlay.querySelectorAll('.ctrl-card[data-mock]').forEach(card => {
       card.addEventListener('click', () => mockToast(card.getAttribute('data-mock')));
@@ -852,8 +950,13 @@
       // когда оверлей открыт
       if (e.key === 'Escape') {
         e.preventDefault();
+        if (resetView && !resetView.hidden) { hideResetToCtrl(); return; }
         if (themesView && !themesView.hidden) { hideThemesToCtrl(); return; }
         closeOverlay(); return;
+      }
+      if (resetView && !resetView.hidden) {
+        if (e.key === 'Enter' && resetConfirm && !resetConfirm.disabled) { e.preventDefault(); doResetMap(); }
+        return;
       }
       if (themesView && !themesView.hidden) {
         // в выборе темы — Esc уже обработан, остальные клавиши не трогаем

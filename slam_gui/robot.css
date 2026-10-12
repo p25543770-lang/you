@@ -972,6 +972,26 @@ body.is-stale #data-chip { color: var(--warn); border-color: #3a3a3e; }
 @media (max-width: 900px) { .themes-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
 @media (max-width: 640px) { .themes-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); max-height: 52vh; } }
 
+.ctrl-card--danger { border-color: #4a2a2c; background: linear-gradient(135deg, #241214 0%, #1c0a0c 100%); }
+.ctrl-card--danger .ctrl-card-icon { background: rgba(255,77,109,.12); border-color: rgba(255,77,109,.22); color: #ff4d6d; }
+.ctrl-card--danger:hover { border-color: #6a2a30; box-shadow: 0 8px 20px rgba(80,20,28,.22); }
+
+/* ========================= СБРОС КАРТЫ (с подтверждением) ========================= */
+.reset-view { padding: 16px 18px 18px; display: flex; flex-direction: column; gap: 16px; }
+.reset-view[hidden] { display: none !important; }
+.reset-head { display: flex; align-items: center; gap: 12px; }
+.reset-head h3 { margin: 0; font-size: 18px; font-weight: 900; }
+.reset-body { display: flex; flex-direction: column; align-items: center; gap: 14px; padding: 18px 16px; border: 1px solid var(--line); border-radius: 16px; background: var(--panel-2); text-align: center; }
+.reset-icon { width: 64px; height: 64px; display: grid; place-items: center; border-radius: 16px; background: rgba(255,77,109,.12); border: 1px solid rgba(255,77,109,.22); color: #ff4d6d; }
+.reset-body h4 { margin: 0; font-size: 16px; font-weight: 900; }
+.reset-body p { margin: 0; color: var(--muted); font-size: 13px; line-height: 1.5; max-width: 32em; }
+.reset-confirm { display: flex; align-items: center; gap: 10px; padding: 10px 14px; border: 1px solid var(--line); border-radius: 12px; background: var(--panel); cursor: pointer; font-size: 13px; font-weight: 700; user-select: none; }
+.reset-confirm input { width: 18px; height: 18px; accent-color: #ff4d6d; }
+.reset-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; width: 100%; }
+.reset-msg { min-height: 18px; margin: 0; font-size: 13px; font-weight: 700; }
+.reset-msg.ok { color: #7ddc52; }
+.reset-msg.err { color: #ff5a5a; }
+
 /* --- 20 тем: переопределяем переменные через body[data-theme="..."] --- */
 /* 1 bw — чёрно-белый (базовый, как на скрине WEB TACTICS) */
 body[data-theme="bw"] { --bg:#070709; --bg-2:#0f0f0f; --panel:#141416; --panel-2:#1a1a1c; --line:#242426; --line-2:#2d2d2f; --text:#f3f3f5; --muted:#9a9aa0; --accent:#ffffff; --ok:#ffffff; --idle:#6f6f74; }

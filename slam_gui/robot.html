@@ -310,6 +310,12 @@
             <span class="ctrl-card-arrow" aria-hidden="true">→</span>
           </button>
 
+          <button id="btn-reset-map" class="ctrl-card ctrl-card--danger" type="button" role="listitem" title="Сбросить накопленную карту лидара">
+            <span class="ctrl-card-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></svg></span>
+            <span class="ctrl-card-text"><b>Сброс карты</b><small>очистить карту лидара</small></span>
+            <span class="ctrl-card-arrow" aria-hidden="true">↻</span>
+          </button>
+
         </div>
 
         <div class="ctrl-actions">
@@ -330,6 +336,30 @@
         <div id="themes-grid" class="themes-grid" role="list"></div>
         <div class="themes-foot">
           <button id="themes-to-stats" class="btn btn-ghost btn-large" type="button">← Вернуться к статистике</button>
+        </div>
+      </section>
+
+      <!-- === ЭКРАН 4: СБРОС КАРТЫ (с подтверждением) === -->
+      <section id="reset-view" class="reset-view" hidden aria-label="Сброс карты лидара">
+        <div class="reset-head">
+          <button id="reset-back" class="btn btn-ghost" type="button">← Назад</button>
+          <h3>Сброс карты</h3>
+        </div>
+        <div class="reset-body">
+          <div class="reset-icon" aria-hidden="true">
+            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
+          </div>
+          <h4>Очистить карту лидара?</h4>
+          <p>Будет удалена накопленная карта препятствий и проезды. Лидар начнёт строить карту заново. Действие нельзя отменить.</p>
+          <label class="reset-confirm">
+            <input type="checkbox" id="reset-confirm-check" />
+            <span>Подтверждаю сброс</span>
+          </label>
+          <div class="reset-actions">
+            <button id="reset-confirm" class="btn btn-primary btn-large" type="button" disabled>Да, сбросить</button>
+            <button id="reset-cancel" class="btn btn-ghost btn-large" type="button">Отмена</button>
+          </div>
+          <p id="reset-msg" class="reset-msg" role="status" aria-live="polite"></p>
         </div>
       </section>
     </div>
