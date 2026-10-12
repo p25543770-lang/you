@@ -51,6 +51,8 @@
           <span class="nav-text">Сервис</span>
         </a>
       </nav>
+      <button id="side-themes-toggle" class="side-themes-toggle" type="button" aria-expanded="false" aria-controls="side-themes">Темы</button>
+      <div id="side-themes" class="side-themes" role="list" aria-label="Темы" hidden></div>
 
       <section class="panel events" id="events" aria-labelledby="ev-title">
         <header class="panel-head">
@@ -229,5 +231,67 @@
 
   <script src="/slam_auth.js"></script>
   <script src="main.js"></script>
+  <script>
+  // темы как на киоске 8090 — чёрно-белый дизайн по умолчанию
+  (function(){
+    const THEMES = [
+      {id:'bw', accent:'#ffffff', bg:'#070709', panel:'#141416'},
+      {id:'rus', accent:'#9fe36b', bg:'#070d0a', panel:'#12201a'},
+      {id:'lavender', accent:'#c9b3ff', bg:'#0a0a14', panel:'#181826'},
+      {id:'ocean', accent:'#4fc3f7', bg:'#061018', panel:'#122636'},
+      {id:'sunset', accent:'#ff8c42', bg:'#120a06', panel:'#241a0f'},
+      {id:'crimson', accent:'#ff4d6d', bg:'#120607', panel:'#241214'},
+      {id:'nord', accent:'#88c0d0', bg:'#0b0f14', panel:'#15202e'},
+      {id:'dracula', accent:'#bd93f9', bg:'#0e0e14', panel:'#1e1e2e'},
+      {id:'light', accent:'#0a0a0a', bg:'#f4f4f6', panel:'#ffffff'},
+      {id:'cyber', accent:'#00ffcc', bg:'#050507', panel:'#10181e'},
+      {id:'forest', accent:'#7ddc52', bg:'#0a120a', panel:'#142814'},
+      {id:'amber', accent:'#ffb84d', bg:'#120e06', panel:'#241d0f'},
+      {id:'teal', accent:'#2ec4b6', bg:'#061214', panel:'#0f2a26'},
+      {id:'violet', accent:'#a78bfa', bg:'#0f0a14', panel:'#22182e'},
+      {id:'midnight', accent:'#60a5fa', bg:'#060a14', panel:'#0f1a2e'},
+      {id:'sand', accent:'#e6c07a', bg:'#12120a', panel:'#242414'},
+      {id:'graphite', accent:'#d0d0d4', bg:'#0e0e0e', panel:'#1a1a1a'},
+      {id:'mint', accent:'#6bd39a', bg:'#0a1412', panel:'#142722'},
+      {id:'peach', accent:'#ffb088', bg:'#14100a', panel:'#2a2018'},
+      {id:'ice', accent:'#7dd3e0', bg:'#0a1418', panel:'#14272e'}
+    ];
+    function apply(id){
+      if (!THEMES.some(t=>t.id===id)) id='bw';
+      document.body.setAttribute('data-theme', id);
+      try{ localStorage.setItem('kiosk_theme', id); localStorage.setItem('rc_theme', id);}catch(e){}
+      document.querySelectorAll('.side-theme').forEach(b=> b.classList.toggle('is-active', b.dataset.theme===id));
+    }
+    try{ apply(localStorage.getItem('kiosk_theme')||localStorage.getItem('rc_theme')||'bw'); }catch(e){ apply('bw'); }
+    const cont = document.getElementById('side-themes');
+    const toggle = document.getElementById('side-themes-toggle');
+    if (cont){
+      THEMES.forEach(th=>{
+        const btn = document.createElement('button');
+        btn.type='button';
+        btn.className='side-theme';
+        btn.dataset.theme=th.id;
+        btn.title=th.id;
+        btn.setAttribute('aria-label', th.id);
+        btn.style.setProperty('--preview-accent', th.accent);
+        btn.style.setProperty('--preview-bg', th.bg);
+        btn.style.setProperty('--preview-panel', th.panel);
+        btn.innerHTML='<span class="dot"></span>';
+        if (document.body.getAttribute('data-theme')===th.id) btn.classList.add('is-active');
+        btn.addEventListener('click', ()=>{ apply(th.id); try{ navigator.vibrate&&navigator.vibrate(10);}catch(e){} });
+        cont.appendChild(btn);
+      });
+    }
+    if (toggle && cont){
+      toggle.addEventListener('click', ()=>{
+        const open = toggle.getAttribute('aria-expanded')==='true';
+        toggle.setAttribute('aria-expanded', String(!open));
+        cont.hidden = open;
+        try{ navigator.vibrate&&navigator.vibrate(8);}catch(e){}
+      });
+    }
+    window.RCTheme={apply};
+  })();
+  </script>
 </body>
 </html>
