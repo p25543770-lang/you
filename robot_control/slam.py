@@ -35,6 +35,7 @@ BACKEND_PY = GUI_DIR / "backend.py"
 
 MAIN_PAGE = "main.html"
 CONSOLE_PAGE = "index.html"
+KIOSK_PAGE = "robot.html"
 
 #: Статика интерфейса: имя файла → endpoint. Отдаётся только этот список.
 ASSETS = {
@@ -47,6 +48,9 @@ ASSETS = {
     "vision.js": "vision_js",
     # наш скрипт: пробрасывает токен сессии в подзапросы (нужен в iframe без cookie)
     "slam_auth.js": "slam_auth_js",
+    # страница киоска на борту робота (без авторизации)
+    "robot.css": "robot_css",
+    "robot.js": "robot_js",
 }
 
 #: Порты, которые проверяем в режиме ``auto``, если список не задан явно.
@@ -178,6 +182,33 @@ def create_blueprint(state, guard=None) -> Blueprint:
         return _send(CONSOLE_PAGE)
 
     bp.add_url_rule("/index.html", endpoint="console_page", view_func=guard(console))
+
+    # --------- экран киоска на борту робота: без авторизации -------- #
+    # Открывается локально в киоск-браузере на роботе (127.0.0.1);
+    # показывает только АКБ, шасси и лидар — без пульта, без замка, без аудита.
+    @bp.get("/kiosk", endpoint="kiosk")
+    def kiosk_screen():
+        """Экран, который показывается на дисплее самого робота."""
+        return _send(KIOSK_PAGE)
+
+    bp.add_url_rule("/robot.html", endpoint="kiosk_page", view_func=kiosk_screen)
+
+    @bp.get("/api/kiosk_state")
+    def api_kiosk_state():
+        """Минимальная телеметрия для экрана робота (только чтение, без секретов)."""
+        snap = state.snapshot()
+        # отдаём только то, что нужно для киоска: АКБ, моторы, лидар, скорость/мощность, связь
+        public = {
+            "battery": snap.get("battery"),
+            "motors": snap.get("motors"),
+            "lidar": snap.get("lidar"),
+            "speedMps": snap.get("speedMps"),
+            "powerKw": snap.get("powerKw"),
+            "mode": snap.get("mode"),
+            "linkOk": snap.get("linkOk"),
+            "ts": snap.get("ts"),
+        }
+        return jsonify({"ok": True, "data": public})
 
     # -------------------------------- API -------------------------------- #
     @bp.get("/api/state")
