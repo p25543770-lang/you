@@ -130,3 +130,97 @@ def test_add_or_update_stores_hash_not_password(tmp_path, cli):
     assert operator.password_hash.startswith("pbkdf2_sha256$")
     assert "admin" not in operator.password_hash
     assert verify_password("admin", operator.password_hash)
+
+
+def _check_argv(target, *extra):
+    return [
+        "create_operator.py",
+        "--username",
+        "checked",
+        "--file",
+        str(target),
+        "--check",
+        *extra,
+    ]
+
+
+def test_check_accepts_correct_password(tmp_path, monkeypatch, cli, capsys):
+    """--check: верный пароль подтверждается, учётка не меняется."""
+    import io
+    import sys
+
+    target = tmp_path / "operators.json"
+    before = cli.OperatorStore(target).add_or_update("checked", "верный-пароль", iterations=1_000)
+    monkeypatch.setattr(sys, "argv", _check_argv(target, "--password-stdin"))
+    monkeypatch.setattr(sys, "stdin", io.StringIO("верный-пароль\n"))
+    assert cli.main() == 0
+    assert "верный" in capsys.readouterr().out
+    after = cli.OperatorStore(target).get("checked")
+    assert after.password_hash == before.password_hash  # ничего не перезаписано
+
+
+def test_check_rejects_wrong_password(tmp_path, monkeypatch, cli, capsys):
+    import io
+    import sys
+
+    target = tmp_path / "operators.json"
+    cli.OperatorStore(target).add_or_update("checked", "верный-пароль", iterations=1_000)
+    monkeypatch.setattr(sys, "argv", _check_argv(target, "--password-stdin"))
+    monkeypatch.setattr(sys, "stdin", io.StringIO("не-тот\n"))
+    assert cli.main() == 1
+    assert "НЕ совпадает" in capsys.readouterr().out
+
+
+def test_check_unknown_login(tmp_path, monkeypatch, cli, capsys):
+    import io
+    import sys
+
+    target = tmp_path / "operators.json"
+    cli.OperatorStore(target).add_or_update("someone", "пароль-123", iterations=1_000)
+    monkeypatch.setattr(sys, "argv", _check_argv(target, "--password-stdin"))
+    monkeypatch.setattr(sys, "stdin", io.StringIO("пароль-123\n"))
+    assert cli.main() == 1
+    assert "нет в" in capsys.readouterr().out
+
+
+def test_check_disabled_account(tmp_path, monkeypatch, cli, capsys):
+    import io
+    import sys
+
+    target = tmp_path / "operators.json"
+    store = cli.OperatorStore(target)
+    operator = store.add_or_update("checked", "верный-пароль", iterations=1_000)
+    store.save([type(operator)(operator.username, operator.role, operator.password_hash, False)])
+    monkeypatch.setattr(sys, "argv", _check_argv(target, "--password-stdin"))
+    monkeypatch.setattr(sys, "stdin", io.StringIO("верный-пароль\n"))
+    assert cli.main() == 1
+    assert "ОТКЛЮЧЕНА" in capsys.readouterr().out
+
+
+def test_log_operators_lists_accounts(tmp_path, capsys):
+    """Стартовый листинг: сервер печатает учётки, которые реально увидит."""
+    import run as entry
+    from robot_control.auth import OperatorStore
+    from robot_control.config import Config
+
+    config = Config(operators_file=tmp_path / "operators.json")
+    entry.log_operators(config)  # пусто — молчим
+    assert capsys.readouterr().out == ""
+
+    OperatorStore(config.operators_file).add_or_update("admin", "1234", iterations=1_000)
+    entry.log_operators(config)
+    out = capsys.readouterr().out
+    assert "admin" in out and "активна" in out
+
+
+def test_log_operators_flags_disabled(tmp_path, capsys):
+    import run as entry
+    from robot_control.auth import OperatorStore
+    from robot_control.config import Config
+
+    config = Config(operators_file=tmp_path / "operators.json")
+    store = OperatorStore(config.operators_file)
+    operator = store.add_or_update("admin", "1234", iterations=1_000)
+    store.save([type(operator)(operator.username, operator.role, operator.password_hash, False)])
+    entry.log_operators(config)
+    assert "ОТКЛЮЧЕНА" in capsys.readouterr().out

@@ -2,7 +2,7 @@
 #
 # Установка и запуск пульта оператора на Ubuntu одной командой:
 #
-#   git clone -b arena/01a0fcfa-you https://github.com/p25543770-lang/you.git robot-control
+#   git clone https://github.com/p25543770-lang/you.git robot-control
 #   cd robot-control
 #   ./scripts/install_ubuntu.sh
 #
@@ -71,6 +71,12 @@ if [[ ! -f data/operators.json ]]; then
 else
   log "учётки уже созданы — пропускаю"
 fi
+
+# --- 4b. проверка: что реально записалось ------------------------------------- #
+# Fail fast: если учётка почему-то не создалась, сервер потом будет отвергать
+# любой пароль как «неверный» — лучше упасть здесь с понятной причиной.
+log "проверяю записанные учётки…"
+.venv/bin/python scripts/create_operator.py --list
 
 # --- 5. порт в фаерволе -------------------------------------------------------- #
 if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: active"; then
