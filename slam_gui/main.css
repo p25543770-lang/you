@@ -922,10 +922,116 @@ body {
   white-space: nowrap;
 }
 
+/* stage: шасси слева, камера в центре, лидар справа */
+.stage {
+  flex: 1 1 auto;
+  min-height: 0;
+  display: grid;
+  gap: var(--gap);
+}
+@media (min-width: 1001px) {
+  .stage {
+    grid-template-columns: minmax(0, 1.35fr) 360px minmax(0, 0.95fr);
+    align-items: stretch;
+  }
+  .stage .chassis,
+  .stage .camera,
+  .stage .lidar {
+    min-height: 0;
+    height: 100%;
+    display: flex;
+    flex-direction: column;
+  }
+  .stage .camera .cam-viewport { min-height: 0; flex: 1 1 auto; }
+  .stage .lidar .lidar-body { flex: 1 1 auto; }
+}
+@media (max-width: 1000px) {
+  .stage { display: contents; }
+}
+
+/* камера — демо-вид вперёд, между шасси и лидаром */
+.camera {
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+.cam-viewport {
+  flex: 1 1 auto;
+  min-height: 180px;
+  position: relative;
+  background: #0a1412;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  overflow: hidden;
+  display: grid;
+  place-items: center;
+}
+.cam-viewport canvas {
+  position: absolute;
+  inset: 0;
+  width: 100%;
+  height: 100%;
+  display: block;
+}
+.cam-empty {
+  position: absolute;
+  inset: 0;
+  margin: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+  font-size: 12px;
+  background: rgba(7,13,10,.55);
+}
+.cam-empty[hidden] { display: none !important; }
+.cam-badge {
+  position: absolute;
+  top: 8px;
+  left: 10px;
+  padding: 3px 8px;
+  border-radius: 999px;
+  background: rgba(255,90,85,.92);
+  color: #fff;
+  font-size: 10px;
+  font-weight: 800;
+  letter-spacing: .04em;
+  line-height: 1;
+}
+.cam-cross {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+.cam-cross::before,
+.cam-cross::after {
+  content: "";
+  position: absolute;
+  background: rgba(255,255,255,.08);
+}
+.cam-cross::before { left: 50%; top: 10%; bottom: 10%; width: 1px; transform: translateX(-50%); }
+.cam-cross::after { top: 50%; left: 10%; right: 10%; height: 1px; transform: translateY(-50%); }
+.cam-bar {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  background: var(--panel-2);
+  font-size: 11px;
+  color: var(--muted);
+  font-weight: 600;
+}
+.cam-bar .cam-dot { margin-left: auto; width: 8px; height: 8px; border-radius: 50%; background: var(--ok); }
+.cam-bar .cam-dot.ok { background: var(--ok); }
+
 /* ------------------------------------------ связь потеряна: данные устарели */
 
 body.is-stale .kpis,
 body.is-stale .chassis,
+body.is-stale .camera,
 body.is-stale .lidar,
 body.is-stale #route {
   opacity: .45;
@@ -1077,9 +1183,11 @@ body.is-stale #route {
   .kpis { order: 5; grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .kpi-soc { grid-column: 1 / -1; }
   .chassis { order: 6; flex: none; }
-  .lidar { order: 7; flex: none; height: 240px; }
+  .camera { order: 7; flex: none; min-height: 260px; }
+  .camera .cam-viewport { min-height: 200px; }
+  .lidar { order: 8; flex: none; height: 240px; }
   .events {
-    order: 8;
+    order: 9;
     flex: none;
     max-height: 260px;
     padding: 12px 14px;
@@ -1088,15 +1196,15 @@ body.is-stale #route {
     border-radius: var(--radius);
   }
   .ev-list { overflow-y: auto; }
-  .side-status { order: 9; }
+  .side-status { order: 10; }
   .profile {
-    order: 10;
+    order: 11;
     padding: 12px 14px;
     background: var(--panel);
     border: 1px solid var(--line);
     border-radius: var(--radius);
   }
-  .specs { order: 11; }
+  .specs { order: 12; }
 
   .chassis-grid {
     flex: none;

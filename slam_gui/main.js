@@ -533,6 +533,129 @@
     setText($('route-to'), parts[1] || '—');
   }
 
+  /* ------------------------------------------------------------ камера (центр между шасси и лидаром, демо) */
+  function renderCamera(view, d) {
+    const canvas = $('cam-canvas');
+    const meta = $('cam-meta');
+    const empty = $('cam-empty');
+    if (!canvas) return;
+    const hasLive = view.live && view.hasData;
+    if (meta) setText(meta, hasLive ? 'демо · 30 fps · LIVE' : 'нет сигнала · демо');
+    if (empty) empty.hidden = hasLive;
+    drawCamera(canvas, d, hasLive);
+  }
+
+  function drawCamera(canvas, d, live) {
+    const ctx = canvas.getContext && canvas.getContext('2d');
+    if (!ctx) return;
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    const W = Math.round((rect.width || 360) * dpr);
+    const H = Math.round((rect.height || 200) * dpr);
+    if (canvas.width !== W || canvas.height !== H) {
+      canvas.width = W;
+      canvas.height = H;
+    }
+    const w = W, h = H;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const cw = w / dpr, ch = h / dpr;
+    // фон
+    ctx.fillStyle = '#0b1411';
+    ctx.fillRect(0, 0, cw, ch);
+    if (!live) {
+      ctx.fillStyle = '#6f877d';
+      ctx.font = '11px Inter, sans-serif';
+      ctx.textAlign = 'center';
+      ctx.fillText('камера не подключена — демо-режим', cw/2, ch/2);
+      return;
+    }
+    const t = Date.now() / 1000;
+    const speed = typeof d.speedMps === 'number' ? Math.max(0, d.speedMps) : 0.5;
+    const offset = (t * speed * 40) % 40;
+
+    // небо градиент
+    const sky = ctx.createLinearGradient(0, 0, 0, ch*0.48);
+    sky.addColorStop(0, '#0f1f1a');
+    sky.addColorStop(1, '#152a22');
+    ctx.fillStyle = sky;
+    ctx.fillRect(0, 0, cw, ch*0.48);
+    // горизонт
+    ctx.fillStyle = '#1b2f27';
+    ctx.fillRect(0, ch*0.48-1, cw, 2);
+    // дорога перспектива
+    ctx.fillStyle = '#111c17';
+    ctx.beginPath();
+    ctx.moveTo(cw*0.5 - 12, ch*0.48);
+    ctx.lineTo(cw*0.5 + 12, ch*0.48);
+    ctx.lineTo(cw, ch);
+    ctx.lineTo(0, ch);
+    ctx.closePath();
+    ctx.fill();
+    // бордюры
+    ctx.strokeStyle = '#2b4037';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(cw*0.5 - 12, ch*0.48); ctx.lineTo(0, ch);
+    ctx.moveTo(cw*0.5 + 12, ch*0.48); ctx.lineTo(cw, ch);
+    ctx.stroke();
+    // разметка центр — бегущая
+    ctx.strokeStyle = 'rgba(255,255,255,.9)';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([14, 14]);
+    ctx.lineDashOffset = -offset*2;
+    ctx.beginPath();
+    ctx.moveTo(cw*0.5, ch*0.48);
+    ctx.lineTo(cw*0.5, ch);
+    ctx.stroke();
+    ctx.setLineDash([]);
+    // боковые линии
+    ctx.strokeStyle = 'rgba(159,227,107,.7)';
+    ctx.lineWidth = 1.2;
+    ctx.beginPath();
+    for (let side = -1; side <= 1; side+=2) {
+      const x0 = cw*0.5 + side*12;
+      const x1 = side<0 ? 0 : cw;
+      ctx.moveTo(x0, ch*0.48);
+      const steps = 6;
+      for (let i=0;i<steps;i++) {
+        const y = ch*0.48 + (ch*0.52)*(i+1)/steps;
+        const x = cw*0.5 + side*(12 + (Math.abs(x1 - cw*0.5)-12)*(i+1)/steps);
+        // пунктир боковой
+        if (i%2===0) {
+          ctx.moveTo(x - side*2, y-8);
+          ctx.lineTo(x, y);
+        }
+      }
+    }
+    ctx.stroke();
+    // движущиеся тени от стеллажей по бокам (демо)
+    ctx.fillStyle = 'rgba(0,0,0,.18)';
+    for (let i=0;i<3;i++) {
+      const y = ch*0.48 + ((offset + i*30) % (ch*0.52));
+      const scale = 0.3 + (y - ch*0.48)/(ch*0.52)*0.7;
+      const ww = 60*scale, hh = 28*scale;
+      ctx.fillRect(8, y - hh/2, ww, hh);
+      ctx.fillRect(cw-8-ww, y - hh/2, ww, hh);
+    }
+    // HUD
+    ctx.fillStyle = 'rgba(0,0,0,.38)';
+    ctx.fillRect(0, ch-18, cw, 18);
+    ctx.fillStyle = '#9fe36b';
+    ctx.font = '700 10px Inter, sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillText('CAM 0 · передняя', 8, ch-6);
+    ctx.textAlign = 'right';
+    ctx.fillStyle = '#dbe7e1';
+    ctx.font = '10px ui-monospace, monospace';
+    ctx.fillText(speed.toFixed(2) + ' м/с · ' + new Date().toLocaleTimeString('ru-RU',{hour12:false}), cw-8, ch-6);
+    // виньетка
+    const vig = ctx.createRadialGradient(cw/2, ch/2, ch*0.5, cw/2, ch/2, ch);
+    vig.addColorStop(0, 'transparent');
+    vig.addColorStop(1, 'rgba(0,0,0,.35)');
+    ctx.fillStyle = vig;
+    ctx.fillRect(0, 0, cw, ch);
+  }
+
   function render() {
     const view = currentView(Date.now());
     trackEvents(view);
@@ -547,6 +670,7 @@
     renderKpis(d, b);
     renderChassis(view, d, motors);
     applyDriveToWheels();
+    renderCamera(view, d);
     renderLidar(d);
     renderRoute(d);
     renderEvents();
@@ -688,6 +812,13 @@
     window.addEventListener('keyup', (e) => { if (!isTyping(e)) driveKey(e, false); });
     window.addEventListener('blur', () => { driveStop(); driveTick(); });
     setInterval(() => { steerTick(0.05); applyDriveToWheels(); }, 50);
+    // камера — плавная анимация дороги (60 мс ≈ 16 fps, независимо от опроса)
+    setInterval(() => {
+      try {
+        const v = currentView(Date.now());
+        renderCamera(v, v.data || {});
+      } catch(e){}
+    }, 60);
     setDrive(false);
     loop();
   }
