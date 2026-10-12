@@ -206,17 +206,25 @@
           </div>
         </section>
 
-        <!-- камера — в центре между шасси и лидаром -->
+        <!-- камеры — по ширине шасси ниже шасси: передняя + задняя -->
         <section class="panel camera" id="camera" aria-labelledby="cam-title">
           <header class="panel-head">
-            <h2 id="cam-title">Камера</h2>
+            <h2 id="cam-title">Камеры</h2>
             <span class="panel-meta" id="cam-meta">демо · 30 fps</span>
           </header>
-          <div class="cam-viewport" id="cam-viewport">
-            <canvas id="cam-canvas" aria-label="Камера — вид вперёд"></canvas>
-            <p class="cam-empty" id="cam-empty" hidden>нет сигнала</p>
-            <span class="cam-badge" aria-hidden="true">● LIVE</span>
-            <span class="cam-cross" aria-hidden="true"></span>
+          <div class="cam-grid">
+            <div class="cam-viewport" id="cam-viewport-front">
+              <canvas id="cam-canvas" aria-label="Камера передняя"></canvas>
+              <p class="cam-empty" id="cam-empty" hidden>нет сигнала</p>
+              <span class="cam-badge" aria-hidden="true">● LIVE · ПЕРЕД</span>
+              <span class="cam-cross" aria-hidden="true"></span>
+            </div>
+            <div class="cam-viewport" id="cam-viewport-rear">
+              <canvas id="cam-rear-canvas" aria-label="Камера задняя"></canvas>
+              <p class="cam-empty" id="cam-rear-empty" hidden>нет сигнала</p>
+              <span class="cam-badge" aria-hidden="true">● LIVE · ЗАД</span>
+              <span class="cam-cross" aria-hidden="true"></span>
+            </div>
           </div>
           <div class="cam-bar">
             <span id="cam-res">1920×1080</span>

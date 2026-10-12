@@ -533,19 +533,22 @@
     setText($('route-to'), parts[1] || '—');
   }
 
-  /* ------------------------------------------------------------ камера (центр между шасси и лидаром, демо) */
+  /* ------------------------------------------------------------ камеры — передняя и задняя, ниже шасси */
   function renderCamera(view, d) {
-    const canvas = $('cam-canvas');
     const meta = $('cam-meta');
-    const empty = $('cam-empty');
-    if (!canvas) return;
     const hasLive = view.live && view.hasData;
-    if (meta) setText(meta, hasLive ? 'демо · 30 fps · LIVE' : 'нет сигнала · демо');
-    if (empty) empty.hidden = hasLive;
-    drawCamera(canvas, d, hasLive);
+    if (meta) setText(meta, hasLive ? 'демо · 2× 30 fps · LIVE' : 'нет сигнала · демо');
+    const front = $('cam-canvas');
+    const rear = $('cam-rear-canvas');
+    const emptyF = $('cam-empty');
+    const emptyR = $('cam-rear-empty');
+    if (emptyF) emptyF.hidden = hasLive;
+    if (emptyR) emptyR.hidden = hasLive;
+    if (front) drawCamera(front, d, hasLive, false);
+    if (rear) drawCamera(rear, d, hasLive, true);
   }
 
-  function drawCamera(canvas, d, live) {
+  function drawCamera(canvas, d, live, isRear) {
     const ctx = canvas.getContext && canvas.getContext('2d');
     if (!ctx) return;
     const dpr = window.devicePixelRatio || 1;
@@ -571,7 +574,8 @@
     }
     const t = Date.now() / 1000;
     const speed = typeof d.speedMps === 'number' ? Math.max(0, d.speedMps) : 0.5;
-    const offset = (t * speed * 40) % 40;
+    const rawOff = (t * speed * 40) % 40;
+    const offset = isRear ? (40 - rawOff) % 40 : rawOff;
 
     // небо градиент
     const sky = ctx.createLinearGradient(0, 0, 0, ch*0.48);
@@ -643,7 +647,7 @@
     ctx.fillStyle = '#9fe36b';
     ctx.font = '700 10px Inter, sans-serif';
     ctx.textAlign = 'left';
-    ctx.fillText('CAM 0 · передняя', 8, ch-6);
+    ctx.fillText(isRear ? 'CAM 1 · задняя' : 'CAM 0 · передняя', 8, ch-6);
     ctx.textAlign = 'right';
     ctx.fillStyle = '#dbe7e1';
     ctx.font = '10px ui-monospace, monospace';
