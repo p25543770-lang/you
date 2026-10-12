@@ -1188,14 +1188,15 @@
 
     // также клик по оверлею вне? не нужно
 
-    // --- КАМЕРЫ: демо-анимация (градиент + движущиеся объекты) ---
+    // --- КАМЕРЫ: без симуляции — показываем «нет сигнала» до реального потока ---
     function startCamLoops() {
       if (camLoopsStarted) return;
       camLoopsStarted = true;
-      if (cam1Empty) cam1Empty.hidden = true;
-      if (cam2Empty) cam2Empty.hidden = true;
-      if (cam1Chip) { cam1Chip.textContent = '● LIVE · передняя'; cam1Chip.className = 'cam-chip ok'; }
-      if (cam2Chip) { cam2Chip.textContent = '● LIVE · кормовая'; cam2Chip.className = 'cam-chip warn'; }
+      if (cam1Empty) cam1Empty.hidden = false;
+      if (cam2Empty) cam2Empty.hidden = false;
+      if (cam1Chip) { cam1Chip.textContent = 'нет сигнала'; cam1Chip.className = 'cam-chip'; }
+      if (cam2Chip) { cam2Chip.textContent = 'нет сигнала'; cam2Chip.className = 'cam-chip'; }
+      return;
 
       const ctx1 = cam1Canvas ? cam1Canvas.getContext('2d') : null;
       const ctx2 = cam2Canvas ? cam2Canvas.getContext('2d') : null;
