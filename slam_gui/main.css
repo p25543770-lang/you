@@ -932,11 +932,11 @@ body {
 @media (min-width: 1001px) {
   .stage {
     grid-template-columns: minmax(0, 1.35fr) minmax(0, 0.95fr);
-    grid-template-rows: auto auto;
-    align-items: start;
+    grid-template-rows: auto 1fr;
+    align-items: stretch;
   }
   .stage .chassis { grid-column: 1; grid-row: 1; }
-  .stage .camera  { grid-column: 1; grid-row: 2; min-height: 340px; }
+  .stage .camera  { grid-column: 1; grid-row: 2; min-height: 0; }
   .stage .lidar   { grid-column: 2; grid-row: 1 / span 2; align-self: stretch; }
   .stage .chassis,
   .stage .camera,
@@ -946,9 +946,9 @@ body {
     flex-direction: column;
   }
   .stage .camera .cam-grid { flex: 1 1 auto; min-height: 0; }
-  .stage .camera .cam-viewport { min-height: 140px; }
+  .stage .camera .cam-viewport { min-height: 0; flex: 1 1 0; }
   .stage .lidar .lidar-body { flex: 1 1 auto; }
-  /* шасси в своей колонке — можно шире, чем в 1/3 */
+  /* шасси в своей колонке — можно шире */
   .stage .chassis .chassis-grid {
     --card: clamp(170px, 14vw, 240px);
     --axle: clamp(32px, 2.8vw, 48px);
@@ -971,6 +971,7 @@ body {
   min-height: 0;
   display: grid;
   grid-template-columns: 1fr;
+  grid-template-rows: 1fr 1fr;
   gap: 8px;
 }
 .cam-viewport {

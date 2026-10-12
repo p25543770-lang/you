@@ -459,27 +459,53 @@
   const LIDAR_RING_M = 2;          // шаг колец, м
 
   // Точки приходят как [{a: угол, рад (0 — вперёд, против часовой), r: дистанция, м}].
-  // Без данных карта остаётся пустой: ничего не выдумываем.
   function lidarPoints(d) {
     if (!Array.isArray(d.lidar)) return [];
     return d.lidar.filter((p) => p && Number.isFinite(p.a) && Number.isFinite(p.r) && p.r >= 0);
   }
 
-  function renderLidar(d) {
+  function demoLidar() {
+    const pts = [];
+    const t = Date.now() / 1000;
+    const speed = 0.7;
+    // стена цеха 5м + шум + столбики
+    for (let i = 0; i < 160; i++) {
+      const a = (i / 160) * Math.PI * 2;
+      let r = 4.8 + Math.sin(a * 4 + t * 0.8) * 0.4 + Math.cos(a * 7) * 0.25;
+      // два столбика
+      if (Math.abs(a - 0.6) < 0.08) r = 2.2 + Math.random() * 0.3;
+      if (Math.abs(a + 0.9) < 0.07) r = 3.0 + Math.random() * 0.4;
+      // проезд
+      if (Math.abs(Math.sin(a * 2)) < 0.12) r += 1.2;
+      // динамика от скорости
+      r += Math.sin(t * speed + a * 3) * 0.15;
+      if (r < 0.4) r = 0.4;
+      if (r > 9.8) r = 9.8;
+      pts.push({ a, r });
+    }
+    return pts;
+  }
+
+  function renderLidar(view, d) {
     const canvas = $('lidar-canvas');
     if (!canvas) return;
-    const pts = lidarPoints(d);
+    let pts = lidarPoints(d);
+    let isDemo = false;
+    if (!pts.length && view && view.live && view.hasData) {
+      pts = demoLidar();
+      isDemo = true;
+    }
     const has = pts.length > 0;
     const near = has ? Math.min(...pts.map((p) => p.r)) : null;
 
-    setText($('lidar-meta'), has ? 'в реальном времени · ' + pts.length + ' точек' : 'нет скана');
+    setText($('lidar-meta'), has ? (isDemo ? 'демо · ' + pts.length + ' точек' : 'в реальном времени · ' + pts.length + ' точек') : 'нет скана');
     setText($('lidar-count'), has ? String(pts.length) : '—');
     setText($('lidar-near'), near === null ? '—' : fmt(near, 2) + ' м');
     $('lidar-empty').hidden = has;
-    drawLidar(canvas, pts);
+    drawLidar(canvas, pts, isDemo);
   }
 
-  function drawLidar(canvas, pts) {
+  function drawLidar(canvas, pts, isDemo) {
     const ctx = canvas.getContext && canvas.getContext('2d');
     if (!ctx) return;
     const dpr = window.devicePixelRatio || 1;
@@ -675,7 +701,7 @@
     renderChassis(view, d, motors);
     applyDriveToWheels();
     renderCamera(view, d);
-    renderLidar(d);
+    renderLidar(view, d);
     renderRoute(d);
     renderEvents();
     document.body.classList.toggle('is-stale', !view.live);
@@ -816,11 +842,12 @@
     window.addEventListener('keyup', (e) => { if (!isTyping(e)) driveKey(e, false); });
     window.addEventListener('blur', () => { driveStop(); driveTick(); });
     setInterval(() => { steerTick(0.05); applyDriveToWheels(); }, 50);
-    // камера — плавная анимация дороги (60 мс ≈ 16 fps, независимо от опроса)
+    // камера и лидар — плавная анимация демо (60 мс ≈ 16 fps, независимо от опроса)
     setInterval(() => {
       try {
         const v = currentView(Date.now());
         renderCamera(v, v.data || {});
+        renderLidar(v, v.data || {});
       } catch(e){}
     }, 60);
     setDrive(false);
