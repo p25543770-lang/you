@@ -65,7 +65,11 @@ fi
 if [[ ! -f data/operators.json ]]; then
   if [[ -t 0 ]]; then
     log "создаю учётку оператора…"
-    .venv/bin/python scripts/create_operator.py --username operator || true
+    # Тот же логин и требования к паролю, что в install_ubuntu.sh: иначе
+    # здесь заводился «operator», а везде документирован «admin» — и вход
+    # с «верным» логином/паролем отвергался.
+    .venv/bin/python scripts/create_operator.py \
+      --username "${RC_OPERATOR:-admin}" --min-length "${RC_MIN_PASSWORD_LENGTH:-4}" || true
   fi
   if [[ ! -f data/operators.json ]]; then
     log "спросить пароль негде — создаю учётку автоматически…"

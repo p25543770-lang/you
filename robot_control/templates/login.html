@@ -34,5 +34,13 @@
 
     <button type="submit" class="btn btn-primary">Войти</button>
   </form>
+
+  <p class="muted hint">
+    Не подходит пароль? Он задаётся на машине робота:<br>
+    <code>.venv/bin/python scripts/create_operator.py --username admin --min-length 4</code><br>
+    Логин по умолчанию — <code>admin</code>, пароль — в файле
+    <code>data/credentials.txt</code> (если учётка создавалась автоматически).
+    После 5 неверных попыток вход блокируется на 5 минут.
+  </p>
 </section>
 {% endblock %}

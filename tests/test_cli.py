@@ -52,6 +52,75 @@ def test_read_password_rejects_mismatch(monkeypatch, cli):
     assert "не совпадают" in str(error.value)
 
 
+def test_read_password_from_stdin(monkeypatch, cli):
+    """Неинтерактивный ввод для скриптов: две строки из stdin."""
+    import io
+    import sys
+
+    monkeypatch.setattr(sys, "stdin", io.StringIO("секрет-1\nсекрет-1\n"))
+    assert cli.read_password(from_stdin=True) == "секрет-1"
+
+
+def test_read_password_from_stdin_rejects_mismatch(monkeypatch, cli):
+    import io
+    import sys
+
+    monkeypatch.setattr(sys, "stdin", io.StringIO("один\nдва\n"))
+    with pytest.raises(SystemExit) as error:
+        cli.read_password(min_length=1, from_stdin=True)
+    assert "не совпадают" in str(error.value)
+
+
+def test_read_password_from_stdin_rejects_short(monkeypatch, cli):
+    import io
+    import sys
+
+    monkeypatch.setattr(sys, "stdin", io.StringIO("1234\n1234\n"))
+    with pytest.raises(SystemExit) as error:
+        cli.read_password(from_stdin=True)
+    assert "короче 8" in str(error.value)
+
+
+def test_read_password_from_stdin_rejects_empty(monkeypatch, cli):
+    import io
+    import sys
+
+    monkeypatch.setattr(sys, "stdin", io.StringIO(""))
+    with pytest.raises(SystemExit) as error:
+        cli.read_password(from_stdin=True)
+    assert "stdin пуст" in str(error.value)
+
+
+def test_main_with_password_stdin(tmp_path, monkeypatch, cli):
+    """Сквозная проверка: скрипт создаёт учётку из pipe без терминала."""
+    import io
+    import sys
+
+    target = tmp_path / "operators.json"
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "create_operator.py",
+            "--username",
+            "pipeop",
+            "--file",
+            str(target),
+            "--min-length",
+            "4",
+            "--password-stdin",
+        ],
+    )
+    monkeypatch.setattr(sys, "stdin", io.StringIO("1234\n1234\n"))
+    assert cli.main() == 0
+
+    from robot_control.auth import verify_password
+
+    operator = cli.OperatorStore(target).get("pipeop")
+    assert operator is not None
+    assert verify_password("1234", operator.password_hash)
+
+
 def test_add_or_update_stores_hash_not_password(tmp_path, cli):
     from robot_control.auth import verify_password
 

@@ -8,6 +8,8 @@ PBKDF2-хеш. Файл учёткок (по умолчанию data/operators.j
     python3 scripts/create_operator.py --username operator
     python3 scripts/create_operator.py --list
     python3 scripts/create_operator.py --username operator --disable
+    printf '%s\\n%s\\n' "$PASS" "$PASS" | python3 scripts/create_operator.py \\
+        --username operator --password-stdin --min-length 4
 """
 
 from __future__ import annotations
@@ -23,9 +25,22 @@ from robot_control.auth import OperatorStore  # noqa: E402
 from robot_control.config import Config  # noqa: E402
 
 
-def read_password(min_length: int = 8) -> str:
-    first = getpass.getpass("Пароль оператора: ")
-    second = getpass.getpass("Повторите пароль: ")
+def read_password(min_length: int = 8, from_stdin: bool = False) -> str:
+    """Спросить пароль дважды и сверить ввод.
+
+    from_stdin=True — читать две строки из stdin (для скриптов). Скрытый ввод
+    getpass для этого не годится: при наличии терминала он читает /dev/tty и
+    игнорирует pipe, из-за чего учётка создавалась не с тем паролем (или
+    вообще не создавалась), а вход потом отвергал «верный» пароль.
+    """
+    if from_stdin:
+        first = sys.stdin.readline().rstrip("\r\n")
+        second = sys.stdin.readline().rstrip("\r\n")
+        if not first and not second:
+            raise SystemExit("stdin пуст: ожидались две строки с паролем.")
+    else:
+        first = getpass.getpass("Пароль оператора: ")
+        second = getpass.getpass("Повторите пароль: ")
     if first != second:
         raise SystemExit("Пароли не совпадают, ничего не изменено.")
     if len(first) < min_length:
@@ -50,6 +65,12 @@ def main() -> int:
         type=int,
         default=8,
         help="минимальная длина пароля (по умолчанию 8)",
+    )
+    parser.add_argument(
+        "--password-stdin",
+        action="store_true",
+        help="читать пароль из stdin (две строки), а не скрытым вводом; "
+        "нужно скриптам — getpass при наличии терминала игнорирует pipe",
     )
     args = parser.parse_args()
 
@@ -87,7 +108,7 @@ def main() -> int:
         print(f"{'Включён' if args.enable else 'Отключён'}: {operator.username}")
         return 0
 
-    password = read_password(min_length=args.min_length)
+    password = read_password(min_length=args.min_length, from_stdin=args.password_stdin)
     operator = store.add_or_update(
         args.username, password, iterations=config.pbkdf2_iterations
     )

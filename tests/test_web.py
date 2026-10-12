@@ -40,6 +40,28 @@ def test_login_wrong_password(app, client, operator):
     assert "Неверный логин или пароль" in response.get_data(as_text=True)
 
 
+def test_failed_login_is_logged(app, client, operator, caplog):
+    """Неудачный вход виден в журнале сервера — иначе его не диагностировать."""
+    import logging
+
+    with caplog.at_level(logging.WARNING, logger="robot_control"):
+        response = login(client, OPERATOR, "не-тот-пароль")
+    assert response.status_code == 401
+    assert any(
+        "неудачный вход" in message and OPERATOR in message
+        for message in caplog.messages
+    )
+    # а пароль в журнал попадать не должен
+    assert all("не-тот-пароль" not in message for message in caplog.messages)
+
+
+def test_login_page_shows_recovery_hint(client):
+    """На форме входа есть подсказка, что делать, если пароль не подходит."""
+    text = client.get("/login").get_data(as_text=True)
+    assert "create_operator.py" in text
+    assert "credentials.txt" in text
+
+
 def test_login_success_gives_session_and_redirect(app, client, operator):
     response = login(client)
     assert response.status_code == 302
