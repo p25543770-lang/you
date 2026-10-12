@@ -222,12 +222,43 @@ class SimSource:
 
     name = "sim"
 
+    # Сценарий склада, цикл 120 с: разгон, ход прямо, поворот, торможение, стоянка, ход.
+    V_CRUISE = 0.7          # м/с, потолок скорости
+    STEER_LIMIT = 30.0      # градусы, предел рулевого угла модуля
+    STEER_RATE = 35.0       # градусы в секунду: скорость рулевого привода (NEMA 23 с редуктором)
+
     def __init__(self):
         self.t0 = time.time()
         self.soc = 78.0
         self.last = time.time()
+        self.steer = 0.0            # текущий угол колёс (передние), градусы
+        self.bat_temp = 26.0
         self.motors = [{"id": mid, "title": MODULE_TITLES[mid], "angle": 0.0,
-                        "rpm": 0.0, "temp": 36.0, "homed": True} for mid in MODULE_NAMES.values()]
+                        "rpm": 0.0, "temp": 32.0, "homed": True} for mid in MODULE_NAMES.values()]
+
+    @classmethod
+    def _plan(cls, t):
+        """Условный сценарий: (скорость м/с, целевой угол колёс, градусы)."""
+        seg = t % 120.0
+        if seg < 8:
+            v = cls.V_CRUISE * seg / 8.0                      # разгон
+        elif seg < 40:
+            v = cls.V_CRUISE                                  # ход прямо
+        elif seg < 48:
+            v = cls.V_CRUISE * (48.0 - seg) / 8.0             # торможение
+        elif seg < 58:
+            v = 0.0                                           # стоянка у стеллажа
+        elif seg < 110:
+            v = 0.5                                           # ход к выгрузке
+        else:
+            v = 0.5 * (120.0 - seg) / 10.0                    # подход и остановка
+        if 20.0 <= seg < 26.0:
+            target = -24.0                                    # поворот влево
+        elif 60.0 <= seg < 68.0:
+            target = 30.0                                     # поворот вправо
+        else:
+            target = 0.0
+        return max(0.0, v), target
 
     def read(self):
         now = time.time()
@@ -235,18 +266,32 @@ class SimSource:
         self.last = now
         t = now - self.t0
 
-        speed = 0.55 + 0.45 * math.sin(t / 9.0)          # условная скорость 0,1…1,0
+        v, target = self._plan(t)
+        # рулевой привод: угол догоняет цель с ограниченной скоростью
+        step = self.STEER_RATE * dt
+        self.steer += max(-step, min(step, target - self.steer))
+        self.steer = max(-self.STEER_LIMIT, min(self.STEER_LIMIT, self.steer))
+
+        wheel_rpm = v / (2.0 * math.pi * WHEEL_R_M) * 60.0    # обороты колеса по скорости
+        turn = abs(self.steer) / self.STEER_LIMIT
+        amps = 0.9 + 5.0 * (v / self.V_CRUISE) + 1.5 * turn + 0.15 * math.sin(t * 3.1)
+        amps = max(0.5, amps)
+
         for i, m in enumerate(self.motors):
-            m["angle"] = math.sin(t / (2.6 + i * 0.4)) * 34.0
-            m["rpm"] = speed * 260.0 + math.sin(t * 2 + i) * 3.0
-            m["temp"] = 34.0 + abs(m["rpm"]) / 40.0 + math.sin(t / 5 + i) * 1.4
-        amps = 6.0 + 12.0 * abs(math.sin(t / 9.0))
+            front = m["id"][0] == "F"
+            m["angle"] = round((self.steer if front else -self.steer) + 0.3 * math.sin(t / 3 + i), 1)
+            m["rpm"] = round(max(0.0, wheel_rpm + 1.2 * math.sin(t * 2 + i)), 1)
+            target_temp = 30.0 + 18.0 * (v / self.V_CRUISE) + 4.0 * turn
+            m["temp"] = round(m["temp"] + (target_temp - m["temp"]) * dt / 150.0, 1)
+
         self.soc = max(4.0, self.soc - amps * dt / 3600.0 * 100.0 / PACK["capacityAh"])
+        bat_target = 24.0 + 6.0 * (amps / 12.0)
+        self.bat_temp += (bat_target - self.bat_temp) * dt / 300.0
         volts = voltage_from_soc(self.soc) - amps * PACK["internalR"]
-        return self._payload(self.motors, volts, amps, speed)
+        return self._payload(self.motors, volts, amps, round(v, 2))
 
     def _payload(self, motors, volts, amps, speed):
-        battery = pack_state(volts, amps, self.soc)
+        battery = pack_state(volts, amps, self.soc, temp_c=self.bat_temp)
         return {
             "motors": motors,
             "battery": battery,
@@ -257,6 +302,128 @@ class SimSource:
             "powerKw": round(battery["watts"] / 1000.0, 2),
             "linkOk": True,
         }
+
+
+class NoSource:
+    """Робот не подключён: ни одного выдуманного значения, все поля пустые (null)."""
+
+    name = "none"
+
+    def read(self):
+        motors = [{"id": mid, "title": MODULE_TITLES[mid], "angle": None, "rpm": None,
+                   "temp": None, "homed": None, "online": False, "fault": None}
+                  for mid in MODULE_NAMES.values()]
+        battery = {"soc": None, "volts": None, "amps": None, "watts": None,
+                   "remainingWh": None, "rangeKm": None, "state": None, "level": None,
+                   "tempC": None, "cellMin": None, "cellMax": None,
+                   "thresholds": {"lowV": PACK["lowV"], "criticalV": PACK["criticalV"]}}
+        return {"motors": motors, "battery": battery, "cargo": {},
+                "mode": None, "route": None, "speedMps": None, "powerKw": None,
+                "linkOk": False}
+
+
+TLM_PREFIX = "@TLM "
+
+
+def parse_master_line(line):
+    """Строка монитора мастера "@TLM mod=FL deg=-9.25 moving=1 ..." → dict.
+
+    Остальные строки монитора (текст для человека) возвращают None.
+    """
+    line = (line or "").strip()
+    if not line.startswith(TLM_PREFIX):
+        return None
+    fields = {}
+    for token in line[len(TLM_PREFIX):].split():
+        key, sep, value = token.partition("=")
+        if sep:
+            fields[key] = value
+    try:
+        return {
+            "mod": fields["mod"].upper(),
+            "deg": float(fields["deg"]),
+            "tgt": float(fields.get("tgt", "0")),
+            "moving": fields.get("moving") == "1",
+            "cal": fields.get("cal") == "1",
+            "cycle": fields.get("cycle") == "1",
+            "calib": fields.get("calib") == "1",
+            "opto": fields.get("opto") == "1",
+        }
+    except (KeyError, ValueError):
+        return None
+
+
+class MasterSource:
+    """Мастер-Arduino по одному UART: строки "@TLM" из motor_master.ino.
+
+    Мастер передаёт телеметрию своего мотора (FL) и трёх узлов (FR, RL, RR),
+    которые он опрашивает по I2C. Модуля, который не отвечает, нет в ответе:
+    его значения пустые, а не выдуманные.
+    """
+
+    name = "master"
+    STALE_S = 1.0
+
+    def __init__(self, port, baud=115200):
+        self.port = port
+        self.baud = baud
+        self.lock = threading.Lock()
+        self.frames = {}                 # модуль → (последний кадр, время)
+        self._stop = False
+        threading.Thread(target=self._reader, daemon=True).start()
+
+    def feed(self, line, now=None):
+        """Принимает строку монитора; True, если это телеметрия."""
+        frame = parse_master_line(line)
+        if frame is None:
+            return False
+        with self.lock:
+            self.frames[frame["mod"]] = (frame, time.time() if now is None else now)
+        return True
+
+    def _reader(self):
+        try:
+            import serial                    # pyserial, только для реального железа
+        except ImportError:
+            print("! master: pyserial не установлен (pip install pyserial) — порт %s выключен" % self.port)
+            return
+        while not self._stop:
+            try:
+                with serial.Serial(self.port, self.baud, timeout=0.5) as dev:
+                    print("· master: %s открыт" % self.port)
+                    while not self._stop:
+                        raw = dev.readline()
+                        if raw:
+                            self.feed(raw.decode("utf-8", "replace"))
+            except Exception as exc:          # noqa: BLE001 — порт может пропасть
+                print("! master %s: %s — повтор через 2 с" % (self.port, exc))
+                time.sleep(2.0)
+
+    def read(self, now=None):
+        now = time.time() if now is None else now
+        with self.lock:
+            frames = dict(self.frames)
+        motors = []
+        link = False
+        for mid in MODULE_NAMES.values():
+            entry = frames.get(mid)
+            fresh = entry is not None and (now - entry[1]) < self.STALE_S
+            if fresh:
+                link = True
+                frame = entry[0]
+                motors.append({"id": mid, "title": MODULE_TITLES[mid],
+                               "angle": round(frame["deg"], 2), "rpm": None, "temp": None,
+                               "homed": frame["cal"], "online": True, "fault": None,
+                               "moving": frame["moving"]})
+            else:
+                motors.append({"id": mid, "title": MODULE_TITLES[mid], "angle": None,
+                               "rpm": None, "temp": None, "homed": None,
+                               "online": False, "fault": None})
+        out = NoSource().read()              # АКБ, скорость, маршрут — пока не передаются
+        out["motors"] = motors
+        out["mode"] = "МАСТЕР НА СВЯЗИ" if link else None
+        out["linkOk"] = link
+        return out
 
 
 class SerialSource:
@@ -337,14 +504,36 @@ class SerialSource:
         }
 
 
+LIDAR_MAX_AGE_S = 1.0     # скан старше — на экран не отдаём (карта пустая)
+
+
+def scan_points(msg):
+    """sensor_msgs/LaserScan -> [{a, r}]: a в радианах из [-pi, pi] (0 — вперёд, против часовой),
+    r в метрах. Недостоверные лучи (inf, nan, вне range_min..range_max) пропускаются."""
+    points = []
+    lo = float(msg.range_min)
+    hi = float(msg.range_max)
+    inc = float(msg.angle_increment)
+    for i, r in enumerate(msg.ranges):
+        r = float(r)
+        if not math.isfinite(r) or r < lo or r > hi:
+            continue
+        a = float(msg.angle_min) + i * inc
+        a = math.atan2(math.sin(a), math.cos(a))       # в [-pi, pi]
+        points.append({"a": round(a, 4), "r": round(r, 3)})
+    return points
+
+
 class RosSource:
-    """ROS 2 (rclpy): /modules/state, /battery. Если rclpy нет — падаем в sim."""
+    """ROS 2 (rclpy): /modules/state, /battery, /screen/motors, /scan (лидар). Если rclpy нет — падаем в sim."""
 
     name = "ros"
 
     def __init__(self):
         self.ok = False
         self.data = {}
+        self.scan = []
+        self.scan_at = 0.0
         try:
             import rclpy                                            # noqa: F401
             from rclpy.node import Node
@@ -359,6 +548,8 @@ class RosSource:
         import rclpy
         from rclpy.node import Node
         from std_msgs.msg import Float32, String
+        from sensor_msgs.msg import LaserScan
+        from rclpy.qos import qos_profile_sensor_data
 
         source = self
 
@@ -369,6 +560,7 @@ class RosSource:
                 self.create_subscription(Float32, "/battery/voltage", source._on_volts, 10)
                 self.create_subscription(Float32, "/battery/current", source._on_amps, 10)
                 self.create_subscription(String, "/screen/motors", source._on_motors, 10)
+                self.create_subscription(LaserScan, "/scan", source._on_scan, qos_profile_sensor_data)
 
         rclpy.init(args=None)
         node = Bridge()
@@ -397,6 +589,13 @@ class RosSource:
         except Exception:                                            # noqa: BLE001
             pass
 
+    def _on_scan(self, msg):
+        try:
+            self.scan = scan_points(msg)
+            self.scan_at = time.time()
+        except Exception:                                            # noqa: BLE001
+            pass
+
     def read(self):
         if self.fallback:
             return self.fallback.read()
@@ -412,6 +611,8 @@ class RosSource:
             "speedMps": d.get("speedMps") or 0.0,
             "powerKw": round((volts * abs(amps)) / 1000.0, 2),
             "linkOk": self.ok,
+            # лидар в реальном времени: свежий скан или None (карта пустая)
+            "lidar": self.scan if self.scan and time.time() - self.scan_at < LIDAR_MAX_AGE_S else None,
         }
 
 
@@ -729,10 +930,11 @@ def make_source(kind, ports):
         return SerialSource(ports or ["/dev/ttyUSB0", "/dev/ttyUSB1", "/dev/ttyUSB2", "/dev/ttyUSB3"])
     if kind == "ros":
         return RosSource()
+    if kind == "sim":
+        return SimSource()
     if kind == "auto":
-        src = RosSource()
-        return src if not getattr(src, "fallback", None) else src
-    return SimSource()
+        return RosSource()
+    return NoSource()
 
 
 def build_app(args):
@@ -746,7 +948,7 @@ def main(argv=None):
     ap = argparse.ArgumentParser(description="RUS SLAM: основной экран робота и API")
     ap.add_argument("--host", default="0.0.0.0")
     ap.add_argument("--port", type=int, default=8080)
-    ap.add_argument("--source", choices=["sim", "serial", "ros", "auto"], default="sim",
+    ap.add_argument("--source", choices=["sim", "serial", "ros", "auto"], default="auto",
                     help="источник данных (по умолчанию sim — стенд)")
     ap.add_argument("--ports", default="", help="UART-порты для --source serial, через запятую")
     ap.add_argument("--pin", default=DEFAULT_PIN, help="заводской PIN отсека (по умолчанию 2580)")
