@@ -113,7 +113,7 @@ kbd{background:#f0f3f1;border:1px solid #dfe5e2;border-radius:4px;padding:2px 6p
 .mission-actions{display:flex;gap:8px;padding:0 18px 18px}
 .primary{background:#16241e!important;color:#d5ff45!important;border:0!important}
 .hint{color:#6d7973;font-size:12px;margin-top:16px}
-.logs{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:14px;line-height:1.55;padding:12px 18px 24px;max-height:520px;overflow:auto;background:#101b17;color:#eaf2ee}
+.logs{font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:17px;line-height:1.6;padding:14px 18px 24px;max-height:520px;overflow:auto;background:#101b17;color:#f0f5f3;font-weight:600}
 .log-line{padding:3px 0;border-bottom:1px solid #203029}
 .log-line.warn{color:#e5a438}
 .log-line.err{color:#e4503e}
