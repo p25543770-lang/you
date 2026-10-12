@@ -6,7 +6,7 @@ import re
 
 from conftest import login
 
-DEFAULT_PIN = "2580"  # заводской PIN грузового отсека из backend.py
+DEFAULT_PIN = "7232"  # заводской PIN грузового отсека из backend.py
 
 
 # ------------------------------- доступ ---------------------------------- #

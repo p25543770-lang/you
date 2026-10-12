@@ -27,7 +27,7 @@ from dataclasses import replace
 from pathlib import Path
 from typing import Mapping, Sequence
 
-from flask import Flask, jsonify, redirect
+from flask import Flask, jsonify, redirect, request
 from werkzeug.serving import make_server
 
 from robot_control.config import PROJECT_ROOT, Config
@@ -179,6 +179,37 @@ def create_kiosk_app(config: Config | None = None) -> Flask:
             "linkOk": snap.get("linkOk"),
             "ts": snap.get("ts"),
         }})
+
+    @app.get("/api/kiosk_lock")
+    def api_kiosk_lock():
+        if state is None:
+            return jsonify({"ok": False, "error": "no source"}), 503
+        return jsonify({"ok": True, "lock": state.vault.state(state.lock_open)})
+
+    @app.post("/api/kiosk_lock/verify")
+    def api_kiosk_lock_verify():
+        if state is None:
+            return jsonify({"ok": False, "error": "no source"}), 503
+        body = request.get_json(silent=True) or {}
+        pin = str(body.get("pin", ""))
+        result = state.vault.verify(pin)
+        result["lock"] = state.vault.state(state.lock_open)
+        return jsonify(result), 200 if result.get("ok") else 403
+
+    @app.post("/api/kiosk_lock/open")
+    def api_kiosk_lock_open():
+        if state is None:
+            return jsonify({"ok": False, "error": "no source"}), 503
+        body = request.get_json(silent=True) or {}
+        pin = str(body.get("pin", ""))
+        result = state.open_lock(pin)
+        return jsonify(result), 200 if result.get("ok") else 403
+
+    @app.post("/api/kiosk_lock/close")
+    def api_kiosk_lock_close():
+        if state is None:
+            return jsonify({"ok": False, "error": "no source"}), 503
+        return jsonify(state.close_lock())
 
     @app.get("/healthz")
     def healthz():

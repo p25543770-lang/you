@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Экран робота</title>
-  <meta name="theme-color" content="#0a120f" />
+  <meta name="theme-color" content="#070709" />
   <link rel="stylesheet" href="robot.css" />
 </head>
 <body class="kiosk-body">
@@ -12,6 +12,8 @@
     Киоск-экран на борту робота. Рассчитан на дисплей 11.6" 1920×1080 (landscape):
     слева — крупно АКБ и мини-шасси (как на пульте управления), справа — лидар
     360° на всю высоту. Цифры крупные, чтобы было видно издалека.
+    Статистика (АКБ, шасси, лидар) без пароля — доступна всем.
+    Управление отсеком и сервисом — только после PIN-кода.
   -->
   <div class="kiosk">
     <header class="top">
@@ -23,12 +25,17 @@
             <circle cx="17" cy="18" r="2.2" fill="currentColor"/>
           </svg>
         </span>
-        <b>РУС СЛАМ · Бортовой экран</b>
+        <b>RUS SLAM · Бортовой экран</b>
       </div>
       <div class="top-right">
         <span class="mode-pill" id="mode-pill">—</span>
         <span class="chip" id="data-chip">ожидание</span>
         <time class="clock" id="clock">--:--</time>
+        <!-- КНОПКА УПРАВЛЕНИЯ — вход по PIN, сама статистика остаётся без пароля -->
+        <button id="k-ctrl-btn" class="k-ctrl-btn" type="button" aria-haspopup="dialog" aria-controls="ctrl-overlay" title="Управление роботом по PIN-коду">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 1 1 8 0v3"/><circle cx="12" cy="16" r="1.6" fill="currentColor" stroke="none"/></svg>
+          <span>Управление</span>
+        </button>
       </div>
     </header>
 
@@ -82,13 +89,14 @@
             </article>
             <div class="axle axle-fl" aria-hidden="true"><div class="wheel" id="wheel-FL" data-tone="idle"><i class="wheel-dir"></i></div></div>
 
-            <div class="body" aria-label="Корпус робота">
+            <div class="body" id="body-drag" aria-label="Корпус робота — води пальцем влево/вправо для поворота">
               <span class="body-end body-front">ПЕРЕД</span>
               <div class="body-speed">
                 <b id="speed">—</b>
                 <small>м/с</small>
               </div>
               <span class="body-end body-rear">КОРМА</span>
+              <span class="body-drag-hint" aria-hidden="true">↔ води пальцем — оборот</span>
             </div>
 
             <div class="axle axle-fr" aria-hidden="true"><div class="wheel" id="wheel-FR" data-tone="idle"><i class="wheel-dir"></i></div></div>
@@ -145,6 +153,215 @@
           </div>
         </section>
       </div>
+    </div>
+    <!-- подсказка свайпа: тянем влево — камеры и логи -->
+    <div class="swipe-hint-bar" id="swipe-hint-bar" aria-hidden="true">
+      <span class="swipe-hint-dot"></span>
+      <span>свайп влево → камеры и логи</span>
+      <span class="swipe-hint-dot"></span>
+    </div>
+    <button id="swipe-open" class="swipe-handle" type="button" aria-label="Открыть камеры и логи">
+      <span aria-hidden="true">‹</span>
+    </button>
+  </div>
+
+  <!-- ============ СВАЙП-ЭКРАН: ДВЕ КАМЕРЫ + ЛОГИ (свайп влево) ============ -->
+  <div id="swipe-page" class="swipe-page" hidden aria-hidden="true">
+    <div class="swipe-backdrop" id="swipe-backdrop" aria-hidden="true"></div>
+    <div class="swipe-sheet">
+    <header class="swipe-head">
+      <button id="swipe-close" class="swipe-close" type="button" aria-label="Назад к статистике">← Назад</button>
+      <div class="swipe-title">
+        <h2>Камеры и логи</h2>
+        <small>камеры — слева, логи — справа · свайп вправо чтобы закрыть</small>
+      </div>
+      <span class="swipe-live" id="swipe-live">● LIVE</span>
+    </header>
+    <div class="swipe-body">
+      <!-- левая часть — две камеры друг над другом -->
+      <div class="cam-stack">
+        <section class="cam-card" aria-label="Камера 1 передняя">
+          <header class="cam-head">
+            <h3>Камера 1 · передняя</h3>
+            <span class="cam-chip" id="cam1-chip">нет сигнала</span>
+          </header>
+          <div class="cam-viewport" id="cam1-view">
+            <canvas id="cam1-canvas" aria-label="Камера 1"></canvas>
+            <p class="cam-empty" id="cam1-empty">нет сигнала — демо-режим</p>
+            <span class="cam-rec" aria-hidden="true">● REC</span>
+          </div>
+          <footer class="cam-foot"><span id="cam1-meta">1920×1080 · 30 fps</span><span class="cam-dot ok"></span></footer>
+        </section>
+        <section class="cam-card" aria-label="Камера 2 кормовая">
+          <header class="cam-head">
+            <h3>Камера 2 · кормовая</h3>
+            <span class="cam-chip" id="cam2-chip">нет сигнала</span>
+          </header>
+          <div class="cam-viewport" id="cam2-view">
+            <canvas id="cam2-canvas" aria-label="Камера 2"></canvas>
+            <p class="cam-empty" id="cam2-empty">нет сигнала — демо-режим</p>
+            <span class="cam-rec" aria-hidden="true">● REC</span>
+          </div>
+          <footer class="cam-foot"><span id="cam2-meta">1920×1080 · 30 fps</span><span class="cam-dot warn"></span></footer>
+        </section>
+      </div>
+      <!-- правая колонка — логи на всю высоту -->
+      <aside class="log-panel" aria-label="Логи">
+        <header class="log-head">
+          <h3>Логи</h3>
+          <span class="log-count" id="log-count">—</span>
+          <button id="log-clear" class="log-clear" type="button">Очистить</button>
+          <button id="log-copy" class="log-clear" type="button" title="Копировать">Копировать</button>
+        </header>
+        <div id="log-list" class="log-list" role="log" aria-live="polite"></div>
+        <footer class="log-foot">
+          <span id="log-status">журнал аудита · /api/audit</span>
+          <label class="log-auto"><input id="log-autoscroll" type="checkbox" checked /> автопрокрутка</label>
+        </footer>
+      </aside>
+    </div>
+    </div>
+  </div>
+
+  <!-- ============ ОВЕРЛЕЙ УПРАВЛЕНИЯ: PIN + ФУНКЦИИ ============ -->
+  <div id="ctrl-overlay" class="ctrl-overlay" hidden aria-hidden="true">
+    <div class="ctrl-backdrop" id="ctrl-backdrop" aria-hidden="true"></div>
+    <div class="ctrl-sheet" role="dialog" aria-modal="true" aria-labelledby="ctrl-title" tabindex="-1">
+      <header class="ctrl-head">
+        <div class="ctrl-head-left">
+          <span class="ctrl-head-icon" aria-hidden="true">
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 1 1 8 0v3"/></svg>
+          </span>
+          <div>
+            <h2 id="ctrl-title">Управление роботом</h2>
+            <p id="ctrl-subtitle" class="ctrl-subtitle">введи PIN-код — откроются функции</p>
+          </div>
+        </div>
+        <button id="ctrl-close" class="ctrl-close" type="button" aria-label="Закрыть">✕</button>
+      </header>
+
+      <!-- === ЭКРАН 1: ПИН-КЛАВИАТУРА (сюда водить пальцами) === -->
+      <section id="pin-view" class="pin-view" aria-label="Ввод PIN-кода">
+        <div class="pin-dots-wrap">
+          <div id="pin-dots" class="pin-dots" aria-hidden="true">
+            <span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span>
+          </div>
+          <div id="pin-display" class="pin-display" aria-live="polite" aria-label="PIN">••••</div>
+          <p id="pin-hint" class="pin-hint">Води пальцем по цифрам — PIN 4–8 цифр</p>
+          <p id="pin-msg" class="pin-msg" role="status" aria-live="polite"></p>
+        </div>
+
+        <div class="pin-pad" id="pin-pad" role="group" aria-label="Цифровая клавиатура">
+          <button class="pad-btn" data-k="1" type="button"><span>1</span></button>
+          <button class="pad-btn" data-k="2" type="button"><span>2</span></button>
+          <button class="pad-btn" data-k="3" type="button"><span>3</span></button>
+          <button class="pad-btn" data-k="4" type="button"><span>4</span></button>
+          <button class="pad-btn" data-k="5" type="button"><span>5</span></button>
+          <button class="pad-btn" data-k="6" type="button"><span>6</span></button>
+          <button class="pad-btn" data-k="7" type="button"><span>7</span></button>
+          <button class="pad-btn" data-k="8" type="button"><span>8</span></button>
+          <button class="pad-btn" data-k="9" type="button"><span>9</span></button>
+          <button class="pad-btn pad-btn--util" data-k="C" type="button" aria-label="Очистить"><span>С</span></button>
+          <button class="pad-btn" data-k="0" type="button"><span>0</span></button>
+          <button class="pad-btn pad-btn--util" data-k="⌫" type="button" aria-label="Стереть"><span>⌫</span></button>
+        </div>
+
+        <div class="pin-actions">
+          <button id="pin-submit" class="btn btn-primary pin-submit" type="button">Открыть доступ</button>
+          <button id="pin-cancel" class="btn btn-ghost" type="button">Назад к статистике</button>
+        </div>
+        <p class="pin-footnote">Экран статистики остаётся без пароля — PIN нужен только для управления отсеком и сервисом</p>
+      </section>
+
+      <!-- === ЭКРАН 2: ФУНКЦИИ (после верного PIN) === -->
+      <section id="ctrl-view" class="ctrl-view" hidden aria-label="Функции управления">
+        <div class="ctrl-status-row">
+          <div id="ctrl-lock-chip" class="ctrl-chip">отсек: —</div>
+          <span id="ctrl-lock-detail" class="ctrl-detail">—</span>
+          <span id="ctrl-attempts" class="ctrl-attempts"></span>
+        </div>
+
+        <div class="ctrl-grid" role="list">
+          <!-- 1 — главная: отсек -->
+          <button id="btn-compartment" class="ctrl-card ctrl-card--accent" type="button" role="listitem">
+            <span class="ctrl-card-icon" aria-hidden="true">
+              <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="4" y="7" width="16" height="10" rx="2"/><path d="M9 7V5a3 3 0 0 1 6 0v2"/><circle cx="12" cy="12" r="1.8" fill="currentColor" stroke="none"/></svg>
+            </span>
+            <span class="ctrl-card-text">
+              <b id="compartment-title">Открыть отсек</b>
+              <small id="compartment-hint">грузовой отсек закрыт</small>
+            </span>
+            <span class="ctrl-card-arrow" aria-hidden="true">→</span>
+          </button>
+
+          <button class="ctrl-card" type="button" data-mock="Подсветка" role="listitem">
+            <span class="ctrl-card-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="4"/><path d="M12 2v2M12 20v2M2 12h2M20 12h2M4.93 4.93l1.41 1.41M17.66 17.66l1.41 1.41M4.93 19.07l1.41-1.41M17.66 6.34l1.41-1.41"/></svg></span>
+            <span class="ctrl-card-text"><b>Подсветка</b><small>вкл / выкл</small></span>
+          </button>
+
+          <button class="ctrl-card" type="button" data-mock="Сигнал" role="listitem">
+            <span class="ctrl-card-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 8h4l5-4v16l-5-4H3z"/><path d="M15 9a5 5 0 0 1 0 6"/><path d="M17 7a8 8 0 0 1 0 10"/></svg></span>
+            <span class="ctrl-card-text"><b>Сигнал</b><small>подать звук</small></span>
+          </button>
+
+          <button id="btn-themes" class="ctrl-card" type="button" role="listitem">
+            <span class="ctrl-card-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="3"/><path d="M12 2a10 10 0 0 1 10 10"/><path d="M12 2a10 10 0 0 0-10 10"/><path d="M2 12a10 10 0 0 0 10 10"/><path d="M22 12a10 10 0 0 1-10 10"/><circle cx="12" cy="12" r="1" fill="currentColor" stroke="none"/></svg></span>
+            <span class="ctrl-card-text"><b>Темы</b><small>20 видов — нажми чтобы выбрать</small></span>
+            <span class="ctrl-card-arrow" aria-hidden="true">→</span>
+          </button>
+
+          <button id="btn-reset-map" class="ctrl-card ctrl-card--danger" type="button" role="listitem" title="Сбросить накопленную карту лидара">
+            <span class="ctrl-card-icon"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/><path d="M12 7v5l4 2"/></svg></span>
+            <span class="ctrl-card-text"><b>Сброс карты</b><small>очистить карту лидара</small></span>
+            <span class="ctrl-card-arrow" aria-hidden="true">↻</span>
+          </button>
+
+        </div>
+
+        <div class="ctrl-actions">
+          <button id="ctrl-back" class="btn btn-ghost btn-large" type="button">← Вернуться к статистике</button>
+          <button id="ctrl-logout" class="btn btn-ghost btn-large" type="button">Запереть и выйти</button>
+        </div>
+        <p class="pin-footnote">Кнопка «Вернуться к статистике» — обратно к публичному экрану без пароля · отсек остаётся в выбранном положении</p>
+      </section>
+
+      <!-- === ЭКРАН 3: ТЕМЫ (20 видов, доступны только после PIN) === -->
+      <section id="themes-view" class="themes-view" hidden aria-label="Выбор темы оформления">
+        <div class="themes-head">
+          <button id="themes-back" class="btn btn-ghost" type="button">← Назад</button>
+          <h3>Выбери тему</h3>
+          <span class="themes-count">20 видов</span>
+        </div>
+        <p class="themes-hint">Нажми на тему — применится сразу на весь экран робота (и статистика, и панель). Сохранится автоматически.</p>
+        <div id="themes-grid" class="themes-grid" role="list"></div>
+        <div class="themes-foot">
+          <button id="themes-to-stats" class="btn btn-ghost btn-large" type="button">← Вернуться к статистике</button>
+        </div>
+      </section>
+
+      <!-- === ЭКРАН 4: СБРОС КАРТЫ (с подтверждением) === -->
+      <section id="reset-view" class="reset-view" hidden aria-label="Сброс карты лидара">
+        <div class="reset-head">
+          <button id="reset-back" class="btn btn-ghost" type="button">← Назад</button>
+          <h3>Сброс карты</h3>
+        </div>
+        <div class="reset-body">
+          <div class="reset-icon" aria-hidden="true">
+            <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8"><path d="M3 12a9 9 0 1 0 9-9 9.75 9.75 0 0 0-6.74 2.74L3 8"/><path d="M3 3v5h5"/></svg>
+          </div>
+          <h4>Очистить карту лидара?</h4>
+          <p>Будет удалена накопленная карта препятствий и проезды. Лидар начнёт строить карту заново. Действие нельзя отменить.</p>
+          <label class="reset-confirm">
+            <input type="checkbox" id="reset-confirm-check" />
+            <span>Подтверждаю сброс</span>
+          </label>
+          <div class="reset-actions">
+            <button id="reset-confirm" class="btn btn-primary btn-large" type="button" disabled>Да, сбросить</button>
+            <button id="reset-cancel" class="btn btn-ghost btn-large" type="button">Отмена</button>
+          </div>
+          <p id="reset-msg" class="reset-msg" role="status" aria-live="polite"></p>
+        </div>
+      </section>
     </div>
   </div>
 

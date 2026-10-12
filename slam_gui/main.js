@@ -459,13 +459,12 @@
   const LIDAR_RING_M = 2;          // шаг колец, м
 
   // Точки приходят как [{a: угол, рад (0 — вперёд, против часовой), r: дистанция, м}].
-  // Без данных карта остаётся пустой: ничего не выдумываем.
   function lidarPoints(d) {
     if (!Array.isArray(d.lidar)) return [];
     return d.lidar.filter((p) => p && Number.isFinite(p.a) && Number.isFinite(p.r) && p.r >= 0);
   }
 
-  function renderLidar(d) {
+  function renderLidar(view, d) {
     const canvas = $('lidar-canvas');
     if (!canvas) return;
     const pts = lidarPoints(d);
@@ -533,6 +532,51 @@
     setText($('route-to'), parts[1] || '—');
   }
 
+  /* ------------------------------------------------------------ камеры — передняя и задняя, ниже шасси (без симуляции) */
+  function renderCamera(view, d) {
+    const meta = $('cam-meta');
+    // без симуляции: камеры показывают реальный сигнал, пока его нет — «нет сигнала»
+    const hasCam = Array.isArray(d.cam) && d.cam.length || Array.isArray(d.camera) && d.camera.length;
+    if (meta) setText(meta, hasCam ? 'LIVE · 30 fps' : 'нет сигнала');
+    const front = $('cam-canvas');
+    const rear = $('cam-rear-canvas');
+    const emptyF = $('cam-empty');
+    const emptyR = $('cam-rear-empty');
+    // пока симуляции убраны — всегда показываем «нет сигнала» до появления реального потока
+    if (emptyF) emptyF.hidden = false;
+    if (emptyR) emptyR.hidden = false;
+    if (front) drawCamera(front, d, false, false);
+    if (rear) drawCamera(rear, d, false, true);
+  }
+
+  function drawCamera(canvas, d, live, isRear) {
+    const ctx = canvas.getContext && canvas.getContext('2d');
+    if (!ctx) return;
+    const dpr = window.devicePixelRatio || 1;
+    const rect = canvas.getBoundingClientRect();
+    const W = Math.round((rect.width || 360) * dpr);
+    const H = Math.round((rect.height || 200) * dpr);
+    if (canvas.width !== W || canvas.height !== H) {
+      canvas.width = W;
+      canvas.height = H;
+    }
+    const w = W, h = H;
+    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+    const cw = w / dpr, ch = h / dpr;
+    ctx.fillStyle = '#0b1411';
+    ctx.fillRect(0, 0, cw, ch);
+    ctx.fillStyle = '#6f877d';
+    ctx.font = '11px Inter, sans-serif';
+    ctx.textAlign = 'center';
+    ctx.fillText('нет сигнала — камера не подключена', cw/2, ch/2);
+    ctx.strokeStyle = 'rgba(255,255,255,.06)';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(cw*0.5, ch*0.22); ctx.lineTo(cw*0.5, ch*0.78);
+    ctx.moveTo(cw*0.22, ch*0.5); ctx.lineTo(cw*0.78, ch*0.5);
+    ctx.stroke();
+  }
+
   function render() {
     const view = currentView(Date.now());
     trackEvents(view);
@@ -547,7 +591,8 @@
     renderKpis(d, b);
     renderChassis(view, d, motors);
     applyDriveToWheels();
-    renderLidar(d);
+    renderCamera(view, d);
+    renderLidar(view, d);
     renderRoute(d);
     renderEvents();
     document.body.classList.toggle('is-stale', !view.live);

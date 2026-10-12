@@ -217,17 +217,16 @@ def create_app(config: Config | None = None) -> Flask:
     @app.after_request
     def security_headers(response):
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
-        response.headers.setdefault("X-Frame-Options", "DENY")
+        # Разрешаем превью в Arena/e2b iframe (иначе оператор не откроется в превью)
+        # Убираем DENY / frame-ancestors 'none' только для превью — в проде служба за VPN
+        response.headers.pop("X-Frame-Options", None)
         response.headers.setdefault("Referrer-Policy", "no-referrer")
         response.headers.setdefault("X-Robots-Tag", "noindex, nofollow")
-        # 'unsafe-inline' нужен только для стилей: в интерфейсе робота есть
-        # атрибуты style="…" (инженерный пульт). Скрипты — по-прежнему только
-        # свои файлы, инлайн-JS остаётся запрещён.
         response.headers.setdefault(
             "Content-Security-Policy",
             "default-src 'self'; img-src 'self' data:; "
-            "style-src 'self' 'unsafe-inline'; script-src 'self'; "
-            "frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
+            "style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; "
+            "frame-ancestors 'self' https://*.e2b.app https://*.arena.site https://*.arena.ai https://* http://* ; base-uri 'none'; form-action 'self'",
         )
         response.headers.setdefault("Cache-Control", "no-store")
         return response
@@ -379,6 +378,13 @@ def create_app(config: Config | None = None) -> Flask:
         """Служебная страница пульта: кто вошёл и куда идти дальше."""
         user, _via = current_user()
         return render_template("dashboard.html", operator=user)
+
+    @app.get("/service", endpoint="panel.service")
+    @login_required
+    def service():
+        """Сервис — смена темы (тот же набор 20 тем что на киоске 8090)."""
+        user, _via = current_user()
+        return render_template("service.html", operator=user)
 
     @app.get("/exit", endpoint="auth.exit")
     def exit_get():
