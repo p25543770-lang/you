@@ -46,7 +46,36 @@ journalctl -u robot-control -f
 Юнит запускает сервис под непривилегированным пользователем `robotctl` с
 `ProtectSystem=strict` и записью только в `data/` и `var/`.
 
-## 5. Точка доступа Wi-Fi
+## 5. Бортовой экран (киоск, порт 8090)
+
+Дисплей робота показывает только телеметрию: АКБ, мини-шасси, лидар. Вход не
+нужен — экран открыт только на чтение.
+
+```bash
+sudo cp scripts/robot-kiosk.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now robot-kiosk
+journalctl -u robot-kiosk -f
+```
+
+Служба держит сервер на 8090 с момента загрузки и перезапускается при падении.
+Чтобы после входа в систему экран открывался сам (браузер без рамок), поставьте
+ярлык и его автозапуск — под пользователем рабочего стола робота (не root):
+
+```bash
+./scripts/make_shortcut.sh
+```
+
+Запуск вручную (одной командой, поднимает и сервер, и браузер):
+
+```bash
+./scripts/kiosk.sh
+```
+
+Проверка: `curl http://127.0.0.1:8090/healthz` → `{"mode":"kiosk","ok":true,…}`.
+Остановить всё — `./scripts/stop.sh`.
+
+## 6. Точка доступа Wi-Fi
 
 ```bash
 sudo RC_AP_SSID=ROBOT RC_AP_PSK='придумайте-8-и-больше' ./scripts/setup_ap.sh
@@ -65,7 +94,7 @@ nmcli connection show robot-ap | grep -i 'connection.state'
 ip addr show | grep 10.42.0.1
 ```
 
-## 6. Проверка
+## 7. Проверка
 
 С телефона, подключённого к сети `ROBOT`: откройте `http://10.42.0.1:8080/` —
 должна появиться форма входа. После входа — страница-заглушка.
@@ -79,7 +108,7 @@ curl -i -o /dev/null -s -w '%{http_code} -> %{redirect_url}\n' http://127.0.0.1:
 
 Ожидается `200` с `{"status":"ok", ...}` и `302 -> .../login?next=/`.
 
-## 7. HTTPS (необязательно)
+## 8. HTTPS (необязательно)
 
 Кошелёк самоподписанного сертификата и запуск через HTTPS:
 

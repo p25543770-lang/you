@@ -36,6 +36,8 @@ BACKEND_PY = GUI_DIR / "backend.py"
 MAIN_PAGE = "main.html"
 CONSOLE_PAGE = "index.html"
 KIOSK_PAGE = "robot.html"
+#: Путь бортового экрана: его же открывает браузер на дисплее робота.
+KIOSK_URL_PATH = "/kiosk"
 
 #: Статика интерфейса: имя файла → endpoint. Отдаётся только этот список.
 ASSETS = {
@@ -186,7 +188,7 @@ def create_blueprint(state, guard=None) -> Blueprint:
     # --------- экран киоска на борту робота: без авторизации -------- #
     # Открывается локально в киоск-браузере на роботе (127.0.0.1);
     # показывает только АКБ, шасси и лидар — без пульта, без замка, без аудита.
-    @bp.get("/kiosk", endpoint="kiosk")
+    @bp.get(KIOSK_URL_PATH, endpoint="kiosk")
     def kiosk_screen():
         """Экран, который показывается на дисплее самого робота."""
         return _send(KIOSK_PAGE)

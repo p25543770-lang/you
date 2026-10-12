@@ -1,0 +1,43 @@
+# Бортовой экран робота (киоск) как служба Ubuntu: сервер на порту 8090.
+#
+# Экран открывается сразу после включения робота: служба отдаёт страницу и
+# телеметрию, а браузер на дисплее поднимает ярлык автозапуска рабочего стола
+# (его ставит scripts/make_shortcut.sh) или команда ./scripts/kiosk.sh.
+#
+# Установка:
+#   sudo useradd --system --home /opt/robot-control --shell /usr/sbin/nologin robotctl || true
+#   sudo mkdir -p /opt/robot-control && sudo cp -r . /opt/robot-control
+#   sudo chown -R robotctl:robotctl /opt/robot-control
+#   sudo cp scripts/robot-kiosk.service /etc/systemd/system/
+#   sudo systemctl daemon-reload
+#   sudo systemctl enable --now robot-kiosk
+#   journalctl -u robot-kiosk -f
+#
+# Порт можно поменять: RC_KIOSK_PORT=8091 в /opt/robot-control/.env
+#
+[Unit]
+Description=Robot onboard kiosk screen (telemetry, port 8090)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=robotctl
+Group=robotctl
+WorkingDirectory=/opt/robot-control
+EnvironmentFile=-/opt/robot-control/.env
+# Служба без графической сессии: браузер открывает рабочий стол робота.
+Environment=RC_KIOSK_OPEN=0
+TimeoutStopSec=10
+# venv проекта: в нём Flask (см. scripts/ensure_deps.sh)
+ExecStart=/opt/robot-control/.venv/bin/python /opt/robot-control/run_kiosk.py --no-open
+Restart=always
+RestartSec=2
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/robot-control/data /opt/robot-control/var
+
+[Install]
+WantedBy=multi-user.target
