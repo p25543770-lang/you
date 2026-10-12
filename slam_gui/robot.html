@@ -1,0 +1,153 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Экран робота</title>
+  <meta name="theme-color" content="#0a120f" />
+  <link rel="stylesheet" href="robot.css" />
+</head>
+<body class="kiosk-body">
+  <!--
+    Киоск-экран на борту робота. Рассчитан на дисплей 11.6" 1920×1080 (landscape):
+    слева — крупно АКБ и мини-шасси (как на пульте управления), справа — лидар
+    360° на всю высоту. Цифры крупные, чтобы было видно издалека.
+  -->
+  <div class="kiosk">
+    <header class="top">
+      <div class="brand">
+        <span class="brandmark" aria-hidden="true">
+          <svg width="32" height="32" viewBox="0 0 24 24" fill="none">
+            <path d="M4 14h16M7 10h10M9 6h6" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"/>
+            <circle cx="7" cy="18" r="2.2" fill="currentColor"/>
+            <circle cx="17" cy="18" r="2.2" fill="currentColor"/>
+          </svg>
+        </span>
+        <b>РУС СЛАМ · Бортовой экран</b>
+      </div>
+      <div class="top-right">
+        <span class="mode-pill" id="mode-pill">—</span>
+        <span class="chip" id="data-chip">ожидание</span>
+        <time class="clock" id="clock">--:--</time>
+      </div>
+    </header>
+
+    <div class="cols">
+      <!-- Левая колонка: АКБ + шасси -->
+      <div class="col-left">
+        <section class="battery-panel" aria-label="Состояние АКБ">
+          <article class="soc-big">
+            <span class="kpi-label">Заряд АКБ</span>
+            <b class="soc-value"><span id="k-soc">—</span><small>%</small></b>
+            <div class="battery-bar"><i id="k-soc-bar"></i></div>
+            <span class="kpi-sub" id="k-soc-state">—</span>
+          </article>
+          <div class="batt-grid">
+            <div class="batt-cell big">
+              <span class="cell-label">Напряжение</span>
+              <b><span id="k-volts">—</span><small> В</small></b>
+            </div>
+            <div class="batt-cell big">
+              <span class="cell-label">Ток</span>
+              <b><span id="k-amps">—</span><small> А</small></b>
+            </div>
+            <div class="batt-cell">
+              <span class="cell-label">Мощность</span>
+              <b><span id="k-power">—</span><small> кВт</small></b>
+            </div>
+            <div class="batt-cell">
+              <span class="cell-label">Запас хода</span>
+              <b><span id="k-range">—</span><small> км</small></b>
+            </div>
+            <div class="batt-cell">
+              <span class="cell-label">Темп. АКБ</span>
+              <b><span id="k-btemp">—</span><small> °C</small></b>
+            </div>
+          </div>
+        </section>
+
+        <section class="chassis" aria-labelledby="chassis-title">
+          <header class="section-head">
+            <h2 id="chassis-title">Шасси</h2>
+            <span class="panel-meta" id="chassis-meta">—</span>
+          </header>
+          <div class="chassis-grid">
+            <article class="mod tag-fl" id="mod-FL" data-tone="idle">
+              <header class="mod-head"><b class="mod-id">FL</b><span class="chip idle" id="mod-state-FL">—</span></header>
+              <div class="mod-metrics">
+                <div class="metric"><span class="metric-label">°</span><span class="metric-value"><b id="angle-FL">—</b></span></div>
+                <div class="metric"><span class="metric-label">об/м</span><span class="metric-value"><b id="rpm-FL">—</b></span></div>
+                <div class="metric"><span class="metric-label">°C</span><span class="metric-value"><b id="temp-FL">—</b></span></div>
+              </div>
+            </article>
+            <div class="axle axle-fl" aria-hidden="true"><div class="wheel" id="wheel-FL" data-tone="idle"><i class="wheel-dir"></i></div></div>
+
+            <div class="body" aria-label="Корпус робота">
+              <span class="body-end body-front">ПЕРЕД</span>
+              <div class="body-speed">
+                <b id="speed">—</b>
+                <small>м/с</small>
+              </div>
+              <span class="body-end body-rear">КОРМА</span>
+            </div>
+
+            <div class="axle axle-fr" aria-hidden="true"><div class="wheel" id="wheel-FR" data-tone="idle"><i class="wheel-dir"></i></div></div>
+            <article class="mod tag-fr" id="mod-FR" data-tone="idle">
+              <header class="mod-head"><b class="mod-id">FR</b><span class="chip idle" id="mod-state-FR">—</span></header>
+              <div class="mod-metrics">
+                <div class="metric"><span class="metric-label">°</span><span class="metric-value"><b id="angle-FR">—</b></span></div>
+                <div class="metric"><span class="metric-label">об/м</span><span class="metric-value"><b id="rpm-FR">—</b></span></div>
+                <div class="metric"><span class="metric-label">°C</span><span class="metric-value"><b id="temp-FR">—</b></span></div>
+              </div>
+            </article>
+
+            <article class="mod tag-rl" id="mod-RL" data-tone="idle">
+              <header class="mod-head"><b class="mod-id">RL</b><span class="chip idle" id="mod-state-RL">—</span></header>
+              <div class="mod-metrics">
+                <div class="metric"><span class="metric-label">°</span><span class="metric-value"><b id="angle-RL">—</b></span></div>
+                <div class="metric"><span class="metric-label">об/м</span><span class="metric-value"><b id="rpm-RL">—</b></span></div>
+                <div class="metric"><span class="metric-label">°C</span><span class="metric-value"><b id="temp-RL">—</b></span></div>
+              </div>
+            </article>
+            <div class="axle axle-rl" aria-hidden="true"><div class="wheel" id="wheel-RL" data-tone="idle"><i class="wheel-dir"></i></div></div>
+
+            <div class="axle axle-rr" aria-hidden="true"><div class="wheel" id="wheel-RR" data-tone="idle"><i class="wheel-dir"></i></div></div>
+            <article class="mod tag-rr" id="mod-RR" data-tone="idle">
+              <header class="mod-head"><b class="mod-id">RR</b><span class="chip idle" id="mod-state-RR">—</span></header>
+              <div class="mod-metrics">
+                <div class="metric"><span class="metric-label">°</span><span class="metric-value"><b id="angle-RR">—</b></span></div>
+                <div class="metric"><span class="metric-label">об/м</span><span class="metric-value"><b id="rpm-RR">—</b></span></div>
+                <div class="metric"><span class="metric-label">°C</span><span class="metric-value"><b id="temp-RR">—</b></span></div>
+              </div>
+            </article>
+          </div>
+        </section>
+      </div>
+
+      <!-- Правая колонка: лидар на всю высоту -->
+      <div class="col-right">
+        <section class="lidar" aria-labelledby="lidar-title">
+          <header class="section-head">
+            <h2 id="lidar-title">Лидар 360°</h2>
+            <span class="panel-meta" id="lidar-meta">нет скана</span>
+          </header>
+          <div class="lidar-body">
+            <div class="lidar-map">
+              <canvas id="lidar-canvas" aria-label="Карта лидара"></canvas>
+              <p class="lidar-empty" id="lidar-empty">скана лидара нет</p>
+              <div class="robot-marker" aria-hidden="true">▲</div>
+            </div>
+            <dl class="lidar-stats">
+              <div><dt>точек</dt><dd id="lidar-count">—</dd></div>
+              <div><dt>ближайшее</dt><dd id="lidar-near">—</dd></div>
+              <div><dt>дальность</dt><dd>10 м</dd></div>
+            </dl>
+          </div>
+        </section>
+      </div>
+    </div>
+  </div>
+
+  <script src="robot.js"></script>
+</body>
+</html>
