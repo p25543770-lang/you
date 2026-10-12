@@ -310,6 +310,20 @@ def create_app(config: Config | None = None) -> Flask:
                 store, throttle, username, password, ip, timing_hash=timing_hash
             )
             if operator is None:
+                # Клиенту — общее сообщение (не выдаём, существует ли логин),
+                # а в журнал — подробности: иначе «неверный пароль» невозможно
+                # диагностировать (смотри journalctl / вывод сервера).
+                log.warning(
+                    "неудачный вход: логин=%r с %s (%s)",
+                    username,
+                    ip,
+                    "блокировка"
+                    if reason.startswith("locked:")
+                    else {
+                        "no_store": "учётки не настроены",
+                        "inactive": "учётка отключена",
+                    }.get(reason, "неверный логин или пароль"),
+                )
                 if reason.startswith("locked:"):
                     seconds = int(reason.split(":", 1)[1])
                     return (

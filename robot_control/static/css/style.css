@@ -149,6 +149,17 @@ body {
 
 .muted { color: var(--muted); }
 
+/* Подсказка под формой входа: куда идти, если пароль не подходит. */
+.hint { font-size: 13px; margin-top: 18px; }
+.hint code {
+  font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+  font-size: 12px;
+  background: var(--panel-2);
+  border: 1px solid var(--line);
+  border-radius: 4px;
+  padding: 0 4px;
+}
+
 .field { display: block; margin: 14px 0; }
 
 .field-label { display: block; margin-bottom: 6px; font-size: 14px; color: var(--muted); }

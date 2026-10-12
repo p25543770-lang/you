@@ -91,6 +91,32 @@ def ensure_operator(config: Config) -> None:
 
 
 
+def log_operators(config: Config) -> None:
+    """Показать, какие учётки реально увидит сервер.
+
+    Главная диагностика «неверного пароля»: если человек вводит логин,
+    которого нет в этом списке (или учётка отключена), вход невозможен —
+    и это сразу видно в выводе запуска / journalctl.
+    """
+    from robot_control.auth import OperatorStore
+
+    try:
+        operators = OperatorStore(config.operators_file).load()
+    except (OSError, ValueError) as exc:
+        print(f"файл учёткок не читается: {exc}", file=sys.stderr)
+        return
+    if not operators:
+        return  # только что созданы выше — ensure_operator уже напечатал
+    print(f"учётки из {config.operators_file}:")
+    for op in sorted(operators.values(), key=lambda o: o.username.lower()):
+        state = "активна" if op.active else "ОТКЛЮЧЕНА (вход невозможен)"
+        print(f"  - {op.username} (роль {op.role}, {state})")
+    print(
+        "  забыли пароль — задайте заново: "
+        ".venv/bin/python scripts/create_operator.py --username <логин> --min-length 4"
+    )
+
+
 def run_gunicorn(config: Config) -> int:
     """Запустить gunicorn в текущем процессе (os.execv заменяет интерпретатор)."""
     argv = [
@@ -140,6 +166,7 @@ def main() -> int:
     ensure_env_file()
     config = Config.from_env()
     ensure_operator(config)
+    log_operators(config)
     if "--dev" in sys.argv:
         return run_dev(config)
     if importlib.util.find_spec("gunicorn") is None:
