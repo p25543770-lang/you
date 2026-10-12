@@ -936,7 +936,7 @@ body {
     align-items: start;
   }
   .stage .chassis { grid-column: 1; grid-row: 1; }
-  .stage .camera  { grid-column: 1; grid-row: 2; min-height: 260px; }
+  .stage .camera  { grid-column: 1; grid-row: 2; min-height: 340px; }
   .stage .lidar   { grid-column: 2; grid-row: 1 / span 2; align-self: stretch; }
   .stage .chassis,
   .stage .camera,
@@ -970,7 +970,7 @@ body {
   flex: 1 1 auto;
   min-height: 0;
   display: grid;
-  grid-template-columns: 1fr 1fr;
+  grid-template-columns: 1fr;
   gap: 8px;
 }
 .cam-viewport {
@@ -1200,8 +1200,8 @@ body.is-stale #route {
   .kpis { order: 5; grid-template-columns: repeat(2, minmax(0, 1fr)); }
   .kpi-soc { grid-column: 1 / -1; }
   .chassis { order: 6; flex: none; }
-  .camera { order: 7; flex: none; min-height: 260px; }
-  .camera .cam-viewport { min-height: 200px; }
+  .camera { order: 7; flex: none; min-height: 420px; }
+  .camera .cam-viewport { min-height: 160px; }
   .lidar { order: 8; flex: none; height: 240px; }
   .events {
     order: 9;
