@@ -39,7 +39,7 @@
   const SOURCE_NAME = { sim: 'симуляция', serial: 'UART ×4 · 20 Гц', ros: 'ROS 2', demo: 'демо-данные', master: 'мастер · UART', none: 'робот не подключён' };
 
   const params = new URLSearchParams(window.location.search);
-  const DEMO = false;
+  const DEMO = params.get('demo') === '1';
   const SESSION_TOKEN = params.get('st');   // сессия без cookie (как в slam_auth.js)
 
   /* ------------------------------------------------------------ помощники */
