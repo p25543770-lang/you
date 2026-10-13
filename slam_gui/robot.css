@@ -538,6 +538,17 @@ body.soc-crit .kpi-sub { color: var(--err); }
   justify-self: center;
   width: 100%;
 }
+/* Старые встроенные веб-движки на борту (CEF/QtWebEngine/старый Android WebView)
+   не умеют CSS aspect-ratio (добавлено только в 2021) — без него у .lidar-map
+   нет контентной высоты (все дети абсолютно спозиционированы), контейнер и
+   канва схлопываются в 0×0, и холст лидара навсегда остаётся пустым.
+   Запасной вариант — классический трюк с padding-bottom по ширине. */
+@supports not (aspect-ratio: 1 / 1) {
+  .lidar-map {
+    height: 0;
+    padding-bottom: 100%;
+  }
+}
 #lidar-canvas { width: 100%; height: 100%; display: block; }
 .lidar-empty {
   position: absolute; inset: 0;
