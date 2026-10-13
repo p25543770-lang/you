@@ -23,11 +23,14 @@ from werkzeug.serving import make_server
 from robot_control.config import Config
 from robot_control.kiosk_app import (
     DEFAULT_PORT,
+    _reopen_delay,
     browser_command,
     create_kiosk_app,
     display_available,
+    display_claimed,
     find_browser,
     kiosk_port,
+    kiosk_profile_dir,
     kiosk_url,
     open_kiosk_screen,
     parse_args,
@@ -142,9 +145,47 @@ def test_chromium_opens_without_frames():
     assert "--app=http://127.0.0.1:8090/kiosk" in args
 
 
+def test_chromium_uses_its_own_profile():
+    """Свой профиль: повторный запуск не «передаёт адрес» чужой копии браузера.
+
+    Без --user-data-dir процесс Chromium сразу выходит (окно открыла уже
+    работающая копия), сторожевой таймер считает это закрытием окна и
+    открывает экран снова и снова — окна плодятся.
+    """
+    args = browser_command(
+        "/usr/bin/chromium-browser", "http://127.0.0.1:8090/kiosk",
+        profile_dir="/tmp/robot-kiosk-profile",
+    )
+    assert "--user-data-dir=/tmp/robot-kiosk-profile" in args
+
+
 def test_firefox_opens_in_kiosk_mode():
-    args = browser_command("/usr/bin/firefox", "http://127.0.0.1:8090/kiosk")
-    assert args == ["/usr/bin/firefox", "--kiosk", "http://127.0.0.1:8090/kiosk"]
+    args = browser_command(
+        "/usr/bin/firefox", "http://127.0.0.1:8090/kiosk",
+        profile_dir="/tmp/robot-kiosk-profile",
+    )
+    assert args == [
+        "/usr/bin/firefox", "--kiosk", "--no-remote",
+        "--profile", "/tmp/robot-kiosk-profile",
+        "http://127.0.0.1:8090/kiosk",
+    ]
+
+
+def test_kiosk_profile_dir_from_environment(monkeypatch):
+    monkeypatch.setenv("RC_KIOSK_PROFILE_DIR", "/tmp/custom-kiosk")
+    assert kiosk_profile_dir() == Path("/tmp/custom-kiosk")
+    monkeypatch.delenv("RC_KIOSK_PROFILE_DIR")
+    monkeypatch.setenv("XDG_CACHE_HOME", "/tmp/cache")
+    assert kiosk_profile_dir() == Path("/tmp/cache/robot-kiosk-browser")
+
+
+def test_reopen_delay_grows_for_instantly_exiting_browser():
+    """Браузер выходит сразу — не долбим его каждые 2 секунды очередями окон."""
+    assert _reopen_delay(0) == 2.0
+    assert _reopen_delay(1) == 2.0
+    assert _reopen_delay(2) == 4.0
+    assert _reopen_delay(3) == 8.0
+    assert _reopen_delay(100) == 30.0  # потолок
 
 
 def test_browser_can_be_set_explicitly(monkeypatch):
@@ -238,6 +279,60 @@ def test_screen_reopens_if_browser_was_closed(config, fake_browser, monkeypatch)
         server.server_close()
         thread.join(timeout=5)
     assert len(opened) >= 2, f"экран не открылся заново: {opened}"
+
+
+@pytest.fixture
+def long_lived_browser(tmp_path: Path) -> Path:
+    """«Браузер», который не выходит сразу: окно как будто открыто."""
+    marker = tmp_path / "opened.txt"
+    script = tmp_path / "long-browser.sh"
+    script.write_text(
+        "#!/bin/sh\n"
+        f'echo "$@" >> "{marker}"\n'
+        "sleep 60\n",
+        encoding="utf-8",
+    )
+    script.chmod(script.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    return script
+
+
+def test_screen_is_not_opened_twice(config, long_lived_browser, monkeypatch):
+    """Главное: повторный запуск не плодит окна — экран строго в одном экземпляре.
+
+    Автозапуск рабочего стола, ярлык и ручной kiosk.sh приводят сюда же:
+    кто первый занял показ, тот окно и держит, остальные получают отказ.
+    """
+    monkeypatch.setenv("RC_KIOSK_BROWSER", str(long_lived_browser))
+    server = make_server("127.0.0.1", 0, create_kiosk_app(config), threaded=True)
+    port = server.server_port
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    stop = threading.Event()
+    stop2 = threading.Event()
+    marker = long_lived_browser.parent / "opened.txt"
+    try:
+        first = open_kiosk_screen(port, watch=True, stop_event=stop)
+        assert first is not None
+        assert _wait_for(marker, 1), "первый экран не открылся"
+        assert display_claimed(port) is True
+
+        # Второй и третий показы того же порта — отказ, а не новое окно.
+        assert open_kiosk_screen(port, watch=True, stop_event=threading.Event()) is None
+        assert open_kiosk_screen(port, watch=False, stop_event=threading.Event()) is None
+        assert len(_wait_for(marker, 1)) == 1, "экран открылся повторно"
+
+        # Показ остановлен — замок отпущен, экран можно открыть снова.
+        stop.set()
+        first.join(timeout=10)
+        assert display_claimed(port) is False
+        assert open_kiosk_screen(port, watch=True, stop_event=stop2) is not None
+        assert len(_wait_for(marker, 2)) == 2
+    finally:
+        stop.set()
+        stop2.set()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
 
 
 # ----------------------------------- запуск ---------------------------------- #
