@@ -55,10 +55,14 @@ journalctl -u robot-control -f
 автоподъём точки доступа):
 
 ```bash
-./scripts/autostart.sh status   # что поднимается само
-./scripts/autostart.sh off      # выключить автозапуск целиком
-./scripts/autostart.sh on       # вернуть автозапуск
+./scripts/autostart.sh status              # что поднимается само
+./scripts/autostart.sh off                 # выключить автозапуск И остановить всё сейчас
+./scripts/autostart.sh off --keep-running  # только выключить автозапуск
+./scripts/autostart.sh on                  # вернуть автозапуск
 ```
+
+Полностью погасить приложение, не трогая автозапуск, — `./scripts/stop.sh`
+(серверы по pid-файлам, службы, окно киоска).
 
 ## 4b. Лидар (USB/UART)
 
@@ -124,7 +128,9 @@ journalctl -u robot-kiosk -f
 ```
 
 Проверка: `curl http://127.0.0.1:8090/healthz` → `{"mode":"kiosk","ok":true,…}`.
-Остановить всё — `./scripts/stop.sh`.
+Остановить всё запущенное — `./scripts/stop.sh` (пульт, экран, службы, окно
+киоска). Выключить ещё и автозапуск, чтобы робот больше не поднимал приложение
+сам, — `./scripts/autostart.sh off`.
 
 Если вместо экрана Firefox пишет «Your Firefox profile cannot be loaded.
 It may be missing or inaccessible» — это snap-сборка: ей нельзя отдать

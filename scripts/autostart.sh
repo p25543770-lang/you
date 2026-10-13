@@ -14,23 +14,32 @@
 # выключает всё это, а `on` возвращает обратно.
 #
 # Использование:
-#   ./scripts/autostart.sh status   # что поднимается само (по умолчанию)
-#   ./scripts/autostart.sh off      # выключить автозапуск целиком
-#   ./scripts/autostart.sh on       # вернуть автозапуск
+#   ./scripts/autostart.sh status           # что поднимается само (по умолчанию)
+#   ./scripts/autostart.sh off              # выключить автозапуск И остановить всё сейчас
+#   ./scripts/autostart.sh off --keep-running   # выключить только автозапуск,
+#                                           # запущенное продолжает работать до перезагрузки
+#   ./scripts/autostart.sh on               # вернуть автозапуск
 #
 # Что проверяет и меняет:
-#   * службы systemd: robot-control (пульт), robot-kiosk (экран) — enable/disable;
+#   * службы systemd: robot-control (пульт), robot-kiosk (экран);
 #   * ярлык экрана в автозапуске сеанса: ~/.config/autostart/robot-kiosk.desktop;
-#   * автоподъём точки доступа Wi-Fi robot-ap (connection.autoconnect).
+#   * автоподъём точки доступа Wi-Fi robot-ap (connection.autoconnect);
+#   * строки автозапуска в cron, если кто-то прописал их руками (о них
+#     скрипт только предупреждает — правьте сами: crontab -e).
 #
-# Уже запущенные серверы скрипт не трогает поодиночке: `off` выключает именно
-# службы (systemctl disable --now), а вручную запущенные останавливает
-# ./scripts/stop.sh.
+# `off` без флагов = «выключить всё»: и автозапуск, и то, что уже запущено
+# (службы через disable --now, вручную запущенные серверы и окно киоска —
+# через ./scripts/stop.sh).
 #
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 ACTION="${1:-status}"
+shift || true
+if [[ "$ACTION" == "-h" || "$ACTION" == "--help" ]]; then
+  sed -n '2,32p' "$0"
+  exit 0
+fi
 UNITS=(robot-control robot-kiosk)
 UNIT_TITLES=("пульт оператора (8080)" "бортовой экран (8090)")
 AUTOSTART_DIR="${HOME}/.config/autostart"
@@ -40,6 +49,17 @@ AP_CONN="robot-ap"
 log()  { printf '\033[1;32m[autostart]\033[0m %s\n' "$*"; }
 warn() { printf '\033[1;33m[autostart]\033[0m %s\n' "$*"; }
 die()  { printf '\033[1;31m[autostart]\033[0m %s\n' "$*" >&2; exit 1; }
+
+# Флаги разбираем после определения log/warn/die: иначе сообщение об
+# неизвестном аргументе печатала бы ещё не объявленная функция.
+KEEP_RUNNING=0
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --keep-running) KEEP_RUNNING=1; shift ;;
+    -h|--help)      sed -n '2,32p' "$0"; exit 0 ;;
+    *) die "неизвестный аргумент: $1 (см. --help)" ;;
+  esac
+done
 
 # Для systemctl и nmcli нужен root: сами зовём sudo, если он есть.
 SUDO=""
@@ -80,6 +100,15 @@ autostart_file() {
     fi
   done
   return 0
+}
+
+cron_lines() {
+  # Строки автозапуска, которые кто-то прописал в cron руками. Мы их не
+  # создаём и не удаляем — только показываем, иначе «оно всё равно стартует
+  # само» остаётся без объяснения.
+  command -v crontab >/dev/null 2>&1 || return 0
+  crontab -l 2>/dev/null | grep -Ev '^[[:space:]]*(#|$)' \
+    | grep -E 'start\.sh|kiosk\.sh|start_desktop\.sh|run\.py|run_kiosk\.py|robot-control' || true
 }
 
 ap_exists() {
@@ -144,20 +173,33 @@ if [[ $ACTION == "status" ]]; then
     echo "  • точка доступа Wi-Fi robot-ap: автоподъём выключен"
   fi
 
+  cron="$(cron_lines)"
+  if [[ -n "$cron" ]]; then
+    echo "  • cron: есть строки автозапуска (скрипт их не трогает):"
+    echo "$cron" | sed 's/^/      /'
+    echo "    убрать: crontab -e"
+    auto_count=$((auto_count + 1))
+  fi
+
   echo
   if [[ $auto_count -eq 0 ]]; then
     echo "Итог: само ничего не запускается."
     print_manual_hint
   else
     echo "Итог: автозапуск включён ($auto_count шт.)."
-    echo "Выключить: ./scripts/autostart.sh off"
+    echo "Выключить и остановить всё сейчас: ./scripts/autostart.sh off"
+    echo "Выключить только автозапуск:      ./scripts/autostart.sh off --keep-running"
   fi
   exit 0
 fi
 
 # --------------------------------------------------------------------- off --- #
 if [[ $ACTION == "off" || $ACTION == "disable" ]]; then
-  log "выключаю автозапуск приложения…"
+  if [[ $KEEP_RUNNING -eq 1 ]]; then
+    log "выключаю автозапуск приложения (запущенное не трогаю)…"
+  else
+    log "выключаю автозапуск приложения и останавливаю всё запущенное…"
+  fi
 
   if have_systemd; then
     for index in "${!UNITS[@]}"; do
@@ -167,7 +209,15 @@ if [[ $ACTION == "off" || $ACTION == "disable" ]]; then
         echo "  служба $unit не установлена — пропускаю"
         continue
       fi
-      if $SUDO systemctl disable --now "$unit.service" >/dev/null 2>&1; then
+      # --keep-running: только запрещаем автозапуск (disable), но не глушим
+      # службу — она доработает до перезагрузки.
+      if [[ $KEEP_RUNNING -eq 1 ]]; then
+        if $SUDO systemctl disable "$unit.service" >/dev/null 2>&1; then
+          log "$title: автозапуск выключен (служба продолжает работать)"
+        else
+          warn "$title: не удалось выключить автозапуск — проверь: systemctl status $unit"
+        fi
+      elif $SUDO systemctl disable --now "$unit.service" >/dev/null 2>&1; then
         log "$title: автозапуск выключен, служба остановлена"
       else
         warn "$title: не удалось выключить — проверь: systemctl status $unit"
@@ -199,6 +249,23 @@ if [[ $ACTION == "off" || $ACTION == "disable" ]]; then
     fi
   fi
 
+  cron="$(cron_lines)"
+  if [[ -n "$cron" ]]; then
+    warn "в cron есть строки автозапуска — их скрипт не трогает, убери руками (crontab -e):"
+    echo "$cron" | sed 's/^/      /'
+  fi
+
+  if [[ $KEEP_RUNNING -eq 0 ]]; then
+    echo
+    if [[ -x ./scripts/stop.sh ]]; then
+      log "останавливаю то, что запущено сейчас…"
+      ./scripts/stop.sh || warn "остановить всё не удалось — см. сообщения выше"
+    else
+      warn "scripts/stop.sh не найден — запущенные серверы не останавливаю"
+    fi
+  fi
+
+  echo
   log "готово: после загрузки робота приложение само не запускается"
   print_manual_hint
   exit 0

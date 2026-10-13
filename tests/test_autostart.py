@@ -4,15 +4,19 @@
 `install_ubuntu.sh` больше не включает автозапуск без флага, `make_shortcut.sh`
 не ставит ярлык экрана в автозапуск сеанса, а `scripts/autostart.sh` умеет
 показать, выключить и вернуть автозапуск (службы systemd, ярлык сеанса,
-автоподъём точки доступа Wi-Fi).
+автоподъём точки доступа Wi-Fi). `autostart.sh off` = «выключить всё»: он ещё
+и останавливает запущенное (через `scripts/stop.sh`), а `--keep-running`
+выключает только автозапуск. `scripts/stop.sh` останавливает и серверы по
+pid-файлам, и службы, и окно киоск-браузера.
 """
 
 from __future__ import annotations
 
 import os
-import shutil
+import signal
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -64,6 +68,7 @@ def fake_host(tmp_path, monkeypatch):
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("PATH", "%s%s%s" % (shims, os.pathsep, os.environ.get("PATH", "")))
     monkeypatch.setenv("FAKE_LOG", str(log))
+    monkeypatch.setenv("RC_VAR_DIR", str(tmp_path / "var"))
     monkeypatch.delenv("DISPLAY", raising=False)
 
     class Host:
@@ -157,6 +162,100 @@ def test_autostart_on_enables_services_and_session_entry(fake_host):
     assert "enable --now robot-control.service" in calls
     assert "enable --now robot-kiosk.service" in calls
     assert autostart_file(fake_host.root).is_file(), "ярлык автозапуска сеанса должен появиться"
+
+
+def spawn_fake_server(var_dir: Path, *, name: str = "run.pid") -> subprocess.Popen:
+    """Запускает «сервер» (долгоживущий процесс) и кладёт его pid в var/, как start.sh."""
+    process = subprocess.Popen(["sleep", "60"], start_new_session=True)
+    var_dir.mkdir(parents=True, exist_ok=True)
+    (var_dir / name).write_text("%d\n" % process.pid, encoding="utf-8")
+    return process
+
+
+def alive(process: subprocess.Popen) -> bool:
+    return process.poll() is None
+
+
+def wait_dead(process: subprocess.Popen, timeout: float = 5.0) -> bool:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        if process.poll() is not None:
+            return True
+        time.sleep(0.05)
+    return False
+
+
+def test_autostart_off_stops_what_is_running(fake_host, tmp_path):
+    """`off` без флагов = выключить всё: и автозапуск, и то, что запущено сейчас."""
+    var_dir = tmp_path / "var"
+    server = spawn_fake_server(var_dir)
+    try:
+        result = run("autostart.sh", "off")
+        assert result.returncode == 0, result.stderr
+        assert wait_dead(server), "запущенный сервер должен быть остановлен"
+        assert not (var_dir / "run.pid").exists(), "pid-файл должен быть убран"
+        assert "останавливаю то, что запущено сейчас" in result.stdout
+    finally:
+        if alive(server):
+            server.kill()
+            server.wait(timeout=5)
+
+
+def test_autostart_off_keep_running_only_disables(fake_host, tmp_path):
+    """`off --keep-running` выключает автозапуск, но не глушит запущенное."""
+    var_dir = tmp_path / "var"
+    server = spawn_fake_server(var_dir)
+    try:
+        result = run("autostart.sh", "off", "--keep-running")
+        assert result.returncode == 0, result.stderr
+        assert alive(server), "с --keep-running работающий сервер остаётся"
+        assert (var_dir / "run.pid").exists()
+        assert "запущенное не трогаю" in result.stdout
+        calls = fake_host.calls.read_text(encoding="utf-8")
+        assert "disable robot-control.service" in calls
+        assert "disable --now robot-control.service" not in calls
+    finally:
+        server.kill()
+        server.wait(timeout=5)
+
+
+def test_autostart_off_rejects_unknown_flag(fake_host):
+    result = run("autostart.sh", "off", "--не-флаг")
+    assert result.returncode != 0
+    assert "неизвестный аргумент" in result.stderr
+
+
+def test_stop_sh_stops_servers_from_pid_files(fake_host, tmp_path):
+    """stop.sh гасит и пульт, и экран по pid-файлам, и убирает сами файлы."""
+    var_dir = tmp_path / "var"
+    control = spawn_fake_server(var_dir, name="run.pid")
+    kiosk = spawn_fake_server(var_dir, name="kiosk.pid")
+    try:
+        result = run("stop.sh", "--servers")
+        assert result.returncode == 0, result.stderr
+        assert wait_dead(control) and wait_dead(kiosk)
+        assert not any(var_dir.iterdir()), "pid-файлы должны быть удалены"
+        assert "Всё остановлено" in result.stdout
+        # --servers не трогает службы: ими занимается autostart.sh off
+        assert "systemctl" not in fake_host.calls.read_text(encoding="utf-8")
+    finally:
+        for process in (control, kiosk):
+            if alive(process):
+                process.kill()
+                process.wait(timeout=5)
+
+
+def test_stop_sh_reports_nothing_running(fake_host):
+    result = run("stop.sh")
+    assert result.returncode == 0, result.stderr
+    assert "Запущенного приложения не найдено" in result.stdout
+    assert "autostart.sh" in result.stdout
+
+
+def test_stop_sh_help_explains_autostart_separation(fake_host):
+    result = run("stop.sh", "--help")
+    assert result.returncode == 0, result.stderr
+    assert "autostart.sh off" in result.stdout
 
 
 # ------------------------------------------------------------- ярлыки на рабочем столе --- #
