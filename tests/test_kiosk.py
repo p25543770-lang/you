@@ -23,6 +23,7 @@ from werkzeug.serving import make_server
 from robot_control.config import Config
 from robot_control.kiosk_app import (
     DEFAULT_PORT,
+    PROFILE_DIR_NAME,
     _reopen_delay,
     browser_command,
     create_kiosk_app,
@@ -35,6 +36,8 @@ from robot_control.kiosk_app import (
     open_kiosk_screen,
     parse_args,
     port_in_use,
+    prepare_browser_profile,
+    snap_name,
     wait_for_server,
 )
 
@@ -169,6 +172,205 @@ def test_firefox_opens_in_kiosk_mode():
         "--profile", "/tmp/robot-kiosk-profile",
         "http://127.0.0.1:8090/kiosk",
     ]
+
+
+def test_snap_name_from_path_and_wrapper(tmp_path: Path):
+    """Ubuntu кладёт в PATH обёртку, а не сам бинарник snap."""
+    assert snap_name("/snap/bin/firefox") == "firefox"
+    assert snap_name("/snap/bin/firefox.geckodriver") == "firefox"
+    assert snap_name("/snap/firefox/current/usr/lib/firefox/firefox") == "firefox"
+    assert snap_name(str(tmp_path / "no-such-firefox")) is None
+
+    wrapper = tmp_path / "firefox"
+    wrapper.write_text("#!/bin/sh\nexec /snap/bin/firefox \"$@\"\n", encoding="utf-8")
+    assert snap_name(str(wrapper)) == "firefox"
+
+    via_run = tmp_path / "chromium-browser"
+    via_run.write_text("#!/bin/sh\nexec snap run chromium \"$@\"\n", encoding="utf-8")
+    assert snap_name(str(via_run)) == "chromium"
+
+    native = tmp_path / "firefox-bin"
+    native.write_bytes(b"\x7fELF")
+    assert snap_name(str(native)) is None
+
+
+def test_prepare_creates_missing_firefox_profile(tmp_path, monkeypatch):
+    """Каталога нет — Firefox сам его не создаст и покажет «profile cannot be loaded»."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("RC_KIOSK_PROFILE_DIR", raising=False)
+    monkeypatch.setenv("XDG_CACHE_HOME", str(home / "cache"))
+    exe = tmp_path / "firefox"
+    exe.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+
+    profile = prepare_browser_profile(str(exe))
+
+    assert profile == (home / "cache" / PROFILE_DIR_NAME).resolve()
+    assert profile.is_dir()
+    assert oct(profile.stat().st_mode & 0o777) == "0o700"
+    text = (profile / "user.js").read_text(encoding="utf-8")
+    assert "browser.shell.checkDefaultBrowser" in text
+    assert "browser.sessionstore.resume_from_crash" in text
+
+
+def test_prepare_does_not_clobber_existing_user_js(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(home / "cache"))
+    exe = tmp_path / "firefox"
+    exe.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    profile = prepare_browser_profile(str(exe))
+    (profile / "user.js").write_text("user_pref(\"custom\", true);\n", encoding="utf-8")
+
+    again = prepare_browser_profile(str(exe))
+
+    assert again == profile
+    assert (profile / "user.js").read_text(encoding="utf-8") == "user_pref(\"custom\", true);\n"
+
+
+def test_snap_firefox_profile_is_not_in_a_hidden_dir(tmp_path, monkeypatch):
+    """Snap не читает ~/.cache — оттуда и диалог «profile cannot be loaded»."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("RC_KIOSK_PROFILE_DIR", raising=False)
+    monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+    exe = tmp_path / "firefox"
+    exe.write_text("#!/bin/sh\nexec /snap/bin/firefox \"$@\"\n", encoding="utf-8")
+
+    profile = prepare_browser_profile(str(exe))
+
+    expected = home / "snap" / "firefox" / "common" / PROFILE_DIR_NAME
+    assert profile == expected.resolve()
+    assert profile.is_dir()
+    assert (profile / "user.js").is_file()
+    assert not any(part.startswith(".") for part in profile.relative_to(home.resolve()).parts)
+
+
+def test_snap_keeps_explicit_visible_profile(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    visible = home / "kiosk-profile"
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("RC_KIOSK_PROFILE_DIR", str(visible))
+    exe = tmp_path / "firefox"
+    exe.write_text("#!/bin/sh\nexec snap run firefox \"$@\"\n", encoding="utf-8")
+
+    profile = prepare_browser_profile(str(exe))
+
+    assert profile == visible.resolve()
+    assert profile.is_dir()
+
+
+def test_snap_relocates_tmp_and_hidden_profiles(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    exe = tmp_path / "firefox"
+    exe.write_text("#!/bin/sh\nexec /snap/bin/firefox \"$@\"\n", encoding="utf-8")
+    expected = (home / "snap" / "firefox" / "common" / PROFILE_DIR_NAME).resolve()
+
+    from_tmp = prepare_browser_profile(str(exe), profile_dir=tmp_path / "outside")
+    from_hidden = prepare_browser_profile(
+        str(exe), profile_dir=home / ".cache" / PROFILE_DIR_NAME,
+    )
+
+    assert from_tmp == expected
+    assert from_hidden == expected
+
+
+def test_snap_falls_back_to_visible_home_dir_when_snap_tree_is_blocked(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    (home / "snap").write_text("not a directory", encoding="utf-8")
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("RC_KIOSK_PROFILE_DIR", raising=False)
+    exe = tmp_path / "firefox"
+    exe.write_text("#!/bin/sh\nexec /snap/bin/firefox \"$@\"\n", encoding="utf-8")
+
+    profile = prepare_browser_profile(str(exe))
+
+    assert profile == (home / PROFILE_DIR_NAME).resolve()
+    assert profile.is_dir()
+    assert (profile / "user.js").is_file()
+
+
+def test_chromium_snap_gets_a_visible_profile_without_firefox_prefs(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("RC_KIOSK_PROFILE_DIR", raising=False)
+    exe = tmp_path / "chromium-browser"
+    exe.write_text("#!/bin/sh\nexec /snap/bin/chromium \"$@\"\n", encoding="utf-8")
+
+    profile = prepare_browser_profile(str(exe))
+
+    assert profile == (home / "snap" / "chromium" / "common" / PROFILE_DIR_NAME).resolve()
+    assert profile.is_dir()
+    assert not (profile / "user.js").exists()
+
+
+def test_stale_firefox_lock_is_cleared_and_live_lock_is_kept(tmp_path, monkeypatch):
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("XDG_CACHE_HOME", str(home / "cache"))
+    exe = tmp_path / "firefox"
+    exe.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+
+    profile = prepare_browser_profile(str(exe))
+    (profile / "lock").symlink_to("127.0.0.1:+999999999")
+    (profile / ".parentlock").write_text("", encoding="utf-8")
+    prepare_browser_profile(str(exe))
+    assert not (profile / "lock").exists()
+    assert not (profile / ".parentlock").exists()
+
+    (profile / "lock").symlink_to(f"127.0.0.1:+{os.getpid()}")
+    prepare_browser_profile(str(exe))
+    assert (profile / "lock").is_symlink()
+
+
+def test_screen_launches_snap_firefox_with_a_readable_profile(config, tmp_path, monkeypatch):
+    """Окно ошибки больше не из чего рисовать: каталог есть и snap его видит."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.delenv("RC_KIOSK_PROFILE_DIR", raising=False)
+    monkeypatch.delenv("XDG_CACHE_HOME", raising=False)
+    marker = tmp_path / "opened.txt"
+    script = tmp_path / "firefox"
+    script.write_text(
+        "#!/bin/sh\n"
+        "# Ubuntu wrapper: exec /snap/bin/firefox \"$@\"\n"
+        f'echo "$@" >> "{marker}"\n',
+        encoding="utf-8",
+    )
+    script.chmod(script.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    monkeypatch.setenv("RC_KIOSK_BROWSER", str(script))
+
+    server = make_server("127.0.0.1", 0, create_kiosk_app(config), threaded=True)
+    port = server.server_port
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    stop = threading.Event()
+    try:
+        open_kiosk_screen(port, watch=False, stop_event=stop)
+        opened = _wait_for(marker, 1)
+    finally:
+        stop.set()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    expected = (home / "snap" / "firefox" / "common" / PROFILE_DIR_NAME).resolve()
+    assert opened, "экран не открылся"
+    assert "--profile" in opened[0]
+    assert str(expected) in opened[0]
+    assert expected.is_dir()
+    assert (expected / "user.js").is_file()
+    assert "--kiosk" in opened[0]
 
 
 def test_kiosk_profile_dir_from_environment(monkeypatch):

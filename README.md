@@ -129,6 +129,14 @@ Wi-Fi-сеть и подключаться к пульту через неё.
 причине, пауза между переоткрытиями растёт (2 → 4 → 8 … до 30 с), а не
 плодит окна очередями.
 
+Каталог профиля создаётся до запуска браузера. Firefox с `--profile` сам
+его не создаёт и иначе показывает **«Your Firefox profile cannot be loaded.
+It may be missing or inaccessible.»** На Ubuntu Firefox (и часто Chromium) —
+это snap: он не видит скрытые каталоги (`~/.cache`) и чужой `/tmp`. Для
+snap профиль кладётся в `~/snap/<имя>/common/robot-kiosk-browser` — туда
+snap писать может. Свой `RC_KIOSK_PROFILE_DIR` используется, только если
+этот путь snap-у доступен.
+
 Флаги: `--no-open` — только сервер (для службы или если графики нет);
 `--open` — открыть экран принудительно; `--port 8091` — другой порт;
 `--source sim|serial|ros|auto` — источник показаний.
@@ -410,7 +418,7 @@ tests/
 | `RC_KIOSK_OPEN` | `1`, если есть дисплей | открывать экран в браузере; `0` — только сервер |
 | `RC_KIOSK_WATCHDOG` | `1` | снова открывать экран, если браузер закрыли |
 | `RC_KIOSK_BROWSER` | автопоиск | браузер для киоск-режима (chromium/chrome/firefox) |
-| `RC_KIOSK_PROFILE_DIR` | `~/.cache/robot-kiosk-browser` | отдельный профиль браузера киоска (не даёт окну дублироваться) |
+| `RC_KIOSK_PROFILE_DIR` | `~/.cache/robot-kiosk-browser` | отдельный профиль браузера киоска (не даёт окну дублироваться). Для snap Firefox/Chromium скрытый путь автоматически заменяется на `~/snap/<имя>/common/robot-kiosk-browser`, иначе профиль «не загружается» |
 
 При работе по HTTPS включите `RC_COOKIE_SECURE=true`, чтобы cookie сессии
 помечалась как `Secure`.

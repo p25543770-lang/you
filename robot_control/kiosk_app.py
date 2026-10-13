@@ -15,12 +15,19 @@
 держат flock-замок на время жизни окна, а браузеру дают отдельный профиль —
 иначе Chromium просто передаёт адрес уже запущенной копии и сразу выходит,
 а сторожевой таймер принимал бы это за «браузер закрыли» и плодил окна.
+
+Firefox с ``--profile`` каталог сам не создаёт. На Ubuntu он ещё и snap:
+скрытый ``~/.cache`` и чужой ``/tmp`` ему недоступны. И то и другое
+заканчивается окном «Your Firefox profile cannot be loaded. It may be
+missing or inaccessible.» Перед запуском профиль создаётся там, где
+браузер его действительно прочитает.
 """
 from __future__ import annotations
 
 import argparse
 import logging
 import os
+import re
 import secrets
 import shutil
 import socket
@@ -54,6 +61,37 @@ log = logging.getLogger("robot_control.kiosk")
 
 #: Порт бортового экрана. 8080 занят пультом оператора, поэтому киоск живёт рядом.
 DEFAULT_PORT = 8090
+
+#: Имя каталога профиля киоска — и в кэше, и в ~/snap/<имя>/common.
+PROFILE_DIR_NAME = "robot-kiosk-browser"
+
+# Обёртка Ubuntu («/usr/bin/firefox» → snap) и прямой бинарник snap.
+_SNAP_BIN_RE = re.compile(rb"/snap/bin/([A-Za-z0-9][A-Za-z0-9._-]*)")
+_SNAP_RUN_RE = re.compile(
+    rb"\bsnap\s+run\s+(?:--\S+\s+)*([A-Za-z0-9][A-Za-z0-9._-]*)"
+)
+_FIREFOX_LOCK_PID_RE = re.compile(r"\+(\d+)\s*$")
+
+# Глушит окна первого запуска, которые иначе закрывают телеметрию.
+# Пишется только если своего user.js ещё нет — ручные правки не затираем.
+_FIREFOX_USER_JS = """\
+// Профиль бортового экрана робота. Firefox читает файл при каждом старте.
+user_pref("browser.shell.checkDefaultBrowser", false);
+user_pref("browser.aboutwelcome.enabled", false);
+user_pref("browser.startup.homepage_override.mstone", "ignore");
+user_pref("startup.homepage_welcome_url", "");
+user_pref("startup.homepage_welcome_url.additional", "");
+user_pref("browser.startup.firstrunSkipsHomepage", true);
+user_pref("trailhead.firstrun.didSeeAboutWelcome", true);
+user_pref("datareporting.policy.dataSubmissionEnabled", false);
+user_pref("datareporting.healthreport.uploadEnabled", false);
+user_pref("toolkit.telemetry.reportingpolicy.firstRun", false);
+user_pref("app.normandy.enabled", false);
+user_pref("app.normandy.first_run", false);
+user_pref("browser.messaging-system.whatsNewPanel.enabled", false);
+user_pref("browser.sessionstore.resume_from_crash", false);
+user_pref("toolkit.startup.max_resumed_crashes", -1);
+"""
 
 #: Браузеры, которые умеют киоск-режим (первый найденный и используется).
 BROWSER_CANDIDATES = (
@@ -135,6 +173,11 @@ def kiosk_profile_dir(env: Mapping[str, str] | None = None) -> Path:
     Сторожевой таймер видел «процесс вышел» → «браузер закрыли» → открывал
     экран заново — и так без конца, плодя окна. С отдельным профилем
     запущенный процесс и есть окно киоска: живёт, пока окно открыто.
+
+    Это желаемый путь. Перед запуском ``prepare_browser_profile`` создаёт
+    каталог и, если браузер — snap, переносит профиль из скрытого
+    ``~/.cache`` в ``~/snap/<имя>/common``: иначе Firefox не может его
+    прочитать.
     """
     env = os.environ if env is None else env
     explicit = (env.get("RC_KIOSK_PROFILE_DIR") or "").strip()
@@ -142,11 +185,217 @@ def kiosk_profile_dir(env: Mapping[str, str] | None = None) -> Path:
         return Path(explicit).expanduser()
     cache = (env.get("XDG_CACHE_HOME") or "").strip()
     base_dir = Path(cache).expanduser() if cache else Path.home() / ".cache"
-    return base_dir / "robot-kiosk-browser"
+    return base_dir / PROFILE_DIR_NAME
+
+
+def _absolute(path: Path | str) -> Path:
+    """Абсолютный путь без «~» и без хвостовых ссылок.
+
+    Firefox с относительным ``--profile`` ищет каталог от своего cwd и,
+    не найдя его, показывает то же окно «profile cannot be loaded».
+    """
+    expanded = os.path.expanduser(str(path))
+    try:
+        return Path(os.path.realpath(expanded))
+    except OSError:
+        return Path(os.path.abspath(expanded))
+
+
+def _is_relative_to(path: Path, parent: Path) -> bool:
+    try:
+        path.relative_to(parent)
+    except ValueError:
+        return False
+    return True
+
+
+def snap_name(exe: str) -> str | None:
+    """Имя snap-пакета браузера или None, если это обычная сборка.
+
+    На Ubuntu ``firefox`` в PATH — это ``/usr/bin/firefox``: скрипт, который
+    запускает ``/snap/bin/firefox`` (или ``snap run firefox``). По одному
+    пути этого не видно, а snap не читает скрытые каталоги домашнего
+    каталога. Тот же приём у ``chromium-browser``.
+    """
+    raw = os.path.expanduser(exe)
+    candidates = [raw]
+    try:
+        resolved = os.path.realpath(raw)
+    except OSError:
+        resolved = raw
+    if resolved not in candidates:
+        candidates.append(resolved)
+    for candidate in candidates:
+        name = _snap_name_from_path(candidate)
+        if name:
+            return name
+    try:
+        with open(raw, "rb") as handle:
+            head = handle.read(8192)
+    except OSError:
+        return None
+    if not head.startswith(b"#!"):
+        return None
+    match = _SNAP_BIN_RE.search(head) or _SNAP_RUN_RE.search(head)
+    if not match:
+        return None
+    token = match.group(1).decode("ascii", errors="ignore").split(".", 1)[0]
+    return token or None
+
+
+def _snap_name_from_path(path: str) -> str | None:
+    parts = path.split("/")
+    # ['', 'snap', 'bin', 'firefox'] или ['', 'snap', 'firefox', 'current', ...]
+    if len(parts) >= 4 and parts[1] == "snap":
+        if parts[2] == "bin" and parts[3]:
+            return parts[3].split(".", 1)[0]
+        if parts[2] not in {"bin", "core", "snapd"}:
+            return parts[2]
+    return None
+
+
+def _snap_can_read(path: Path, snap: str) -> bool:
+    """Видит ли строго ограниченный snap этот каталог.
+
+    Домашний интерфейс snap не открывает скрытые каталоги (``.cache``,
+    ``.local``) и чужой ``/tmp`` (у snap свой). Гарантированно доступен
+    ``~/snap/<имя>/``; обычные нескрытые пути в $HOME — тоже, если подключён
+    интерфейс home. Чужой ``~/snap/<другой>/`` — нет.
+    """
+    home = _absolute(Path.home())
+    path = _absolute(path)
+    own = home / "snap" / snap
+    if _is_relative_to(path, own):
+        return True
+    if not _is_relative_to(path, home):
+        return False
+    rel = path.relative_to(home)
+    if not rel.parts or rel.parts[0] == "snap":
+        return False
+    return all(not part.startswith(".") for part in rel.parts)
+
+
+def _writable_profile(path: Path) -> Path | None:
+    """Создать каталог профиля с правами только владельца. None — не вышло."""
+    if path.exists() and not path.is_dir():
+        log.error("профиль %s существует, но это не каталог — браузер его не откроет", path)
+        return None
+    try:
+        path.mkdir(parents=True, exist_ok=True)
+        os.chmod(path, 0o700)
+    except OSError as exc:
+        log.warning("не удалось создать профиль %s: %s", path, exc)
+        return None
+    if not os.access(path, os.R_OK | os.W_OK | os.X_OK):
+        log.warning("профиль %s недоступен на запись", path)
+        return None
+    return path
+
+
+def prepare_browser_profile(exe: str, profile_dir: Path | str | None = None) -> Path:
+    """Каталог профиля, который этот браузер сможет открыть. Каталог создаётся.
+
+    Без этого шага Firefox показывает: «Your Firefox profile cannot be
+    loaded. It may be missing or inaccessible.» Каталог ``--profile`` должен
+    уже существовать, а у snap-сборки он ещё и не может лежать в ``~/.cache``
+    или в ``/tmp``.
+    """
+    requested = _absolute(profile_dir if profile_dir is not None else kiosk_profile_dir())
+    snap = snap_name(exe)
+    candidates = [requested]
+    if snap and not _snap_can_read(requested, snap):
+        # Сначала каталог самого snap (виден даже без интерфейса home),
+        # затем обычная нескрытая папка в $HOME — её home-интерфейс читает.
+        candidates = [
+            _absolute(Path.home() / "snap" / snap / "common" / PROFILE_DIR_NAME),
+            _absolute(Path.home() / PROFILE_DIR_NAME),
+        ]
+    chosen: Path | None = None
+    for candidate in candidates:
+        chosen = _writable_profile(candidate)
+        if chosen is not None:
+            break
+    if chosen is None:
+        log.error(
+            "не удалось подготовить профиль %s — Firefox покажет: "
+            "Your Firefox profile cannot be loaded. It may be missing or inaccessible.",
+            requested,
+        )
+        return candidates[0]
+    if chosen != requested:
+        log.warning(
+            "профиль %s этому браузеру недоступен — беру %s. "
+            "Иначе Firefox пишет: Your Firefox profile cannot be loaded. "
+            "It may be missing or inaccessible.",
+            requested, chosen,
+        )
+    if "firefox" in os.path.basename(exe).lower():
+        _ensure_firefox_profile(chosen)
+    return chosen
+
+
+def _ensure_firefox_profile(profile: Path) -> None:
+    """Минимальный профиль: без мастера первого запуска и без мёртвого замка."""
+    user_js = profile / "user.js"
+    if not user_js.exists():
+        try:
+            user_js.write_text(_FIREFOX_USER_JS, encoding="utf-8")
+            os.chmod(user_js, 0o600)
+        except OSError as exc:
+            log.warning("не удалось записать %s: %s", user_js, exc)
+    _clear_stale_firefox_lock(profile)
+
+
+def _firefox_lock_pid(lock: Path) -> int | None:
+    try:
+        raw = os.readlink(lock) if lock.is_symlink() else lock.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    match = _FIREFOX_LOCK_PID_RE.search(raw.strip())
+    if not match:
+        return None
+    return int(match.group(1))
+
+
+def _pid_alive(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True  # процесс есть, просто чужой
+    except OSError:
+        return False
+    return True
+
+
+def _clear_stale_firefox_lock(profile: Path) -> None:
+    """Снять замок упавшего Firefox, чтобы киоск не упёрся в «already running».
+
+    Живой процесс не трогаем: замок с его pid остаётся.
+    """
+    lock = profile / "lock"
+    pid = _firefox_lock_pid(lock)
+    if pid is None or _pid_alive(pid):
+        return
+    for name in ("lock", ".parentlock", "parent.lock"):
+        try:
+            (profile / name).unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as exc:
+            log.debug("не удалось снять замок %s: %s", profile / name, exc)
+    log.info("снят устаревший замок профиля Firefox (процесс %s уже не жив)", pid)
 
 
 def browser_command(exe: str, url: str, profile_dir: Path | str | None = None) -> list[str]:
-    """Команда запуска браузера без рамок и адресной строки (киоск-режим)."""
+    """Команда запуска браузера без рамок и адресной строки (киоск-режим).
+
+    Каталог профиля должен уже существовать и быть браузеру виден — это
+    делает ``prepare_browser_profile`` (Firefox сам каталог не создаёт).
+    """
     profile = str(profile_dir) if profile_dir is not None else str(kiosk_profile_dir())
     base = os.path.basename(exe).lower()
     if "firefox" in base:
@@ -435,14 +684,20 @@ def _display_worker(url: str, base_url: str, watch: bool,
                     return
                 continue
             try:
+                # Каталог создаём до запуска: иначе Firefox рисует
+                # «Your Firefox profile cannot be loaded…» и экран пустой.
+                profile = prepare_browser_profile(browser)
                 proc = subprocess.Popen(
-                    browser_command(browser, url),
+                    browser_command(browser, url, profile_dir=profile),
                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 )
             except OSError as exc:
                 log.error("не удалось открыть браузер %s: %s", browser, exc)
                 return
-            log.info("экран робота открыт в браузере (%s): %s", os.path.basename(browser), url)
+            log.info(
+                "экран робота открыт в браузере (%s), профиль %s: %s",
+                os.path.basename(browser), profile, url,
+            )
             if not watch:
                 # Не переоткрываем, но замок показа держим, пока окно живо:
                 # иначе следующий запуск решит, что экран никто не показывает.

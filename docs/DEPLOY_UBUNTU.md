@@ -75,6 +75,12 @@ journalctl -u robot-kiosk -f
 Проверка: `curl http://127.0.0.1:8090/healthz` → `{"mode":"kiosk","ok":true,…}`.
 Остановить всё — `./scripts/stop.sh`.
 
+Если вместо экрана Firefox пишет «Your Firefox profile cannot be loaded.
+It may be missing or inaccessible» — это snap-сборка: ей нельзя отдать
+профиль в `~/.cache` или `/tmp`. Запуск сам создаёт каталог в
+`~/snap/firefox/common/robot-kiosk-browser`. Закройте окно с ошибкой и
+запустите `./scripts/kiosk.sh` ещё раз.
+
 ## 6. Точка доступа Wi-Fi
 
 ```bash
