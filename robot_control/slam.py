@@ -7,7 +7,7 @@
 Здесь мы:
   * импортируем ``slam_gui/backend.py`` как модуль (он написан только на
     стандартной библиотеке, pyserial и ROS подключаются по желанию);
-  * выбираем источник данных: ROS 2 → UART-модули → симуляция;
+  * выбираем источник данных: ROS 2, UART-модули, мастер по одному UART или симуляция;
   * отдаём страницы и JSON API через Flask, под общей авторизацией пульта.
 
 Страницы:  ``/`` и ``/main.html`` — основной экран робота,
@@ -27,7 +27,7 @@ import re
 import time
 from pathlib import Path
 
-from flask import Blueprint, Response, jsonify, request, send_from_directory
+from flask import Blueprint, Response, jsonify, request, send_from_directory, session
 
 from robot_control.camera import CameraManager
 from robot_control.lidar import LidarManager
@@ -42,6 +42,84 @@ CONSOLE_PAGE = "index.html"
 KIOSK_PAGE = "robot.html"
 #: Путь бортового экрана: его же открывает браузер на дисплее робота.
 KIOSK_URL_PATH = "/kiosk"
+
+#: Ввод PIN открывает короткую сессию только для команд поворота рулевых модулей.
+STEERING_SESSION_KEY = "kiosk_steering_expires"
+STEERING_SESSION_TTL_S = 5 * 60
+STEERING_ANGLE_LIMIT_DEG = 32.0
+STEERING_COMMAND_HEADER = "X-Robot-Control"
+STEERING_COMMAND_HEADER_VALUE = "steering"
+
+
+def grant_steering_access(now=None):
+    """Разрешить ручной поворот модулей на короткое время после проверки PIN."""
+    session[STEERING_SESSION_KEY] = (time.time() if now is None else now) + STEERING_SESSION_TTL_S
+
+
+def revoke_steering_access():
+    session.pop(STEERING_SESSION_KEY, None)
+
+
+def steering_access_valid(now=None):
+    """Проверить и очистить истёкший доступ к рулевым моторам."""
+    now = time.time() if now is None else now
+    expires = session.get(STEERING_SESSION_KEY, 0)
+    if not isinstance(expires, (int, float)) or expires <= now:
+        revoke_steering_access()
+        return False
+    return True
+
+
+def steering_control_info(source):
+    """Публичная возможность управления: только мастер с адресной командой."""
+    return {
+        "available": bool(getattr(source, "supports_individual_steer", False)),
+        "source": getattr(source, "name", "unknown"),
+    }
+
+
+def dispatch_steering_command(source, body):
+    """Проверить узкий payload и отправить один целевой угол без команд тяги."""
+    if not isinstance(body, dict) or set(body) != {"module", "angle"}:
+        return {"ok": False, "reason": "payload"}, 400
+    module = body.get("module")
+    if not isinstance(module, str) or module.upper() not in {"FL", "FR", "RL", "RR"}:
+        return {"ok": False, "reason": "invalid_module"}, 400
+    module = module.upper()
+    raw_angle = body.get("angle")
+    if isinstance(raw_angle, bool):
+        return {"ok": False, "reason": "invalid_angle"}, 400
+    try:
+        angle = float(raw_angle)
+    except (TypeError, ValueError):
+        return {"ok": False, "reason": "invalid_angle"}, 400
+    import math
+    if not math.isfinite(angle):
+        return {"ok": False, "reason": "invalid_angle"}, 400
+    if abs(angle) > STEERING_ANGLE_LIMIT_DEG:
+        return {"ok": False, "reason": "angle_limit", "limit": STEERING_ANGLE_LIMIT_DEG}, 400
+
+    if not getattr(source, "supports_individual_steer", False):
+        return {"ok": False, "reason": "control_not_supported",
+                "source": getattr(source, "name", "unknown")}, 409
+    command = getattr(source, "steer_module", None)
+    if not callable(command):
+        return {"ok": False, "reason": "control_not_supported"}, 409
+    result = command(module, angle)
+    if result.get("ok"):
+        return {"ok": True, "queued": True, "module": module,
+                "angle": result.get("angle", round(angle, 1))}, 200
+
+    reason = result.get("reason", "command_failed")
+    status = 409
+    if reason in {"serial_unavailable", "module_offline"}:
+        status = 503
+    elif reason == "command_queue_full":
+        status = 429
+    elif reason in {"invalid_module", "invalid_angle", "angle_limit"}:
+        status = 400
+    return {"ok": False, "reason": reason}, status
+
 
 #: Статика интерфейса: имя файла → endpoint. Отдаётся только этот список.
 ASSETS = {
@@ -190,8 +268,8 @@ def create_blueprint(state, guard=None) -> Blueprint:
     bp.add_url_rule("/index.html", endpoint="console_page", view_func=guard(console))
 
     # --------- экран киоска на борту робота: без авторизации -------- #
-    # Открывается локально в киоск-браузере на роботе (127.0.0.1);
-    # показывает только АКБ, шасси и лидар — без пульта, без замка, без аудита.
+    # Открывается локально в киоск-браузере на роботе; телеметрия публична,
+    # а адресный поворот рулевых модулей открывается отдельной PIN-сессией.
     @bp.get(KIOSK_URL_PATH, endpoint="kiosk")
     def kiosk_screen():
         """Экран, который показывается на дисплее самого робота."""
@@ -201,11 +279,10 @@ def create_blueprint(state, guard=None) -> Blueprint:
 
     @bp.get("/api/kiosk_state")
     def api_kiosk_state():
-        """Минимальная телеметрия для экрана робота (только чтение, без секретов)."""
+        """Публичная телеметрия и признак, поддерживает ли источник адресный поворот."""
         mgr_scan = LidarManager.get_instance().get_scan()
         snap = state.snapshot()
         lidar_data = mgr_scan if mgr_scan is not None else snap.get("lidar")
-        # отдаём только то, что нужно для киоска: АКБ, моторы, лидар, скорость/мощность, связь
         public = {
             "battery": snap.get("battery"),
             "motors": snap.get("motors"),
@@ -215,8 +292,53 @@ def create_blueprint(state, guard=None) -> Blueprint:
             "mode": snap.get("mode"),
             "linkOk": snap.get("linkOk"),
             "ts": snap.get("ts"),
+            "source": snap.get("source"),
+            "steeringControl": steering_control_info(state.source),
         }
         return jsonify({"ok": True, "data": public})
+
+    # PIN-оверлей киоска: телеметрия публична, команды рулевым моторам — только
+    # после отдельной проверки PIN и с короткоживущей серверной сессией.
+    @bp.get("/api/kiosk_lock")
+    def api_kiosk_lock():
+        return jsonify({"ok": True, "lock": state.vault.state(state.lock_open),
+                        "steeringAuthorized": steering_access_valid()})
+
+    @bp.post("/api/kiosk_lock/verify")
+    def api_kiosk_lock_verify():
+        body = request.get_json(silent=True) or {}
+        result = state.vault.verify(str(body.get("pin", "")))
+        if result.get("ok"):
+            grant_steering_access()
+        else:
+            revoke_steering_access()
+        result["lock"] = state.vault.state(state.lock_open)
+        result["steeringAuthorized"] = steering_access_valid() if result.get("ok") else False
+        return jsonify(result), 200 if result.get("ok") else 403
+
+    @bp.post("/api/kiosk_lock/session/end")
+    def api_kiosk_steering_logout():
+        revoke_steering_access()
+        return jsonify({"ok": True, "steeringAuthorized": False})
+
+    @bp.post("/api/kiosk_lock/open")
+    def api_kiosk_lock_open():
+        body = request.get_json(silent=True) or {}
+        result = state.open_lock(str(body.get("pin", "")))
+        return jsonify(result), 200 if result.get("ok") else 403
+
+    @bp.post("/api/kiosk_lock/close")
+    def api_kiosk_lock_close():
+        return jsonify(state.close_lock())
+
+    @bp.post("/api/kiosk_steer")
+    def api_kiosk_steer():
+        if request.headers.get(STEERING_COMMAND_HEADER) != STEERING_COMMAND_HEADER_VALUE:
+            return jsonify({"ok": False, "reason": "request_header_required"}), 400
+        if not steering_access_valid():
+            return jsonify({"ok": False, "reason": "pin_required"}), 401
+        result, status = dispatch_steering_command(state.source, request.get_json(silent=True))
+        return jsonify(result), status
 
     # -------------------------------- API -------------------------------- #
     @bp.get("/api/state")

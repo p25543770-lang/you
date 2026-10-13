@@ -1,7 +1,8 @@
-"""Отдельное приложение для дисплея на борту робота (без авторизации).
+"""Отдельное приложение для дисплея на борту робота.
 
 Корень / и /main.html сразу отдают экран киоска с АКБ, шасси и лидаром.
-Никакого логина, никакого пульта оператора, никаких эндпоинтов управления.
+Телеметрия публична; ручной поворот рулевых модулей защищён PIN и доступен
+только источнику MasterSource. Команды движения/тяги этот экран не отправляет.
 
 Порт по умолчанию — 8090 (переменная ``RC_KIOSK_PORT``). Запуск одной
 командой — ``./run_kiosk.py`` или ``./scripts/kiosk.sh``: сервер поднимается на
@@ -56,7 +57,14 @@ from robot_control.slam import (
     GUI_DIR,
     KIOSK_PAGE,
     KIOSK_URL_PATH,
+    STEERING_COMMAND_HEADER,
+    STEERING_COMMAND_HEADER_VALUE,
     build_state,
+    dispatch_steering_command,
+    grant_steering_access,
+    revoke_steering_access,
+    steering_access_valid,
+    steering_control_info,
 )
 
 log = logging.getLogger("robot_control.kiosk")
@@ -420,9 +428,14 @@ def browser_command(exe: str, url: str, profile_dir: Path | str | None = None) -
 def create_kiosk_app(config: Config | None = None) -> Flask:
     config = config or Config.from_env()
     app = Flask(__name__)
-    app.config["SECRET_KEY"] = config.secret_key or secrets.token_urlsafe(48)
+    app.config.update(
+        SECRET_KEY=config.secret_key or secrets.token_urlsafe(48),
+        SESSION_COOKIE_HTTPONLY=True,
+        SESSION_COOKIE_SAMESITE=config.cookie_samesite,
+        SESSION_COOKIE_SECURE=config.cookie_secure,
+    )
 
-    # Только источник данных — никакой авторизации, никаких операторов.
+    # Телеметрия открыта без логина; поворот модулей доступен только по PIN.
     try:
         state = build_state(
             mode=config.slam_source,
@@ -437,6 +450,7 @@ def create_kiosk_app(config: Config | None = None) -> Flask:
     except Exception as exc:  # noqa: BLE001
         log.error("киоск: не удалось подключить источник: %s", exc)
         state = None
+    app.extensions["rc_slam"] = state
 
     def _send(name: str):
         from flask import send_from_directory
@@ -466,7 +480,7 @@ def create_kiosk_app(config: Config | None = None) -> Flask:
         mgr_scan = LidarManager.get_instance().get_scan()
         snap = state.snapshot()
         lidar_data = mgr_scan if mgr_scan is not None else snap.get("lidar")
-        # Только публичные показатели — АКБ, шасси, лидар, скорость/мощность/связь.
+        # Телеметрия и признак поддержки публичны; команды модулю — только после PIN.
         return jsonify({"ok": True, "data": {
             "battery": snap.get("battery"),
             "motors": snap.get("motors"),
@@ -476,6 +490,8 @@ def create_kiosk_app(config: Config | None = None) -> Flask:
             "mode": snap.get("mode"),
             "linkOk": snap.get("linkOk"),
             "ts": snap.get("ts"),
+            "source": snap.get("source"),
+            "steeringControl": steering_control_info(state.source),
         }})
 
     @app.get("/api/lidar")
@@ -567,7 +583,8 @@ def create_kiosk_app(config: Config | None = None) -> Flask:
     def api_kiosk_lock():
         if state is None:
             return jsonify({"ok": False, "error": "no source"}), 503
-        return jsonify({"ok": True, "lock": state.vault.state(state.lock_open)})
+        return jsonify({"ok": True, "lock": state.vault.state(state.lock_open),
+                        "steeringAuthorized": steering_access_valid()})
 
     @app.post("/api/kiosk_lock/verify")
     def api_kiosk_lock_verify():
@@ -576,8 +593,18 @@ def create_kiosk_app(config: Config | None = None) -> Flask:
         body = request.get_json(silent=True) or {}
         pin = str(body.get("pin", ""))
         result = state.vault.verify(pin)
+        if result.get("ok"):
+            grant_steering_access()
+        else:
+            revoke_steering_access()
         result["lock"] = state.vault.state(state.lock_open)
+        result["steeringAuthorized"] = steering_access_valid() if result.get("ok") else False
         return jsonify(result), 200 if result.get("ok") else 403
+
+    @app.post("/api/kiosk_lock/session/end")
+    def api_kiosk_steering_logout():
+        revoke_steering_access()
+        return jsonify({"ok": True, "steeringAuthorized": False})
 
     @app.post("/api/kiosk_lock/open")
     def api_kiosk_lock_open():
@@ -593,6 +620,17 @@ def create_kiosk_app(config: Config | None = None) -> Flask:
         if state is None:
             return jsonify({"ok": False, "error": "no source"}), 503
         return jsonify(state.close_lock())
+
+    @app.post("/api/kiosk_steer")
+    def api_kiosk_steer():
+        if state is None:
+            return jsonify({"ok": False, "error": "no source"}), 503
+        if request.headers.get(STEERING_COMMAND_HEADER) != STEERING_COMMAND_HEADER_VALUE:
+            return jsonify({"ok": False, "reason": "request_header_required"}), 400
+        if not steering_access_valid():
+            return jsonify({"ok": False, "reason": "pin_required"}), 401
+        result, status = dispatch_steering_command(state.source, request.get_json(silent=True))
+        return jsonify(result), status
 
     @app.get("/healthz")
     def healthz():
@@ -872,14 +910,14 @@ def _remove_pid_file() -> None:
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="run_kiosk.py",
-        description="Бортовой экран робота (порт 8090): телеметрия без авторизации",
+        description="Бортовой экран (8090): публичная телеметрия, поворот модулей после PIN",
     )
     parser.add_argument("--host", default=None,
                         help="адрес прослушивания (по умолчанию RC_BIND_HOST или 0.0.0.0)")
     parser.add_argument("--port", type=int, default=None,
                         help=f"порт экрана (по умолчанию RC_KIOSK_PORT или {DEFAULT_PORT})")
-    parser.add_argument("--source", choices=["auto", "sim", "serial", "ros"], default=None,
-                        help="источник данных: auto (ROS → UART → sim), sim, serial, ros")
+    parser.add_argument("--source", choices=["auto", "sim", "serial", "ros", "master"], default=None,
+                        help="источник данных: auto, sim, serial, ros или master (адресное управление углом)")
     parser.add_argument("--open", dest="open_screen", action="store_true", default=None,
                         help="открыть экран в браузере (по умолчанию — если есть дисплей)")
     parser.add_argument("--no-open", dest="open_screen", action="store_false",
@@ -899,7 +937,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
 
     # Настройки (заодно подхватываем .env — например RC_KIOSK_OPEN).
-    # По умолчанию — реальные данные (auto: ROS → UART → мастер).
+    # По умолчанию ищем ROS/UART; мастер выбирается явно как RC_SLAM_SOURCE=master.
     # Симуляция включается явно: RC_SLAM_SOURCE=sim ./run_kiosk.py
     cfg = Config.from_env()
     if args.source:

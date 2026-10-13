@@ -13,7 +13,7 @@
     слева — крупно АКБ и мини-шасси (как на пульте управления), справа — лидар
     360° на всю высоту. Цифры крупные, чтобы было видно издалека.
     Статистика (АКБ, шасси, лидар) без пароля — доступна всем.
-    Управление отсеком и сервисом — только после PIN-кода.
+    Управление отсеком, сервисом и рулевыми углами — только после PIN-кода.
   -->
   <div class="kiosk">
     <header class="top">
@@ -89,14 +89,14 @@
             </article>
             <div class="axle axle-fl" aria-hidden="true"><div class="wheel" id="wheel-FL" data-tone="idle"><i class="wheel-dir"></i></div></div>
 
-            <div class="body" id="body-drag" aria-label="Корпус робота — води пальцем влево/вправо для поворота">
+            <div class="body" id="robot-body" aria-label="Корпус робота">
               <span class="body-end body-front">ПЕРЕД</span>
               <div class="body-speed">
                 <b id="speed">—</b>
                 <small>м/с</small>
               </div>
               <span class="body-end body-rear">КОРМА</span>
-              <span class="body-drag-hint" aria-hidden="true">↔ води пальцем — оборот</span>
+              <span class="body-drag-hint" aria-hidden="true">← камеры · логи &nbsp;|&nbsp; поворот модулей →</span>
             </div>
 
             <div class="axle axle-fr" aria-hidden="true"><div class="wheel" id="wheel-FR" data-tone="idle"><i class="wheel-dir"></i></div></div>
@@ -154,30 +154,28 @@
         </section>
       </div>
     </div>
-    <!-- подсказка свайпа: тянем влево — камеры и логи -->
+    <!-- Разные направления: вправо — поворот модулей, влево — камеры и логи. -->
     <div class="swipe-hint-bar" id="swipe-hint-bar" aria-hidden="true">
       <span class="swipe-hint-dot"></span>
-      <span>свайп влево → камеры и логи</span>
+      <span>← камеры · логи &nbsp;|&nbsp; поворот модулей →</span>
       <span class="swipe-hint-dot"></span>
     </div>
-    <button id="swipe-open" class="swipe-handle" type="button" aria-label="Открыть камеры и логи">
-      <span aria-hidden="true">‹</span>
-    </button>
   </div>
 
-  <!-- ============ СВАЙП-ЭКРАН: ДВЕ КАМЕРЫ + ЛОГИ (свайп влево) ============ -->
+  <!-- ============ СВАЙП-ЭКРАН: ПОВОРОТ МОДУЛЕЙ + КАМЕРЫ/ЛОГИ ============ -->
   <div id="swipe-page" class="swipe-page" hidden aria-hidden="true">
     <div class="swipe-backdrop" id="swipe-backdrop" aria-hidden="true"></div>
     <div class="swipe-sheet">
     <header class="swipe-head">
       <button id="swipe-close" class="swipe-close" type="button" aria-label="Назад к статистике">← Назад</button>
       <div class="swipe-title">
-        <h2>Камеры и логи</h2>
-        <small>камеры — слева, логи — справа · свайп вправо чтобы закрыть</small>
+        <h2 id="swipe-title-text">Камеры и логи</h2>
+        <small id="swipe-title-hint">свайп влево — назад к статистике</small>
       </div>
       <span class="swipe-live" id="swipe-live">● LIVE</span>
     </header>
     <div class="swipe-body">
+      <div id="swipe-cameras-view" class="swipe-view swipe-camera-view">
       <!-- левая часть — две камеры друг над другом -->
       <div class="cam-stack">
         <section class="cam-card" aria-label="Камера 1 передняя">
@@ -219,6 +217,58 @@
           <label class="log-auto"><input id="log-autoscroll" type="checkbox" checked /> автопрокрутка</label>
         </footer>
       </aside>
+      </div>
+
+      <!-- Отдельные команды только рулевым шаговым моторам; тяга не управляется. -->
+      <section id="swipe-motors-view" class="swipe-view steer-panel" hidden aria-label="Поворот рулевых модулей">
+        <header class="steer-panel-head">
+          <div>
+            <h3>Поворот рулевых модулей</h3>
+            <p>Выбери модуль, задай угол и нажми «Повернуть». Модули управляются по одному.</p>
+          </div>
+          <div class="steer-access">
+            <span id="steer-auth-status" class="steer-auth-status">нужен PIN</span>
+            <button id="steer-unlock" class="btn-steer" type="button">Разблокировать</button>
+            <button id="steer-lock" class="btn-steer btn-steer--quiet" type="button" hidden>Заблокировать</button>
+          </div>
+        </header>
+        <div class="drive-interlock" role="note">
+          <b>ТЯГА НЕ ВКЛЮЧАЕТСЯ</b>
+          <span>Отправляется только целевой угол рулевого мотора — команды скорости/PWM нет.</span>
+        </div>
+        <p id="steer-source-status" class="steer-source-status" role="status">Проверка связи с модулями…</p>
+        <div class="steer-grid">
+          <article class="steer-card" data-steer-card="FL">
+            <header><b>FL</b><span id="steer-state-FL" class="steer-state">—</span></header>
+            <div class="steer-readout"><span>Сейчас <b id="steer-current-FL">—</b></span><span>Цель <output id="steer-target-FL">0°</output></span></div>
+            <input id="steer-slider-FL" data-steer-slider="FL" type="range" min="-32" max="32" step="1" value="0" aria-label="Целевой угол переднего левого рулевого модуля" disabled />
+            <div class="steer-range-labels"><span>−32°</span><span>+32°</span></div>
+            <div class="steer-actions"><button type="button" data-steer-adjust="FL" data-step="-5" disabled>−5°</button><button type="button" data-steer-zero="FL" disabled>0°</button><button type="button" data-steer-adjust="FL" data-step="5" disabled>+5°</button><button type="button" class="steer-send" data-steer-send="FL" disabled>Повернуть FL</button></div>
+          </article>
+          <article class="steer-card" data-steer-card="FR">
+            <header><b>FR</b><span id="steer-state-FR" class="steer-state">—</span></header>
+            <div class="steer-readout"><span>Сейчас <b id="steer-current-FR">—</b></span><span>Цель <output id="steer-target-FR">0°</output></span></div>
+            <input id="steer-slider-FR" data-steer-slider="FR" type="range" min="-32" max="32" step="1" value="0" aria-label="Целевой угол переднего правого рулевого модуля" disabled />
+            <div class="steer-range-labels"><span>−32°</span><span>+32°</span></div>
+            <div class="steer-actions"><button type="button" data-steer-adjust="FR" data-step="-5" disabled>−5°</button><button type="button" data-steer-zero="FR" disabled>0°</button><button type="button" data-steer-adjust="FR" data-step="5" disabled>+5°</button><button type="button" class="steer-send" data-steer-send="FR" disabled>Повернуть FR</button></div>
+          </article>
+          <article class="steer-card" data-steer-card="RL">
+            <header><b>RL</b><span id="steer-state-RL" class="steer-state">—</span></header>
+            <div class="steer-readout"><span>Сейчас <b id="steer-current-RL">—</b></span><span>Цель <output id="steer-target-RL">0°</output></span></div>
+            <input id="steer-slider-RL" data-steer-slider="RL" type="range" min="-32" max="32" step="1" value="0" aria-label="Целевой угол заднего левого рулевого модуля" disabled />
+            <div class="steer-range-labels"><span>−32°</span><span>+32°</span></div>
+            <div class="steer-actions"><button type="button" data-steer-adjust="RL" data-step="-5" disabled>−5°</button><button type="button" data-steer-zero="RL" disabled>0°</button><button type="button" data-steer-adjust="RL" data-step="5" disabled>+5°</button><button type="button" class="steer-send" data-steer-send="RL" disabled>Повернуть RL</button></div>
+          </article>
+          <article class="steer-card" data-steer-card="RR">
+            <header><b>RR</b><span id="steer-state-RR" class="steer-state">—</span></header>
+            <div class="steer-readout"><span>Сейчас <b id="steer-current-RR">—</b></span><span>Цель <output id="steer-target-RR">0°</output></span></div>
+            <input id="steer-slider-RR" data-steer-slider="RR" type="range" min="-32" max="32" step="1" value="0" aria-label="Целевой угол заднего правого рулевого модуля" disabled />
+            <div class="steer-range-labels"><span>−32°</span><span>+32°</span></div>
+            <div class="steer-actions"><button type="button" data-steer-adjust="RR" data-step="-5" disabled>−5°</button><button type="button" data-steer-zero="RR" disabled>0°</button><button type="button" data-steer-adjust="RR" data-step="5" disabled>+5°</button><button type="button" class="steer-send" data-steer-send="RR" disabled>Повернуть RR</button></div>
+          </article>
+        </div>
+        <p class="steer-footnote">Нужны источник «master», свежая связь, калибровка и остановленный модуль. Угол ограничен ±32°.</p>
+      </section>
     </div>
     </div>
   </div>
@@ -270,7 +320,7 @@
           <button id="pin-submit" class="btn btn-primary pin-submit" type="button">Открыть доступ</button>
           <button id="pin-cancel" class="btn btn-ghost" type="button">Назад к статистике</button>
         </div>
-        <p class="pin-footnote">Экран статистики остаётся без пароля — PIN нужен только для управления отсеком и сервисом</p>
+        <p class="pin-footnote">Телеметрия остаётся публичной — PIN открывает управление отсеком, сервисом и рулевыми углами</p>
       </section>
 
       <!-- === ЭКРАН 2: ФУНКЦИИ (после верного PIN) === -->
@@ -291,6 +341,12 @@
               <b id="compartment-title">Открыть отсек</b>
               <small id="compartment-hint">грузовой отсек закрыт</small>
             </span>
+            <span class="ctrl-card-arrow" aria-hidden="true">→</span>
+          </button>
+
+          <button id="btn-steering-controls" class="ctrl-card ctrl-card--accent" type="button" role="listitem">
+            <span class="ctrl-card-icon" aria-hidden="true">↗</span>
+            <span class="ctrl-card-text"><b>Поворот модулей</b><small>каждый рулевой мотор отдельно · без тяги</small></span>
             <span class="ctrl-card-arrow" aria-hidden="true">→</span>
           </button>
 

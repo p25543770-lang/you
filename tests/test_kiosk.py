@@ -1,7 +1,8 @@
 """Бортовой экран робота (киоск): страница на 8090, открытие экрана, флаги.
 
-Проверяем две вещи:
-  * приложение киоска отдаёт экран без авторизации (и не отдаёт ничего лишнего);
+Проверяем три вещи:
+  * публичная телеметрия и экран киоска работают без логина;
+  * поворот моторов требует короткую PIN-сессию и точный адресный payload;
   * запуск экрана в браузере работает без графики — «браузером» в тестах
     служит скрипт-заглушка, который только отмечает свой запуск в файле.
 """
@@ -78,6 +79,28 @@ def test_screen_assets_are_served(kiosk_client):
         assert response.status_code == 200, name
 
 
+def test_screen_contains_individual_steering_controls(kiosk_client):
+    text = kiosk_client.get("/kiosk").get_data(as_text=True)
+    js = kiosk_client.get("/robot.js").get_data(as_text=True)
+    assert 'id="swipe-motors-view"' in text
+    assert 'class="swipe-tabs"' not in text
+    assert 'id="swipe-tab-cameras"' not in text
+    assert 'id="swipe-tab-motors"' not in text
+    assert 'class="swipe-handle' not in text
+    for module in ("FL", "FR", "RL", "RR"):
+        assert f'id="steer-slider-{module}"' in text
+        assert f'data-steer-send="{module}"' in text
+    assert "api/kiosk_steer" in js
+    assert "X-Robot-Control" in js
+    assert "selectSwipeView(view || 'motors')" in js
+    assert "openSwipe('motors')" in js  # переход из PIN открывает именно управление
+    assert "openSwipe('cameras')" in js
+    assert "if (dx > 65) openSwipe('motors');" in js
+    assert "else if (dx < -65) openSwipe('cameras');" in js
+    assert 'id="swipe-open-cameras"' not in text
+    assert 'поворот модулей →' in text and '← камеры · логи' in text
+
+
 def test_telemetry_api_returns_only_public_values(kiosk_client):
     for path in ("/api/kiosk_state", "/api/state"):
         response = kiosk_client.get(path)
@@ -86,7 +109,60 @@ def test_telemetry_api_returns_only_public_values(kiosk_client):
         assert body["ok"] is True
         assert set(body["data"]) == {
             "battery", "motors", "lidar", "speedMps", "powerKw", "mode", "linkOk", "ts",
+            "source", "steeringControl",
         }
+
+
+def test_steering_endpoint_requires_pin_and_command_header(kiosk_client):
+    body = {"module": "FL", "angle": 10}
+    headers = {"X-Robot-Control": "steering"}
+    assert kiosk_client.post("/api/kiosk_steer", json=body, headers=headers).status_code == 401
+
+    verified = kiosk_client.post("/api/kiosk_lock/verify", json={"pin": "7232"})
+    assert verified.status_code == 200
+    assert verified.get_json()["steeringAuthorized"] is True
+    assert kiosk_client.post("/api/kiosk_steer", json=body).status_code == 400
+    # Эта фикстура работает на симуляторе, поэтому он заведомо не может двигать моторы.
+    response = kiosk_client.post("/api/kiosk_steer", json=body, headers=headers)
+    assert response.status_code == 409
+    assert response.get_json()["reason"] == "control_not_supported"
+
+
+def test_steering_endpoint_dispatches_exactly_one_module_and_angle(kiosk_app, kiosk_client):
+    class FakeSteeringSource:
+        name = "master"
+        supports_individual_steer = True
+
+        def __init__(self):
+            self.commands = []
+
+        def steer_module(self, module, angle):
+            self.commands.append((module, angle))
+            return {"ok": True, "angle": round(angle, 1)}
+
+    source = FakeSteeringSource()
+    kiosk_app.extensions["rc_slam"].source = source
+    verified = kiosk_client.post("/api/kiosk_lock/verify", json={"pin": "7232"})
+    assert verified.status_code == 200
+    headers = {"X-Robot-Control": "steering"}
+
+    response = kiosk_client.post("/api/kiosk_steer", json={"module": "fr", "angle": 12.5}, headers=headers)
+    assert response.status_code == 200
+    assert response.get_json()["module"] == "FR"
+    assert source.commands == [("FR", 12.5)]
+
+    for bad_body in (
+        {"module": "FR", "angle": 12, "pwm": 100},
+        {"module": "drive", "angle": 12},
+        {"module": "FL", "angle": 33},
+    ):
+        response = kiosk_client.post("/api/kiosk_steer", json=bad_body, headers=headers)
+        assert response.status_code == 400
+    assert source.commands == [("FR", 12.5)]
+
+    ended = kiosk_client.post("/api/kiosk_lock/session/end", json={})
+    assert ended.status_code == 200
+    assert kiosk_client.post("/api/kiosk_steer", json={"module": "FR", "angle": 10}, headers=headers).status_code == 401
 
 
 def test_telemetry_has_no_cargo_or_audit_data(kiosk_client):

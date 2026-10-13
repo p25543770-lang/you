@@ -1,5 +1,6 @@
 #include <Wire.h>
 #include <avr/interrupt.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -18,6 +19,7 @@ const int OPTO_PIN = 18;
 const unsigned long STEP_PERIOD_US = 100;
 const unsigned long CALIB_STEP_PERIOD_US = 2000;
 const float STEPS_PER_DEGREE = 133.333333;
+const float STEER_COMMAND_LIMIT_DEG = 32.0;
 
 // --- Настройки калибровки ---
 const int CALIB_SEARCH_DEGREES = 100;
@@ -69,6 +71,8 @@ int tx_len = 0;
 int tx_pos = 0;
 
 void processCommand(String cmd);
+void processWheelSteerCommand(String cmd);
+void moveToSteeringAngle(float degrees);
 void handleCalibration();
 void onMoveFinished();
 void sendTelemetry();
@@ -157,12 +161,18 @@ void loop() {
     if (inChar == '\n' || inChar == '\r') {
       inputString.trim();
       if (inputString.length() > 0) {
-        for (int i = 0; i < NUM_SLAVES; i++) {
-          Wire.beginTransmission(SLAVE_ADDRESSES[i]);
-          Wire.write(inputString.c_str());
-          Wire.endTransmission();
+        if (inputString.startsWith("w ") || inputString.startsWith("W ")) {
+          // W-команда адресует ровно один рулевой шаговый мотор; не рассылаем её узлам всем.
+          processWheelSteerCommand(inputString);
+        } else {
+          // Старые сервисные команды сохраняют прежнее поведение.
+          for (int i = 0; i < NUM_SLAVES; i++) {
+            Wire.beginTransmission(SLAVE_ADDRESSES[i]);
+            Wire.write(inputString.c_str());
+            Wire.endTransmission();
+          }
+          processCommand(inputString);
         }
-        processCommand(inputString);
       }
       inputString = "";
     } else {
@@ -407,6 +417,90 @@ void handleCalibration() {
     default:
       break;
   }
+}
+
+void moveToSteeringAngle(float degrees) {
+  if (!isfinite(degrees) || fabs(degrees) > STEER_COMMAND_LIMIT_DEG) {
+    Serial.println(F("STEER rejected: angle limit"));
+    return;
+  }
+  if (!calibrated || calib_state != CALIB_IDLE || is_cycling) {
+    Serial.println(F("STEER rejected: home/idle required"));
+    return;
+  }
+
+  long current;
+  bool busy;
+  noInterrupts();
+  current = current_step;
+  busy = is_moving;
+  interrupts();
+  if (busy) {
+    Serial.println(F("STEER rejected: module busy"));
+    return;
+  }
+
+  const long target = lroundf(degrees * STEPS_PER_DEGREE);
+  digitalWrite(DIR, target < current ? HIGH : LOW);
+  noInterrupts();
+  target_step = target;
+  is_moving = (target != current);
+  move_done = false;
+  interrupts();
+  Serial.print(F("STEER target: "));
+  Serial.println(degrees, 1);
+}
+
+void processWheelSteerCommand(String cmd) {
+  cmd.trim();
+  cmd.toLowerCase();
+  const int moduleEnd = cmd.indexOf(' ', 2);
+  if (moduleEnd < 0) {
+    Serial.println(F("STEER format: w [FL|FR|RL|RR] [angle]"));
+    return;
+  }
+
+  String module = cmd.substring(2, moduleEnd);
+  module.trim();
+  module.toUpperCase();
+  String angleText = cmd.substring(moduleEnd + 1);
+  angleText.trim();
+  if (angleText.length() == 0) {
+    Serial.println(F("STEER format: w [FL|FR|RL|RR] [angle]"));
+    return;
+  }
+  char* end = nullptr;
+  const char* angleStart = angleText.c_str();
+  const double parsed = strtod(angleStart, &end);
+  if (end == angleStart || *end != '\0' || !isfinite(parsed) ||
+      fabs(parsed) > STEER_COMMAND_LIMIT_DEG) {
+    Serial.println(F("STEER rejected: invalid angle"));
+    return;
+  }
+  const float degrees = (float)parsed;
+
+  if (module == "FL") {
+    moveToSteeringAngle(degrees);
+    return;
+  }
+  for (int i = 0; i < NUM_SLAVES; i++) {
+    if (module == SLAVE_MODULE_IDS[i]) {
+      if (!isfinite(degrees)) return;
+      char nodeCommand[20];
+      const long tenths = lroundf(degrees * 10.0f);
+      const long absTenths = labs(tenths);
+      // Не используем %f: стандартная AVR printf-сборка часто не включает float.
+      snprintf(nodeCommand, sizeof(nodeCommand), "w %s%ld.%ld",
+               tenths < 0 ? "-" : "", absTenths / 10, absTenths % 10);
+      Wire.beginTransmission(SLAVE_ADDRESSES[i]);
+      Wire.write(nodeCommand);
+      const uint8_t result = Wire.endTransmission();
+      if (result == 0) Serial.println(F("STEER queued for one module"));
+      else Serial.println(F("STEER failed: I2C node unavailable"));
+      return;
+    }
+  }
+  Serial.println(F("STEER rejected: unknown module"));
 }
 
 void processCommand(String cmd) {

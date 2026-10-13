@@ -50,7 +50,7 @@ class Config:
     pbkdf2_iterations: int = 200_000
     testing: bool = False
     # --- интерфейс RUS SLAM ---
-    slam_source: str = "auto"          # auto | sim | serial | ros
+    slam_source: str = "auto"          # auto | sim | serial | ros | master
     slam_ports: tuple[str, ...] = ()   # UART-порты для serial
     slam_lock_file: Path = PROJECT_ROOT / "data" / "lock.json"
     slam_pin: str = ""                 # пусто → заводской PIN из backend.py

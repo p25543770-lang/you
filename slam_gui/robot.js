@@ -1,4 +1,4 @@
-/* Бортовой экран робота (киоск): АКБ + шасси + лидар. Без управления + PIN-оверлей для отсека. */
+/* Бортовой экран: телеметрия + PIN-защищённый адресный поворот рулевых модулей. */
 (function () {
   'use strict';
 
@@ -13,11 +13,17 @@
     return (+v).toFixed(d == null ? 1 : d);
   };
 
+  function setSteeringAuthorized(on) {
+    steeringAuthorized = !!on;
+    renderSteeringControls(lastData || {});
+  }
+
   let lastData = null;
   let live = false;
-  // флаг: когда водишь пальцем по корпусу для оборота — глушим тягу (моторы не едут)
-  let fingerSteerActive = false;
-  let fingerSteerAngle = 0;
+  let steeringAuthorized = false;
+  let steeringUnlockPending = false;
+  const pendingSteer = Object.create(null);
+  const steerResult = Object.create(null);
 
   async function fetchState() {
     try {
@@ -66,9 +72,7 @@
     setText($('k-power'), fmt(d.powerKw, 2));
     setText($('k-range'), fmt(b.rangeKm, 1));
     setText($('k-btemp'), fmt(b.tempC, 0));
-    // когда крутишь пальцем — только руление, тяга ноль
-    if (fingerSteerActive) setText($('speed'), '0.0');
-    else setText($('speed'), fmt(d.speedMps, 1));
+    setText($('speed'), fmt(d.speedMps, 1));
   }
 
   function modTone(m) {
@@ -94,63 +98,36 @@
   function renderChassis(d) {
     const motors = Array.isArray(d.motors) ? d.motors : [];
     const link = !!d.linkOk;
-    let moving = motors.filter((m) => m && m.moving).length;
+    const moving = motors.filter((m) => m && m.moving).length;
     const online = motors.filter((m) => m && m.online).length;
     const parts = [];
-    if (fingerSteerActive) {
-      moving = 0;
-      parts.push('РУЛЕНИЕ');
-      parts.push('модулей: ' + online + '/4');
-      parts.push('тяга: 0 · поворот ' + Math.round(fingerSteerAngle) + '°');
-    } else {
-      if (d.mode) parts.push(d.mode);
-      parts.push('модулей: ' + online + '/4');
-      if (moving) parts.push('в движении ' + moving);
-    }
+    if (d.mode) parts.push(d.mode);
+    parts.push('модулей: ' + online + '/4');
+    if (moving) parts.push('рулевых модулей в движении ' + moving);
     parts.push(link ? 'связь: ок' : 'нет связи');
     setText($('chassis-meta'), parts.join(' · '));
 
     ['FL', 'FR', 'RL', 'RR'].forEach((id) => {
-      const mRaw = motors.find((x) => x.id === id) || {};
-      // если крутишь пальцем — только руление, без тяги
-      let m = mRaw;
-      let angleOverride = null;
-      let rpmOverride = null;
-      let movingOverride = null;
-      if (fingerSteerActive) {
-        const isFront = id[0] === 'F';
-        const ang = isFront ? fingerSteerAngle : -fingerSteerAngle * 0.72;
-        angleOverride = ang;
-        rpmOverride = 0;
-        movingOverride = false;
-      }
-      const eff = angleOverride != null ? {...mRaw, angle: angleOverride, rpm: rpmOverride, moving: movingOverride} : mRaw;
-      const tone = fingerSteerActive ? (Math.abs(angleOverride||0) > 2 ? 'move' : 'idle') : modTone(mRaw);
+      const m = motors.find((x) => x.id === id) || {};
+      const tone = modTone(m);
       const card = $('mod-' + id);
       const wheel = $('wheel-' + id);
       if (card) card.setAttribute('data-tone', tone);
       if (wheel) {
         wheel.setAttribute('data-tone', tone);
-        if (eff.moving) wheel.classList.add('is-driving');
-        else wheel.classList.remove('is-driving');
+        wheel.classList.toggle('is-driving', !!m.moving);
       }
       const chip = $('mod-state-' + id);
       if (chip) {
-        if (fingerSteerActive) {
-          chip.textContent = Math.abs(angleOverride||0) > 2 ? 'поворот' : 'онлайн';
-          chip.className = 'chip ' + (Math.abs(angleOverride||0) > 2 ? 'move' : 'idle');
-        } else {
-          chip.textContent = modStateText(mRaw);
-          chip.className = 'chip ' + tone;
-        }
+        chip.textContent = modStateText(m);
+        chip.className = 'chip ' + tone;
       }
-      const hasAngle = eff.angle != null && Number.isFinite(+eff.angle);
-      const angle = hasAngle ? Math.max(-90, Math.min(90, +eff.angle)) : 0;
+      const hasAngle = m.angle != null && Number.isFinite(+m.angle);
+      const angle = hasAngle ? Math.max(-90, Math.min(90, +m.angle)) : 0;
       setText($('angle-' + id), hasAngle ? Math.round(angle) + '°' : '—');
       if (wheel) wheel.style.transform = 'rotate(' + angle.toFixed(1) + 'deg)';
-      if (fingerSteerActive) setText($('rpm-' + id), '0');
-      else setText($('rpm-' + id), mRaw.rpm == null ? '—' : fmt(mRaw.rpm, 0));
-      setText($('temp-' + id), mRaw.temp == null ? '—' : fmt(mRaw.temp, 0));
+      setText($('rpm-' + id), m.rpm == null ? '—' : fmt(m.rpm, 0));
+      setText($('temp-' + id), m.temp == null ? '—' : fmt(m.temp, 0));
     });
   }
 
@@ -303,6 +280,7 @@
     renderBattery(d);
     renderChassis(d);
     renderLidar(d);
+    renderSteeringControls(d);
   }
 
   function loop() {
@@ -316,7 +294,7 @@
     loop();
     initKioskControls();
     initSwipePage();
-    initFingerSteer();
+    initSteeringControls();
   }
 
   /* =======================================================================
@@ -346,6 +324,7 @@
     const subtitle = $('ctrl-subtitle');
     const titleEl = document.getElementById('ctrl-title');
     const compartmentBtn = $('btn-compartment');
+    const btnSteeringControls = $('btn-steering-controls');
     const compartmentTitle = $('compartment-title');
     const compartmentHint = $('compartment-hint');
     const autoscanBtn = $('btn-autoscan');
@@ -457,27 +436,59 @@
       refreshLockStatus();
       vibrate(10);
     }
+    function revokeSteeringSession() {
+      setSteeringAuthorized(false);
+      Object.keys(pendingSteer).forEach((id) => delete pendingSteer[id]);
+      Object.keys(steerResult).forEach((id) => delete steerResult[id]);
+      fetch('api/kiosk_lock/session/end', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}', keepalive: true
+      }).catch(() => {});
+    }
+
     function closeOverlay() {
       overlay.hidden = true;
       overlay.setAttribute('aria-hidden', 'true');
       document.body.style.overflow = '';
       pinBuf = '';
-      // сбрасываем авторизацию при возврате к статистике (и так по новой)
       pinVerified = null;
+      steeringUnlockPending = false;
+      revokeSteeringSession();
       if (lockTimer) { clearInterval(lockTimer); lockTimer = null; }
       setHidden(resetView, true);
       setHidden(themesView, true);
-      // халтура: если отсек открыт — он остаётся открыт, просто прячем панель
       setMsg('', '');
       if (openBtn) openBtn.focus();
     }
+
+    function dismissOverlayForSteering() {
+      overlay.hidden = true;
+      overlay.setAttribute('aria-hidden', 'true');
+      document.body.style.overflow = '';
+      pinBuf = '';
+      pinVerified = null;
+      steeringUnlockPending = false;
+      if (lockTimer) { clearInterval(lockTimer); lockTimer = null; }
+      setHidden(pinView, true);
+      setHidden(ctrlView, true);
+      setHidden(themesView, true);
+      setHidden(resetView, true);
+      if (window._showSteeringPage) window._showSteeringPage();
+    }
+
+    window._openSteeringAuth = () => {
+      steeringUnlockPending = true;
+      openOverlay();
+    };
 
     // ---------- lock API ----------
     async function fetchLock() {
       try {
         const r = await fetch('api/kiosk_lock', { cache: 'no-store' });
         const j = await r.json();
-        if (j && j.ok && j.lock) return j.lock;
+        if (j && j.ok && j.lock) {
+          setSteeringAuthorized(!!j.steeringAuthorized);
+          return j.lock;
+        }
       } catch (e) {}
       return null;
     }
@@ -781,13 +792,14 @@
         });
         const j = await r.json();
         if (j && j.ok) {
-          pinVerified = pinBuf; // запоминаем до возврата к статистике
+          pinVerified = pinBuf;
+          setSteeringAuthorized(!!j.steeringAuthorized);
           if (j.lock) renderLock(j.lock);
           setMsg('Доступ разрешён', 'ok');
           vibrate([20, 40, 20]);
-          // маленькая пауза чтобы увидеть успех
           setTimeout(() => {
-            showCtrlView();
+            if (steeringUnlockPending) dismissOverlayForSteering();
+            else showCtrlView();
             setBusy(false);
           }, 420);
         } else {
@@ -950,6 +962,7 @@
     });
 
     if (pinSubmit) pinSubmit.addEventListener('click', submitPin);
+    if (btnSteeringControls) btnSteeringControls.addEventListener('click', dismissOverlayForSteering);
     if (compartmentBtn) compartmentBtn.addEventListener('click', toggleCompartment);
     if (autoscanBtn) autoscanBtn.addEventListener('click', toggleAutoscan);
     if (btnThemes) btnThemes.addEventListener('click', showThemes);
@@ -1008,17 +1021,18 @@
     updatePinDisplay();
     refreshLockStatus();
     updateAutoscanUI(autoScanOn);
-    // периодически обновляем статус отсека, даже когда оверлей закрыт (чтобы чип был актуален)
-    setInterval(() => {
-      if (!overlay.hidden) refreshLockStatus();
-    }, 1500);
+    // Проверяем блокировку PIN и срок сессии руления, даже когда оверлей закрыт.
+    setInterval(refreshLockStatus, 1500);
   }
 
-  /* ============ СВАЙП-СТРАНИЦА: 2 камеры + логи (свайп вправо) ============ */
+  /* ============ СВАЙП-СТРАНИЦА: поворот модулей + камеры/логи ============ */
   function initSwipePage() {
     const page = $('swipe-page');
-    const openBtn = $('swipe-open');
     const closeBtn = $('swipe-close');
+    const cameraView = $('swipe-cameras-view');
+    const motorView = $('swipe-motors-view');
+    const swipeTitle = $('swipe-title-text');
+    const swipeTitleHint = $('swipe-title-hint');
     const kiosk = document.querySelector('.kiosk');
     const hintBar = $('swipe-hint-bar');
     const logList = $('log-list');
@@ -1036,17 +1050,36 @@
     if (!page || !kiosk) return;
 
     let isOpen = false;
+    let activeSwipeView = 'cameras';
+    let activeSwipeDirection = 'left';
     let camLoopsStarted = false;
     let anim1 = null, anim2 = null;
 
     const sheet = page.querySelector('.swipe-sheet');
     const backdrop = $('swipe-backdrop');
 
-    function openSwipe() {
-      if (isOpen) return;
+    function selectSwipeView(name) {
+      const showMotors = name === 'motors';
+      activeSwipeView = showMotors ? 'motors' : 'cameras';
+      activeSwipeDirection = showMotors ? 'right' : 'left';
+      page.dataset.openDirection = activeSwipeDirection;
+      if (cameraView) cameraView.hidden = showMotors;
+      if (motorView) motorView.hidden = !showMotors;
+      if (swipeTitle) swipeTitle.textContent = showMotors ? 'Поворот модулей' : 'Камеры и логи';
+      if (swipeTitleHint) swipeTitleHint.textContent = showMotors
+        ? 'свайп влево — назад · только рулевые углы, без тяги'
+        : 'свайп вправо — назад к статистике';
+    }
+
+    function openSwipe(view) {
+      if (isOpen) {
+        if (view) selectSwipeView(view);
+        return;
+      }
       const overlay = $('ctrl-overlay');
       if (overlay && !overlay.hidden) return;
       isOpen = true;
+      selectSwipeView(view || 'motors');
       page.hidden = false;
       if (sheet) sheet.style.transform = '';
       if (backdrop) backdrop.style.opacity = '';
@@ -1069,10 +1102,14 @@
       if (backdrop) backdrop.style.opacity = '';
       setTimeout(() => { if (!isOpen) page.hidden = true; }, 480);
     }
-    window._openSwipe = openSwipe;
+    window._openSwipe = (view) => openSwipe(view || 'motors');
     window._closeSwipe = closeSwipe;
+    window._showSteeringPage = () => {
+      if (!isOpen) openSwipe('motors');
+      else selectSwipeView('motors');
+    };
+    selectSwipeView('cameras');
 
-    if (openBtn) openBtn.addEventListener('click', openSwipe);
     if (closeBtn) closeBtn.addEventListener('click', closeSwipe);
     if (backdrop) backdrop.addEventListener('click', closeSwipe);
     // клик по листу вне? — закрывать только по бэкдропу
@@ -1086,39 +1123,83 @@
     });
     page.addEventListener('dragstart', (e) => e.preventDefault());
 
-    // --- свайп пальцем: ведёшь ВЛЕВО — туда (камеры/логи), ВПРАВО — обратно (новая анимация) ---
+    // На главном экране направления разделены: вправо — моторы, влево — камеры/логи.
+    // Возврат с каждой панели — обратным свайпом.
     let tStartX = 0, tStartY = 0, tTracking = false, dragging = false, dragType = null;
+    let tDragView = null;
 
-    function setPageProgress(px) {
-      const p = Math.max(0, Math.min(1, px));
-      if (sheet) sheet.style.transform = 'translateX(' + ((1 - p) * 105) + '%)';
-      if (backdrop) backdrop.style.opacity = String(p);
-      // киоск лёгкий параллакс
-      const kioskEl = kiosk;
-      if (kioskEl) {
-        const s = 1 - p * 0.015;
-        const br = 1 - p * 0.08;
-        kioskEl.style.transform = 'scale(' + s + ')';
-        kioskEl.style.filter = 'brightness(' + br + ')';
+    function directionForView(view) {
+      return view === 'motors' ? 'right' : 'left';
+    }
+    function signedSwipeDistance(dx, direction) {
+      return direction === 'right' ? dx : -dx;
+    }
+    function closeDirection() {
+      return activeSwipeDirection === 'right' ? 'left' : 'right';
+    }
+    function isClosingSwipe(dx) {
+      return signedSwipeDistance(dx, closeDirection()) > 0;
+    }
+    function swipeProgress(dx, vw, type, direction) {
+      const distance = vw * 0.52;
+      const signed = signedSwipeDistance(dx, type === 'open' ? direction : closeDirection());
+      return Math.max(0, Math.min(1, type === 'open' ? signed / distance : 1 - signed / distance));
+    }
+    function setPageProgress(px, direction) {
+      const progress = Math.max(0, Math.min(1, px));
+      const offset = (direction === 'right' ? -1 : 1) * (1 - progress) * 105;
+      if (sheet) sheet.style.transform = 'translateX(' + offset + '%)';
+      if (backdrop) backdrop.style.opacity = String(progress);
+      if (kiosk) {
+        kiosk.style.transform = 'scale(' + (1 - progress * 0.015) + ')';
+        kiosk.style.filter = 'brightness(' + (1 - progress * 0.08) + ')';
       }
     }
-    function beginDrag() {
+    function beginDrag(direction) {
+      page.dataset.openDirection = direction;
       page.hidden = false;
+      page.classList.add('is-open');
       if (sheet) sheet.style.transition = 'none';
       if (backdrop) backdrop.style.transition = 'none';
-      if (kiosk) { kiosk.style.transition = 'none'; }
+      if (kiosk) kiosk.style.transition = 'none';
       void page.offsetWidth;
       dragging = true;
     }
     function endDragCleanup() {
-      if (sheet) sheet.style.transition = '';
-      if (backdrop) backdrop.style.transition = '';
+      if (sheet) { sheet.style.transition = ''; sheet.style.transform = ''; }
+      if (backdrop) { backdrop.style.transition = ''; backdrop.style.opacity = ''; }
       if (kiosk) { kiosk.style.transition = ''; kiosk.style.transform = ''; kiosk.style.filter = ''; }
       dragging = false;
       dragType = null;
+      tDragView = null;
+      if (hintBar) hintBar.style.opacity = '';
+    }
+    function dragCompletes(dx, vw, type, direction) {
+      const travelled = signedSwipeDistance(dx, type === 'open' ? direction : closeDirection());
+      return travelled > vw * 0.18 || (Math.abs(dx) > 70 && travelled > 0);
+    }
+    function finishSwipe(type, view, shouldRemainOpen) {
+      if (shouldRemainOpen) {
+        if (type === 'open') openSwipe(view);
+        else {
+          page.hidden = false;
+          page.classList.add('is-open');
+          document.body.classList.add('swipe-open');
+          page.setAttribute('aria-hidden', 'false');
+        }
+      } else if (type === 'close') {
+        closeSwipe();
+      } else {
+        page.classList.remove('is-open');
+        document.body.classList.remove('swipe-open');
+        page.setAttribute('aria-hidden', 'true');
+        setTimeout(() => { if (!isOpen) page.hidden = true; }, 480);
+      }
     }
 
-    function tStart(x, y) { tStartX = x; tStartY = y; tTracking = true; dragging = false; dragType = null; }
+    function tStart(x, y) {
+      tStartX = x; tStartY = y; tTracking = true; dragging = false; dragType = null; tDragView = null;
+    }
     function tMove(x, y) {
       if (!tTracking) return;
       const dx = x - tStartX;
@@ -1126,30 +1207,21 @@
       if (!dragging) {
         if (Math.abs(dx) < 10) return;
         if (Math.abs(dx) < Math.abs(dy) * 1.1) { tTracking = false; return; }
-        // с закрытого — только ВЛЕВО (dx < 0), с открытого — только ВПРАВО (dx > 0)
-        if (!isOpen && dx > 0) { tTracking = false; return; }
-        if (isOpen && dx < 0) { tTracking = false; return; }
-        const ov = $('ctrl-overlay');
-        if (!isOpen && ov && !ov.hidden) { tTracking = false; return; }
-        dragType = !isOpen ? 'open' : 'close';
-        beginDrag();
+        const overlay = $('ctrl-overlay');
+        if (!isOpen && overlay && !overlay.hidden) { tTracking = false; return; }
+        if (isOpen && !isClosingSwipe(dx)) { tTracking = false; return; }
+        dragType = isOpen ? 'close' : 'open';
+        tDragView = dragType === 'open' ? (dx > 0 ? 'motors' : 'cameras') : activeSwipeView;
+        const direction = dragType === 'open' ? directionForView(tDragView) : activeSwipeDirection;
+        beginDrag(direction);
         if (!isOpen) page.setAttribute('aria-hidden', 'false');
         document.body.classList.add('swipe-open');
       }
-      if (!dragging) return;
       const vw = window.innerWidth || 400;
-      let progress;
-      if (dragType === 'open') {
-        // swipe left: dx 0..-vw  → progress 0..1
-        progress = Math.max(0, Math.min(1, -dx / (vw * 0.52)));
-        setPageProgress(progress);
-        if (hintBar) hintBar.style.opacity = String(1 - progress);
-      } else {
-        // close: dx 0..+vw → progress 1..0
-        progress = Math.max(0, Math.min(1, 1 - dx / (vw * 0.52)));
-        setPageProgress(progress);
-        if (hintBar) hintBar.style.opacity = String(progress);
-      }
+      const direction = dragType === 'open' ? directionForView(tDragView) : activeSwipeDirection;
+      const progress = swipeProgress(dx, vw, dragType, direction);
+      setPageProgress(progress, direction);
+      if (hintBar) hintBar.style.opacity = String(dragType === 'open' ? 1 - progress : progress);
     }
     function tEnd(x, y) {
       if (!tTracking && !dragging) return;
@@ -1160,101 +1232,80 @@
       tTracking = false;
       if (!wasDragging) {
         if (Math.abs(dx) < 60 || Math.abs(dx) < Math.abs(dy) * 1.1) return;
-        if (!isOpen && dx < -65) openSwipe();
-        else if (isOpen && dx > 65) closeSwipe();
+        if (!isOpen) {
+          if (dx > 65) openSwipe('motors');
+          else if (dx < -65) openSwipe('cameras');
+        } else if (isClosingSwipe(dx) && Math.abs(dx) > 65) closeSwipe();
         return;
       }
-      const absDx = Math.abs(dx);
-      const threshold = vw * 0.18;
-      let shouldOpen;
-      if (dragType === 'open') shouldOpen = -dx > threshold || absDx > 70 && dx < 0;
-      else shouldOpen = !(dx > threshold || absDx > 70);
-      // сбросить инлайн
-      if (sheet) sheet.style.transform = '';
-      if (backdrop) backdrop.style.opacity = '';
-      if (kiosk) { kiosk.style.transform = ''; kiosk.style.filter = ''; kiosk.style.transition = ''; }
-      if (sheet) sheet.style.transition = '';
-      if (backdrop) backdrop.style.transition = '';
-      dragging = false;
-      dragType = null;
-      if (hintBar) hintBar.style.opacity = '';
-      if (shouldOpen) {
-        if (!isOpen) openSwipe();
-        else { page.hidden = false; page.classList.add('is-open'); document.body.classList.add('swipe-open'); page.setAttribute('aria-hidden','false'); }
-      } else {
-        if (isOpen) closeSwipe();
-        else {
-          page.classList.remove('is-open');
-          document.body.classList.remove('swipe-open');
-          page.setAttribute('aria-hidden','true');
-          setTimeout(() => { if (!isOpen) page.hidden = true; }, 480);
-        }
-      }
+      const type = dragType;
+      const view = tDragView;
+      const direction = type === 'open' ? directionForView(view) : activeSwipeDirection;
+      const completed = dragCompletes(dx, vw, type, direction);
+      endDragCleanup();
+      finishSwipe(type, view, type === 'open' ? completed : !completed);
     }
 
-    // touch
-    kiosk.addEventListener('touchstart', (e) => {
-      if (e.touches.length !== 1) return;
-      tStart(e.touches[0].clientX, e.touches[0].clientY);
-    }, {passive:true});
-    kiosk.addEventListener('touchmove', (e) => {
-      if (e.touches.length !== 1) return;
-      tMove(e.touches[0].clientX, e.touches[0].clientY);
-    }, {passive:true});
-    kiosk.addEventListener('touchend', (e) => {
-      const t = e.changedTouches[0];
-      if (t) tEnd(t.clientX, t.clientY);
-    }, {passive:true});
-    page.addEventListener('touchstart', (e) => {
-      if (e.touches.length !== 1) return;
-      // не перехватывать если тянут скролл внутри логов вертикально — дадим шанс
-      tStart(e.touches[0].clientX, e.touches[0].clientY);
-    }, {passive:true});
-    page.addEventListener('touchmove', (e) => {
-      if (e.touches.length !== 1) return;
-      // если палец внутри log-list и скролл вертикальный — не мешаем
-      const target = e.target;
-      if (target && target.closest && target.closest('.log-list')) {
-        // если ещё не dragging — посмотрим на dx/dy, но не форсируем prevent
-      }
-      tMove(e.touches[0].clientX, e.touches[0].clientY);
-    }, {passive:true});
-    page.addEventListener('touchend', (e) => {
-      const t = e.changedTouches[0];
-      if (t) tEnd(t.clientX, t.clientY);
-    }, {passive:true});
+    // Touch gestures on the base screen and on the open panel.
+    kiosk.addEventListener('touchstart', (event) => {
+      if (event.touches.length !== 1) return;
+      tStart(event.touches[0].clientX, event.touches[0].clientY);
+    }, {passive: true});
+    kiosk.addEventListener('touchmove', (event) => {
+      if (event.touches.length !== 1) return;
+      tMove(event.touches[0].clientX, event.touches[0].clientY);
+    }, {passive: true});
+    kiosk.addEventListener('touchend', (event) => {
+      const touch = event.changedTouches[0];
+      if (touch) tEnd(touch.clientX, touch.clientY);
+    }, {passive: true});
+    page.addEventListener('touchstart', (event) => {
+      if (event.touches.length !== 1) return;
+      if (event.target.closest && event.target.closest('input, button, select, textarea')) return;
+      tStart(event.touches[0].clientX, event.touches[0].clientY);
+    }, {passive: true});
+    page.addEventListener('touchmove', (event) => {
+      if (event.touches.length !== 1) return;
+      tMove(event.touches[0].clientX, event.touches[0].clientY);
+    }, {passive: true});
+    page.addEventListener('touchend', (event) => {
+      const touch = event.changedTouches[0];
+      if (touch) tEnd(touch.clientX, touch.clientY);
+    }, {passive: true});
 
-    // мышь drag для десктопа — тоже с тягой
+    // Mouse drag mirrors touch behavior for desktop previews.
     let mTracking = false, mStartX = 0, mStartY = 0, mDragging = false, mType = null;
-    function mStart(x,y,origin){
-      mStartX=x; mStartY=y; mTracking=true; mDragging=false; mType=null;
-      // origin: 'kiosk' или 'page'
-      mOrigin = origin;
+    let mView = null, mOrigin = null;
+    function mStart(x, y, origin) {
+      mStartX = x; mStartY = y; mTracking = true; mDragging = false; mType = null; mView = null; mOrigin = origin;
     }
-    let mOrigin = null;
-    kiosk.addEventListener('mousedown', (e) => {
-      if (e.button !== 0) return;
-      const ov = $('ctrl-overlay');
-      if (ov && !ov.hidden) return;
-      mStart(e.clientX, e.clientY, 'kiosk');
+    kiosk.addEventListener('mousedown', (event) => {
+      if (event.button !== 0) return;
+      const overlay = $('ctrl-overlay');
+      if (overlay && !overlay.hidden) return;
+      mStart(event.clientX, event.clientY, 'kiosk');
     });
-    page.addEventListener('mousedown', (e) => {
-      if (e.button !== 0) return;
-      mStart(e.clientX, e.clientY, 'page');
+    page.addEventListener('mousedown', (event) => {
+      if (event.button !== 0) return;
+      if (event.target.closest && event.target.closest('input, button, select, textarea')) return;
+      mStart(event.clientX, event.clientY, 'page');
     });
-    window.addEventListener('mousemove', (e) => {
+    window.addEventListener('mousemove', (event) => {
       if (!mTracking) return;
-      const dx = e.clientX - mStartX;
-      const dy = e.clientY - mStartY;
+      const dx = event.clientX - mStartX;
+      const dy = event.clientY - mStartY;
       if (!mDragging) {
         if (Math.abs(dx) < 12) return;
-        if (Math.abs(dx) < Math.abs(dy)*1.1) { mTracking=false; return; }
-        if (!isOpen && dx > 0) { mTracking=false; return; }
-        if (isOpen && dx < 0) { mTracking=false; return; }
-        const ov = $('ctrl-overlay');
-        if (!isOpen && ov && !ov.hidden) { mTracking=false; return; }
-        mType = !isOpen ? 'open' : 'close';
+        if (Math.abs(dx) < Math.abs(dy) * 1.1) { mTracking = false; return; }
+        const overlay = $('ctrl-overlay');
+        if (!isOpen && overlay && !overlay.hidden) { mTracking = false; return; }
+        if (isOpen && !isClosingSwipe(dx)) { mTracking = false; return; }
+        mType = isOpen ? 'close' : 'open';
+        mView = mType === 'open' ? (dx > 0 ? 'motors' : 'cameras') : activeSwipeView;
+        const direction = mType === 'open' ? directionForView(mView) : activeSwipeDirection;
+        page.dataset.openDirection = direction;
         page.hidden = false;
+        page.classList.add('is-open');
         if (sheet) sheet.style.transition = 'none';
         if (backdrop) backdrop.style.transition = 'none';
         if (kiosk) kiosk.style.transition = 'none';
@@ -1263,52 +1314,40 @@
         dragging = true;
         dragType = mType;
         document.body.classList.add('swipe-open');
-        if (!isOpen) page.setAttribute('aria-hidden','false');
+        if (!isOpen) page.setAttribute('aria-hidden', 'false');
       }
-      if (!mDragging) return;
       const vw = window.innerWidth || 400;
-      let p;
-      if (mType === 'open') p = Math.max(0, Math.min(1, -dx/(vw*0.52)));
-      else p = Math.max(0, Math.min(1, 1 - dx/(vw*0.52)));
-      setPageProgress(p);
-      if (hintBar) hintBar.style.opacity = String(mType === 'open' ? 1 - p : p);
-      e.preventDefault();
+      const direction = mType === 'open' ? directionForView(mView) : activeSwipeDirection;
+      setPageProgress(swipeProgress(dx, vw, mType, direction), direction);
+      if (hintBar) hintBar.style.opacity = String(mType === 'open'
+        ? 1 - swipeProgress(dx, vw, mType, direction)
+        : swipeProgress(dx, vw, mType, direction));
+      event.preventDefault();
     });
-    window.addEventListener('mouseup', (e) => {
+    window.addEventListener('mouseup', (event) => {
       if (!mTracking && !mDragging) return;
       const wasDrag = mDragging;
-      const dx = e.clientX - mStartX;
-      const dy = e.clientY - mStartY;
+      const dx = event.clientX - mStartX;
+      const dy = event.clientY - mStartY;
       const vw = window.innerWidth || 400;
-      const curDragging = mDragging;
-      const curType = mType;
-      mTracking = false; mDragging = false;
-      dragging = false; dragType = null;
-      if (sheet) sheet.style.transition = '';
-      if (backdrop) backdrop.style.transition = '';
+      const type = mType;
+      const view = mView;
+      mTracking = false; mDragging = false; dragging = false; dragType = null;
+      if (sheet) { sheet.style.transition = ''; sheet.style.transform = ''; }
+      if (backdrop) { backdrop.style.transition = ''; backdrop.style.opacity = ''; }
       if (kiosk) { kiosk.style.transition = ''; kiosk.style.transform = ''; kiosk.style.filter = ''; }
-      if (sheet) sheet.style.transform = '';
-      if (backdrop) backdrop.style.opacity = '';
       if (hintBar) hintBar.style.opacity = '';
       if (!wasDrag) {
-        if (Math.abs(dx) < 80 || Math.abs(dx) < Math.abs(dy)*1.1) { mOrigin=null; return; }
-        if (mOrigin === 'kiosk' && !isOpen && dx < -80) openSwipe();
-        else if (mOrigin === 'page' && isOpen && dx > 80) closeSwipe();
-        mOrigin=null;
+        if (Math.abs(dx) < 80 || Math.abs(dx) < Math.abs(dy) * 1.1) { mOrigin = null; return; }
+        if (mOrigin === 'kiosk' && !isOpen) openSwipe(dx > 0 ? 'motors' : 'cameras');
+        else if (mOrigin === 'page' && isOpen && isClosingSwipe(dx)) closeSwipe();
+        mOrigin = null;
         return;
       }
-      const thr = vw*0.18;
-      let shouldOpen;
-      if (curType === 'open') shouldOpen = -dx > thr;
-      else shouldOpen = !(dx > thr);
-      if (shouldOpen) {
-        if (!isOpen) openSwipe();
-        else { page.hidden=false; page.classList.add('is-open'); document.body.classList.add('swipe-open'); page.setAttribute('aria-hidden','false'); }
-      } else {
-        if (isOpen) closeSwipe();
-        else { page.classList.remove('is-open'); document.body.classList.remove('swipe-open'); page.setAttribute('aria-hidden','true'); setTimeout(()=>{ if(!isOpen) page.hidden=true; },480); }
-      }
-      mOrigin=null;
+      const direction = type === 'open' ? directionForView(view) : activeSwipeDirection;
+      const completed = dragCompletes(dx, vw, type, direction);
+      finishSwipe(type, view, type === 'open' ? completed : !completed);
+      mOrigin = null; mView = null; mType = null;
     });
 
     // Esc закрывает
@@ -1721,8 +1760,8 @@
     fetchLogs();
     // начальные логи
     pushLog('ok','бортовой экран RUS SLAM запущен');
-    pushLog('info','свайп влево → камеры и логи · вправо — назад');
-    pushLog('info','PIN 7232 · /api/kiosk_lock');
+    pushLog('info','свайп вправо → поворот модулей · влево → камеры и логи');
+    pushLog('info','управление рулевыми модулями защищено PIN-кодом');
     setTimeout(() => pushLog('info','лидар: инициализация · дальность 10 м'), 600);
 
     if (logClear) logClear.addEventListener('click', () => { logs = []; renderLogs(); pushLog('info','логи очищены'); });
@@ -1740,195 +1779,210 @@
     }, 1800);
   }
 
-  /* ============ ПОВОРОТ ПАЛЬЦЕМ: води по корпусу — оборот ============ */
-  function initFingerSteer() {
-    const bodyEl = $('body-drag') || document.querySelector('.body');
-    if (!bodyEl) return;
-    const wheels = {
-      FL: $('wheel-FL'), FR: $('wheel-FR'),
-      RL: $('wheel-RL'), RR: $('wheel-RR')
-    };
-    const angleEls = {
-      FL: $('angle-FL'), FR: $('angle-FR'),
-      RL: $('angle-RL'), RR: $('angle-RR')
-    };
-    let isDragging = false;
-    let startX = 0;
-    let startAngle = 0;
-    let curAngle = 0;
-    let animFrame = null;
-    let returnAnim = null;
-    const LIMIT = 32; // градусов лимит
-    const SENS = 0.38; // deg per px
+  /* ============ Адресный поворот рулевых модулей (без тяги) ============ */
+  function renderSteeringControls(data) {
+    const panel = $('swipe-motors-view');
+    if (!panel) return;
+    const d = data || {};
+    const control = d.steeringControl || {};
+    const available = control.available === true;
+    const source = String(control.source || d.source || 'unknown');
+    const motors = Array.isArray(d.motors) ? d.motors : [];
+    const sourceStatus = $('steer-source-status');
+    const authStatus = $('steer-auth-status');
+    const unlockButton = $('steer-unlock');
+    const lockButton = $('steer-lock');
 
-    function applyAngle(a) {
-      curAngle = Math.max(-LIMIT, Math.min(LIMIT, a));
-      fingerSteerAngle = curAngle;
-      if (isDragging) fingerSteerActive = true;
-      // передние — в сторону движения, задние — противоположно для разворота на месте
-      const front = curAngle;
-      const rear = -curAngle * 0.72;
-      const map = {FL: front, FR: front, RL: rear, RR: rear};
-      ['FL','FR','RL','RR'].forEach(id => {
-        const w = wheels[id];
-        const el = angleEls[id];
-        const ang = map[id];
-        if (w) w.style.transform = 'rotate(' + ang.toFixed(1) + 'deg)';
-        if (el) el.textContent = Math.round(ang) + '°';
-        if (w) w.setAttribute('data-tone', Math.abs(ang) > 2 ? 'move' : 'idle');
-        const card = document.getElementById('mod-' + id);
-        if (card) card.setAttribute('data-tone', Math.abs(ang) > 2 ? 'move' : 'idle');
-      });
-      // тяга — ноль пока крутишь (по ТЗ)
-      const speedEl = $('speed');
-      if (speedEl) speedEl.textContent = '0.0';
-      // сразу обновить чипы/мэта без ожидания следующего polling
-      const meta = $('chassis-meta');
-      if (meta) {
-        const link = lastData ? !!lastData.linkOk : true;
-        const online = lastData && Array.isArray(lastData.motors) ? lastData.motors.filter(m=>m&&m.online).length : 4;
-        meta.textContent = 'РУЛЕНИЕ · модулей: ' + online + '/4 · тяга: 0 · поворот ' + Math.round(curAngle) + '° · ' + (link?'связь: ок':'нет связи');
+    if (sourceStatus) {
+      if (!available) {
+        sourceStatus.textContent = 'Ручной поворот доступен только при RC_SLAM_SOURCE=master и подключённом UART мастера.';
+      } else if (d.linkOk === false) {
+        sourceStatus.textContent = 'Мастер выбран, но свежей связи с рулевыми модулями пока нет.';
+      } else {
+        sourceStatus.textContent = 'Мастер подключён · изменение угла одного модуля за команду.';
       }
-      ['FL','FR','RL','RR'].forEach(id => {
-        const isFront = id[0]==='F';
-        const ang = isFront ? curAngle : -curAngle*0.72;
-        const chip = $('mod-state-' + id);
-        if (chip) {
-          chip.textContent = Math.abs(ang) > 2 ? 'поворот' : 'онлайн';
-          chip.className = 'chip ' + (Math.abs(ang) > 2 ? 'move' : 'idle');
-        }
-        const rpmEl = $('rpm-' + id);
-        if (rpmEl) rpmEl.textContent = '0';
+    }
+    if (authStatus) authStatus.textContent = steeringAuthorized ? 'PIN подтверждён' : 'управление закрыто';
+    if (unlockButton) unlockButton.hidden = steeringAuthorized;
+    if (lockButton) lockButton.hidden = !steeringAuthorized;
+
+    const now = Date.now();
+    ['FL', 'FR', 'RL', 'RR'].forEach((id) => {
+      const card = panel.querySelector('[data-steer-card="' + id + '"]');
+      const slider = $('steer-slider-' + id);
+      const currentEl = $('steer-current-' + id);
+      const targetEl = $('steer-target-' + id);
+      const stateEl = $('steer-state-' + id);
+      const sendButton = panel.querySelector('[data-steer-send="' + id + '"]');
+      if (!card || !slider) return;
+
+      const motor = motors.find((m) => m && m.id === id) || null;
+      const current = motor && motor.angle != null && Number.isFinite(+motor.angle) ? +motor.angle : null;
+      const target = motor && motor.targetAngle != null && Number.isFinite(+motor.targetAngle) ? +motor.targetAngle : null;
+      const online = !!(motor && motor.online === true && current != null);
+      const homed = !!(motor && motor.homed === true);
+      const moving = !!(motor && motor.moving);
+      const calibrating = !!(motor && motor.calibrating);
+      const busy = moving || calibrating;
+      let pending = pendingSteer[id] || null;
+
+      if (pending && current != null && !busy && Math.abs(current - pending.angle) <= 1) {
+        delete pendingSteer[id];
+        pending = null;
+      } else if (pending && !busy && now - pending.sentAt > 15000) {
+        delete pendingSteer[id];
+        pending = null;
+      }
+
+      let value = pending ? pending.angle : (moving && target != null ? target : (current == null ? 0 : current));
+      value = Math.max(-32, Math.min(32, Math.round(value)));
+      const dirty = card.dataset.steerDirty === 'true';
+      if (!dirty) slider.value = String(value);
+      if (currentEl) currentEl.textContent = current == null ? '—' : Math.round(current) + '°';
+      if (targetEl) targetEl.textContent = Math.round(+slider.value || 0) + '°';
+
+      const ready = available && steeringAuthorized && online && homed && !busy && !pending;
+      slider.disabled = !ready;
+      card.querySelectorAll('[data-steer-adjust="' + id + '"], [data-steer-zero="' + id + '"]').forEach((button) => {
+        button.disabled = !ready;
       });
+      if (sendButton) sendButton.disabled = !ready || !dirty;
+      card.dataset.ready = String(ready);
+
+      let label;
+      if (!available) label = 'нет управления';
+      else if (!steeringAuthorized) label = 'нужен PIN';
+      else if (!online) label = 'нет связи';
+      else if (calibrating) label = 'калибровка';
+      else if (!homed) label = 'нужна калибровка';
+      else if (moving) label = 'поворачивается';
+      else if (pending) label = 'команда отправлена';
+      else label = 'готов';
+
+      const message = steerResult[id];
+      if (message && message.until > now) {
+        label = message.text;
+        card.dataset.error = String(!!message.error);
+      } else {
+        delete steerResult[id];
+        card.dataset.error = 'false';
+      }
+      if (stateEl) stateEl.textContent = label;
+    });
+  }
+
+  function initSteeringControls() {
+    const panel = $('swipe-motors-view');
+    if (!panel) return;
+    const ids = ['FL', 'FR', 'RL', 'RR'];
+    const unlockButton = $('steer-unlock');
+    const lockButton = $('steer-lock');
+
+    // Не даём горизонтальному движению по слайдеру закрыть swipe-панель.
+    ['pointerdown', 'pointermove', 'pointerup', 'mousedown', 'mouseup'].forEach((name) => {
+      panel.addEventListener(name, (event) => {
+        if (event.target.closest && event.target.closest('input, button, select, textarea')) event.stopPropagation();
+      });
+    });
+    ['touchstart', 'touchmove', 'touchend'].forEach((name) => {
+      panel.addEventListener(name, (event) => {
+        if (event.target.closest && event.target.closest('input, button, select, textarea')) event.stopPropagation();
+      }, {passive: true});
+    });
+
+    function markDirty(id, value) {
+      const card = panel.querySelector('[data-steer-card="' + id + '"]');
+      const slider = $('steer-slider-' + id);
+      const output = $('steer-target-' + id);
+      if (!card || !slider) return;
+      slider.value = String(Math.max(-32, Math.min(32, Math.round(value))));
+      card.dataset.steerDirty = 'true';
+      delete steerResult[id];
+      if (output) output.textContent = Math.round(+slider.value) + '°';
+      renderSteeringControls(lastData || {});
     }
 
-    function stopReturnAnim() {
-      if (returnAnim) { cancelAnimationFrame(returnAnim); returnAnim = null; }
+    function errorText(reason) {
+      const messages = {
+        pin_required: 'PIN истёк · разблокируйте',
+        control_not_supported: 'источник не поддерживает управление',
+        module_offline: 'нет свежей связи',
+        serial_unavailable: 'порт мастера недоступен',
+        not_homed: 'сначала нужна калибровка',
+        module_busy: 'дождитесь остановки модуля',
+        angle_limit: 'угол за пределами ±32°',
+        command_queue_full: 'очередь команд занята',
+        invalid_module: 'неизвестный модуль',
+        invalid_angle: 'неверный угол',
+      };
+      return messages[reason] || 'команда не принята';
     }
 
-    function animateBack() {
-      stopReturnAnim();
-      const from = curAngle;
-      const start = performance.now();
-      const dur = 520;
-      // держим флаг активным пока крутим обратно
-      fingerSteerActive = true;
-      function step(now) {
-        const t = Math.min(1, (now - start)/dur);
-        const ease = 1 - Math.pow(1 - t, 3);
-        const a = from * (1 - ease);
-        curAngle = a;
-        fingerSteerAngle = a;
-        // визуально
-        const front = a;
-        const rear = -a * 0.72;
-        const map = {FL: front, FR: front, RL: rear, RR: rear};
-        ['FL','FR','RL','RR'].forEach(id => {
-          const w = wheels[id];
-          const el = angleEls[id];
-          const ang = map[id];
-          if (w) w.style.transform = 'rotate(' + ang.toFixed(1) + 'deg)';
-          if (el) el.textContent = Math.round(ang) + '°';
-          if (w) w.setAttribute('data-tone', Math.abs(ang) > 1 ? 'move' : 'idle');
-          const card = document.getElementById('mod-' + id);
-          if (card) card.setAttribute('data-tone', Math.abs(ang) > 1 ? 'move' : 'idle');
+    async function sendSteer(id) {
+      const card = panel.querySelector('[data-steer-card="' + id + '"]');
+      const slider = $('steer-slider-' + id);
+      if (!card || !slider) return;
+      if (!steeringAuthorized) {
+        if (window._openSteeringAuth) window._openSteeringAuth();
+        return;
+      }
+      const angle = Math.max(-32, Math.min(32, Number(slider.value)));
+      const sendButton = panel.querySelector('[data-steer-send="' + id + '"]');
+      if (sendButton) sendButton.disabled = true;
+      try {
+        const response = await fetch('api/kiosk_steer', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', 'X-Robot-Control': 'steering' },
+          body: JSON.stringify({ module: id, angle })
         });
-        const speedEl = $('speed');
-        if (speedEl) speedEl.textContent = '0.0';
-        if (t < 1) {
-          returnAnim = requestAnimationFrame(step);
-        } else {
-          curAngle = 0;
-          fingerSteerAngle = 0;
-          fingerSteerActive = false;
-          bodyEl.classList.remove('is-dragging');
-          // вернуть реальный рендер
-          if (lastData) { renderChassis(lastData); renderBattery(lastData); }
-          else { fingerSteerActive = false; }
+        const result = await response.json();
+        if (!response.ok || !result || !result.ok) {
+          if (response.status === 401 || (result && result.reason === 'pin_required')) {
+            setSteeringAuthorized(false);
+          }
+          steerResult[id] = { text: errorText(result && result.reason), error: true, until: Date.now() + 6000 };
+          renderSteeringControls(lastData || {});
+          if (response.status === 401 && window._openSteeringAuth) window._openSteeringAuth();
+          return;
         }
+        pendingSteer[id] = { angle: Number(result.angle), sentAt: Date.now() };
+        card.dataset.steerDirty = 'false';
+        steerResult[id] = { text: 'команда передана · без тяги', error: false, until: Date.now() + 6000 };
+        renderSteeringControls(lastData || {});
+      } catch (error) {
+        steerResult[id] = { text: 'нет связи с сервером', error: true, until: Date.now() + 6000 };
+        renderSteeringControls(lastData || {});
       }
-      returnAnim = requestAnimationFrame(step);
     }
 
-    function onDown(x) {
-      stopReturnAnim();
-      isDragging = true;
-      fingerSteerActive = true;
-      startX = x;
-      startAngle = curAngle;
-      bodyEl.classList.add('is-dragging');
-      bodyEl.setPointerCapture && bodyEl.setPointerCapture(1);
-      if (navigator.vibrate) try { navigator.vibrate(12); } catch(e) {}
-    }
-    function onMove(x) {
-      if (!isDragging) return;
-      const dx = x - startX;
-      applyAngle(startAngle + dx * SENS);
-    }
-    function onUp() {
-      if (!isDragging) return;
-      isDragging = false;
-      bodyEl.classList.remove('is-dragging');
-      if (navigator.vibrate) try { navigator.vibrate([14, 20, 14]); } catch(e) {}
-      animateBack();
-    }
-
-    // pointer events — работают и мышью и пальцем
-    bodyEl.addEventListener('pointerdown', (e) => {
-      if (e.button !== 0 && e.pointerType === 'mouse') return;
-      // не дать свайпу страницы перехватить: стоп пропагейшн
-      e.stopPropagation();
-      onDown(e.clientX);
-      try { bodyEl.setPointerCapture(e.pointerId); } catch(ex){}
-    });
-    bodyEl.addEventListener('pointermove', (e) => {
-      if (!isDragging) return;
-      e.stopPropagation();
-      onMove(e.clientX);
-      e.preventDefault();
-    }, {passive:false});
-    bodyEl.addEventListener('pointerup', (e) => {
-      e.stopPropagation();
-      onUp();
-      try { bodyEl.releasePointerCapture(e.pointerId); } catch(ex){}
-    });
-    bodyEl.addEventListener('pointercancel', (e) => {
-      e.stopPropagation();
-      onUp();
-    });
-    bodyEl.addEventListener('pointerleave', (e) => {
-      // не отпускаем если палец вышел — ждём up
+    ids.forEach((id) => {
+      const slider = $('steer-slider-' + id);
+      const card = panel.querySelector('[data-steer-card="' + id + '"]');
+      if (slider) slider.addEventListener('input', () => markDirty(id, slider.value));
+      panel.querySelectorAll('[data-steer-adjust="' + id + '"]').forEach((button) => {
+        button.addEventListener('click', () => markDirty(id, Number(slider.value) + Number(button.dataset.step)));
+      });
+      const zero = panel.querySelector('[data-steer-zero="' + id + '"]');
+      if (zero) zero.addEventListener('click', () => markDirty(id, 0));
+      const send = panel.querySelector('[data-steer-send="' + id + '"]');
+      if (send) send.addEventListener('click', () => sendSteer(id));
+      if (card) card.dataset.steerDirty = 'false';
     });
 
-    // touch fallback для старых браузеров без pointer
-    bodyEl.addEventListener('touchstart', (e) => {
-      if (e.touches.length !== 1) return;
-      e.stopPropagation();
-      onDown(e.touches[0].clientX);
-    }, {passive:true});
-    bodyEl.addEventListener('touchmove', (e) => {
-      if (!isDragging || e.touches.length !== 1) return;
-      e.stopPropagation();
-      onMove(e.touches[0].clientX);
-      e.preventDefault();
-    }, {passive:false});
-    bodyEl.addEventListener('touchend', (e) => {
-      e.stopPropagation();
-      onUp();
-    }, {passive:true});
-
-    // также можно крутить колёсиком мыши для десктопа (опционально)
-    bodyEl.addEventListener('wheel', (e) => {
-      e.preventDefault();
-      applyAngle(curAngle + Math.sign(e.deltaX || e.deltaY) * 2.2);
-      clearTimeout(bodyEl._wheelTimer);
-      bodyEl._wheelTimer = setTimeout(animateBack, 700);
-    }, {passive:false});
-
-    // подсказка: первый раз пульсация
-    setTimeout(() => {
-      bodyEl.animate && bodyEl.animate([{transform:'scale(1)'},{transform:'scale(1.01)'},{transform:'scale(1)'}], {duration: 700, iterations: 1});
-    }, 2200);
+    if (unlockButton) unlockButton.addEventListener('click', () => {
+      if (window._openSteeringAuth) window._openSteeringAuth();
+    });
+    if (lockButton) lockButton.addEventListener('click', async () => {
+      try {
+        await fetch('api/kiosk_lock/session/end', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}'
+        });
+      } catch (error) {}
+      setSteeringAuthorized(false);
+      ids.forEach((id) => { delete pendingSteer[id]; delete steerResult[id]; });
+      renderSteeringControls(lastData || {});
+    });
+    renderSteeringControls(lastData || {});
   }
 
   if (document.readyState === 'loading') document.addEventListener('DOMContentLoaded', boot);

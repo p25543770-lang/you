@@ -20,6 +20,7 @@ backend.py — сервер борта RUS SLAM: отдаёт экраны и д
     --source sim      демонстрационная физика (стенд без робота) — по умолчанию;
     --source serial   реальные модули: кадры телеметрии 16 Б по /dev/ttyUSB*
                       (протокол: docs/SERIAL_PROTOCOL.md, CRC16/Modbus);
+    --source master   мастер по одному UART: @TLM и адресный поворот модулей;
     --source ros      ROS 2 (rclpy): /modules/state, /battery, /cargo/lock.
 
 Замок: PIN-код хранится как SHA-256(salt + pin) в gui/state/lock.json,
@@ -46,6 +47,7 @@ import hashlib
 import json
 import math
 import os
+import queue
 import re
 import secrets
 import shutil
@@ -345,10 +347,15 @@ def parse_master_line(line):
         if sep:
             fields[key] = value
     try:
+        module = fields["mod"].upper()
+        angle = float(fields["deg"])
+        target = float(fields.get("tgt", "0"))
+        if module not in MODULE_TITLES or not math.isfinite(angle) or not math.isfinite(target):
+            return None
         return {
-            "mod": fields["mod"].upper(),
-            "deg": float(fields["deg"]),
-            "tgt": float(fields.get("tgt", "0")),
+            "mod": module,
+            "deg": angle,
+            "tgt": target,
             "moving": fields.get("moving") == "1",
             "cal": fields.get("cal") == "1",
             "cycle": fields.get("cycle") == "1",
@@ -360,21 +367,25 @@ def parse_master_line(line):
 
 
 class MasterSource:
-    """Мастер-Arduino по одному UART: строки "@TLM" из motor_master.ino.
+    """Мастер-Arduino по одному UART: телеметрия и поворот выбранного модуля.
 
-    Мастер передаёт телеметрию своего мотора (FL) и трёх узлов (FR, RL, RR),
-    которые он опрашивает по I2C. Модуля, который не отвечает, нет в ответе:
-    его значения пустые, а не выдуманные.
+    Веб-пульт может отправить только целевой угол одного рулевого модуля.
+    Команда ставится в очередь того же UART, который читает телеметрию; тяга
+    и скорость колёс этим источником не управляются.
     """
 
     name = "master"
+    supports_individual_steer = True
     STALE_S = 1.0
+    MAX_STEER_DEG = 32.0
 
     def __init__(self, port, baud=115200):
         self.port = port
         self.baud = baud
         self.lock = threading.Lock()
         self.frames = {}                 # модуль → (последний кадр, время)
+        self.commands = queue.Queue(maxsize=16)
+        self.serial_ready = threading.Event()
         self._stop = False
         threading.Thread(target=self._reader, daemon=True).start()
 
@@ -387,6 +398,60 @@ class MasterSource:
             self.frames[frame["mod"]] = (frame, time.time() if now is None else now)
         return True
 
+    def steer_module(self, module, angle, now=None):
+        """Поставить в очередь только поворот одного откалиброванного модуля."""
+        module = str(module or "").upper()
+        try:
+            angle = float(angle)
+        except (TypeError, ValueError):
+            return {"ok": False, "reason": "invalid_angle"}
+        if module not in MODULE_TITLES:
+            return {"ok": False, "reason": "invalid_module"}
+        if not math.isfinite(angle) or abs(angle) > self.MAX_STEER_DEG:
+            return {"ok": False, "reason": "angle_limit"}
+        if not self.serial_ready.is_set():
+            return {"ok": False, "reason": "serial_unavailable"}
+
+        now = time.time() if now is None else now
+        with self.lock:
+            entry = self.frames.get(module)
+        if entry is None or now - entry[1] >= self.STALE_S:
+            return {"ok": False, "reason": "module_offline"}
+        frame = entry[0]
+        if not frame.get("cal"):
+            return {"ok": False, "reason": "not_homed"}
+        if frame.get("moving") or frame.get("calib") or frame.get("cycle"):
+            return {"ok": False, "reason": "module_busy"}
+
+        # Узкий протокол: module + angle. В нём нет команды тяги/PWM.
+        command = ("w %s %.1f\n" % (module, angle)).encode("ascii")
+        try:
+            self.commands.put_nowait(command)
+        except queue.Full:
+            return {"ok": False, "reason": "command_queue_full"}
+        return {"ok": True, "queued": True, "module": module, "angle": round(angle, 1)}
+
+    def _discard_pending_commands(self):
+        while True:
+            try:
+                self.commands.get_nowait()
+            except queue.Empty:
+                return
+            else:
+                self.commands.task_done()
+
+    def _write_pending_commands(self, dev):
+        while True:
+            try:
+                command = self.commands.get_nowait()
+            except queue.Empty:
+                return
+            try:
+                dev.write(command)
+                dev.flush()
+            finally:
+                self.commands.task_done()
+
     def _reader(self):
         try:
             import serial                    # pyserial, только для реального железа
@@ -395,15 +460,23 @@ class MasterSource:
             return
         while not self._stop:
             try:
-                with serial.Serial(self.port, self.baud, timeout=0.5) as dev:
+                with serial.Serial(self.port, self.baud, timeout=0.2) as dev:
+                    self.serial_ready.set()
                     print("· master: %s открыт" % self.port)
                     while not self._stop:
                         raw = dev.readline()
                         if raw:
                             self.feed(raw.decode("utf-8", "replace"))
+                        self._write_pending_commands(dev)
             except Exception as exc:          # noqa: BLE001 — порт может пропасть
-                print("! master %s: %s — повтор через 2 с" % (self.port, exc))
-                time.sleep(2.0)
+                self.serial_ready.clear()
+                self._discard_pending_commands()
+                if not self._stop:
+                    print("! master %s: %s — повтор через 2 с" % (self.port, exc))
+                    time.sleep(2.0)
+            finally:
+                self.serial_ready.clear()
+                self._discard_pending_commands()
 
     def read(self, now=None):
         now = time.time() if now is None else now
@@ -418,13 +491,16 @@ class MasterSource:
                 link = True
                 frame = entry[0]
                 motors.append({"id": mid, "title": MODULE_TITLES[mid],
-                               "angle": round(frame["deg"], 2), "rpm": None, "temp": None,
+                               "angle": round(frame["deg"], 2),
+                               "targetAngle": round(frame["tgt"], 2),
+                               "rpm": None, "temp": None,
                                "homed": frame["cal"], "online": True, "fault": None,
-                               "moving": frame["moving"]})
+                               "moving": frame["moving"], "calibrating": frame["calib"]})
             else:
                 motors.append({"id": mid, "title": MODULE_TITLES[mid], "angle": None,
-                               "rpm": None, "temp": None, "homed": None,
-                               "online": False, "fault": None})
+                               "targetAngle": None, "rpm": None, "temp": None,
+                               "homed": None, "online": False, "fault": None,
+                               "moving": False, "calibrating": False})
         out = NoSource().read()              # АКБ, скорость, маршрут — пока не передаются
         out["motors"] = motors
         out["mode"] = "МАСТЕР НА СВЯЗИ" if link else None

@@ -434,15 +434,10 @@ body.soc-crit .kpi-sub { color: var(--err); }
     radial-gradient(circle at 1px 1px, #2a2a2c 1.5px, transparent 2px) 0 0 / 24px 24px,
     linear-gradient(180deg, #161616, #101010);
   min-height: 0;
-  cursor: grab;
-  touch-action: none;
+  cursor: default;
+  touch-action: pan-y;
   user-select: none;
   -webkit-user-select: none;
-}
-.body:active { cursor: grabbing; }
-.body.is-dragging {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 2px rgba(255,255,255,.12) inset, 0 8px 24px rgba(0,0,0,.25);
 }
 .body-drag-hint {
   position: absolute;
@@ -1035,7 +1030,7 @@ body[data-theme="peach"] { --bg:#14100a; --bg-2:#1e1812; --panel:#2a2018; --pane
 body[data-theme="ice"] { --bg:#0a1418; --bg-2:#0f1f24; --panel:#14272e; --panel-2:#1a323a; --line:#23444d; --line-2:#2c545e; --text:#e0f6ff; --muted:#8ab4c0; --accent:#7dd3e0; --ok:#7dd3e0; --idle:#5a7a8a; }
 
 /* ------------------------ Маленькие экраны (fallback) ------------------------ */
-/* ========================= СВАЙП-ЭКРАН: 2 камеры + логи (свайп вправо) ========================= */
+/* ========================= СВАЙП-ЭКРАН: два направления с главного ========================= */
 .kiosk { position: relative; }
 .swipe-hint-bar {
   position: absolute;
@@ -1066,30 +1061,6 @@ body[data-theme="ice"] { --bg:#0a1418; --bg-2:#0f1f24; --panel:#14272e; --panel-
   animation: hint-pulse 1.6s ease-in-out infinite;
 }
 @keyframes hint-pulse { 0%,100%{ opacity:.7; transform:scale(1);} 50%{ opacity:1; transform:scale(1.25);} }
-
-.swipe-handle {
-  position: absolute;
-  right: 0;
-  top: 50%;
-  transform: translateY(-50%);
-  width: 28px;
-  height: 96px;
-  display: grid;
-  place-items: center;
-  background: linear-gradient(180deg, #1e1e20, #141416);
-  border: 1px solid var(--line);
-  border-right: none;
-  border-radius: 12px 0 0 12px;
-  color: var(--muted);
-  font-size: 22px;
-  font-weight: 900;
-  cursor: pointer;
-  box-shadow: -4px 0 12px rgba(0,0,0,.25);
-  transition: background .15s, color .15s, transform .15s;
-  z-index: 5;
-}
-.swipe-handle:hover { background: #202022; color: var(--text); }
-.swipe-handle:active { transform: translateY(-50%) scale(.97); }
 
 .swipe-page {
   position: fixed;
@@ -1123,15 +1094,19 @@ body[data-theme="ice"] { --bg:#0a1418; --bg-2:#0f1f24; --panel:#14272e; --panel-
   display: flex;
   flex-direction: column;
   background: var(--bg);
-  transform: translateX(105%);
+  transform: translateX(-105%);
   transition: transform .48s cubic-bezier(.22,1,.36,1);
   will-change: transform;
-  box-shadow: -24px 0 64px rgba(0,0,0,.5), 0 0 0 1px rgba(255,255,255,.06) inset;
+  box-shadow: 24px 0 64px rgba(0,0,0,.5), 0 0 0 1px rgba(255,255,255,.06) inset;
   overflow: hidden;
 }
 .swipe-page.is-open .swipe-sheet { transform: translateX(0); }
-.swipe-page[hidden] .swipe-sheet { transform: translateX(105%); }
+.swipe-page[hidden] .swipe-sheet { transform: translateX(-105%); }
 .swipe-page.is-open[hidden] .swipe-sheet { transform: translateX(0); }
+.swipe-page[data-open-direction="left"] .swipe-sheet { transform: translateX(105%); }
+.swipe-page.is-open[data-open-direction="left"] .swipe-sheet { transform: translateX(0); }
+.swipe-page[hidden][data-open-direction="left"] .swipe-sheet { transform: translateX(105%); }
+.swipe-page.is-open[hidden][data-open-direction="left"] .swipe-sheet { transform: translateX(0); }
 /* лёгкий параллакс киоска при открытии */
 body.swipe-open .kiosk {
   transform: scale(.985);
@@ -1165,6 +1140,7 @@ body.swipe-open .kiosk {
 .swipe-title { flex: 1 1 auto; min-width: 0; }
 .swipe-title h2 { margin: 0; font-size: 20px; font-weight: 900; line-height: 1.1; }
 .swipe-title small { color: var(--muted); font-size: 12px; font-weight: 600; }
+.btn-steer:focus-visible, .steer-actions button:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 .swipe-live {
   padding: 6px 12px;
   border-radius: 999px;
@@ -1180,11 +1156,17 @@ body.swipe-open .kiosk {
 .swipe-body {
   flex: 1 1 auto;
   min-height: 0;
+  padding: 16px 20px 20px;
+  background: var(--bg);
+  overflow: hidden;
+}
+.swipe-view[hidden] { display: none !important; }
+.swipe-camera-view {
+  height: 100%;
+  min-height: 0;
   display: grid;
   grid-template-columns: 1.55fr 1fr;
   gap: 16px;
-  padding: 16px 20px 20px;
-  background: var(--bg);
   overflow: hidden;
 }
 .cam-stack {
@@ -1377,11 +1359,96 @@ body.swipe-open .kiosk {
 .log-auto { display: flex; align-items: center; gap: 6px; cursor: pointer; user-select: none; }
 .log-auto input { accent-color: var(--accent); }
 
+/* ===================== Управление каждым рулевым модулем ===================== */
+.steer-panel {
+  height: 100%;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  overflow: auto;
+  scrollbar-width: thin;
+}
+.steer-panel-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 18px;
+}
+.steer-panel-head h3 { margin: 0 0 4px; font-size: 20px; font-weight: 900; }
+.steer-panel-head p { margin: 0; color: var(--muted); font-size: 13px; }
+.steer-access { display: flex; align-items: center; gap: 8px; flex: none; }
+.steer-auth-status { color: var(--muted); font-size: 12px; font-weight: 800; }
+.btn-steer {
+  border: 1px solid var(--accent);
+  border-radius: 10px;
+  background: var(--accent);
+  color: #111;
+  padding: 9px 14px;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 900;
+  cursor: pointer;
+}
+.btn-steer--quiet { border-color: var(--line-2); background: var(--bg-2); color: var(--text); }
+.drive-interlock {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 10px 14px;
+  border: 1px solid #46634c;
+  border-radius: 10px;
+  background: rgba(55,110,61,.14);
+  color: #d8f5dc;
+  font-size: 12px;
+}
+.drive-interlock b { flex: none; color: #b8f0c0; letter-spacing: .5px; }
+.steer-source-status { min-height: 18px; margin: 0; color: var(--muted); font-size: 12px; font-weight: 700; }
+.steer-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+.steer-card {
+  min-width: 0;
+  padding: 14px 16px;
+  background: var(--panel);
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  display: flex;
+  flex-direction: column;
+  gap: 9px;
+}
+.steer-card header { display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+.steer-card header > b { font-size: 19px; font-weight: 900; letter-spacing: .6px; }
+.steer-state { color: var(--muted); font-size: 11px; font-weight: 800; text-align: right; }
+.steer-card[data-ready="true"] { border-color: #3c6143; }
+.steer-card[data-error="true"] { border-color: #713838; }
+.steer-readout { display: flex; justify-content: space-between; gap: 10px; color: var(--muted); font-size: 12px; }
+.steer-readout b, .steer-readout output { color: var(--text); font-size: 16px; font-weight: 900; font-variant-numeric: tabular-nums; }
+.steer-card input[type="range"] { width: 100%; margin: 2px 0; accent-color: var(--accent); touch-action: pan-y; }
+.steer-range-labels { display: flex; justify-content: space-between; margin-top: -8px; color: var(--muted); font-size: 10px; }
+.steer-actions { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 6px; }
+.steer-actions button {
+  min-height: 38px;
+  padding: 6px 7px;
+  border: 1px solid var(--line-2);
+  border-radius: 8px;
+  background: var(--bg-2);
+  color: var(--text);
+  font: inherit;
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+  touch-action: manipulation;
+}
+.steer-actions button.steer-send { background: var(--panel-2); border-color: var(--accent); color: var(--accent); }
+.steer-actions button:disabled, .btn-steer:disabled { opacity: .4; cursor: not-allowed; }
+.steer-footnote { margin: 0; color: var(--muted); font-size: 11px; }
+
 @media (max-width: 1100px) {
-  .swipe-body { grid-template-columns: 1fr; grid-template-rows: auto 1fr; overflow: auto; }
+  .swipe-body { overflow: auto; }
+  .swipe-camera-view { height: auto; min-height: 100%; grid-template-columns: 1fr; grid-template-rows: auto auto; overflow: visible; }
   .cam-stack { grid-template-rows: none; }
   .cam-viewport { min-height: 220px; }
   .log-panel { min-height: 320px; }
+  .steer-panel { height: auto; min-height: 100%; overflow: visible; }
 }
 
 @media (max-width: 1200px) {
@@ -1403,6 +1470,17 @@ body.swipe-open .kiosk {
 }
 @media (max-width: 640px) {
   .kiosk { padding: 14px 14px 18px; gap: 14px; }
+  .swipe-head { flex-wrap: wrap; gap: 9px; padding: 12px 14px; }
+  .swipe-close { padding: 8px 12px; font-size: 13px; }
+  .swipe-title { flex: 1 1 calc(100% - 140px); }
+  .swipe-title h2 { font-size: 17px; }
+  .swipe-live { margin-left: auto; }
+  .swipe-body { padding: 10px; }
+  .steer-panel-head { align-items: stretch; flex-direction: column; gap: 10px; }
+  .steer-access { justify-content: space-between; flex-wrap: wrap; }
+  .steer-grid { grid-template-columns: 1fr; }
+  .steer-actions { grid-template-columns: repeat(4, minmax(0, 1fr)); }
+  .drive-interlock { align-items: flex-start; flex-direction: column; gap: 3px; }
   .brand b { font-size: 18px; }
   .brandmark { width: 38px; height: 38px; }
   .mode-pill { font-size: 14px; padding: 6px 12px; }
