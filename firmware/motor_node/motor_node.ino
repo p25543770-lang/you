@@ -1,5 +1,6 @@
 #include <Wire.h>
 #include <avr/interrupt.h>
+#include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -30,6 +31,7 @@ const int OPTO_PIN = 18;
 const unsigned long STEP_PERIOD_US = 100;
 const unsigned long CALIB_STEP_PERIOD_US = 2000;
 const float STEPS_PER_DEGREE = 133.333333;
+const float STEER_COMMAND_LIMIT_DEG = 32.0;
 const int CALIB_SEARCH_DEGREES = 100;
 const int CALIB_SLOW_SEARCH_DEGREES = 20;
 const bool OPTO_ACTIVE_LOW = true;
@@ -75,6 +77,7 @@ volatile uint8_t tlm_front = 0;      // копия, которую отдаём 
 uint8_t tlm_back = 1;                // копия, которую готовит основной цикл
 
 void processCommand(String cmd);
+void moveToSteeringAngle(float degrees);
 void handleCalibration();
 void onMoveFinished();
 void refreshTelemetry();
@@ -342,7 +345,40 @@ void handleCalibration() {
   }
 }
 
+void moveToSteeringAngle(float degrees) {
+  if (!isfinite(degrees) || fabs(degrees) > STEER_COMMAND_LIMIT_DEG) return;
+  if (!calibrated || calib_state != CALIB_IDLE || is_cycling) return;
+
+  long current;
+  bool busy;
+  noInterrupts();
+  current = current_step;
+  busy = is_moving;
+  interrupts();
+  if (busy) return;
+
+  const long target = lroundf(degrees * STEPS_PER_DEGREE);
+  digitalWrite(DIR, target < current ? HIGH : LOW);
+  noInterrupts();
+  target_step = target;
+  is_moving = (target != current);
+  move_done = false;
+  interrupts();
+}
+
 void processCommand(String cmd) {
+  cmd.toLowerCase();
+  if (cmd.startsWith("w ")) {
+    String angleText = cmd.substring(2);
+    angleText.trim();
+    char* end = nullptr;
+    const char* angleStart = angleText.c_str();
+    const double parsed = strtod(angleStart, &end);
+    if (end == angleStart || *end != '\0' || !isfinite(parsed)) return;
+    moveToSteeringAngle((float)parsed);
+    return;
+  }
+
   if (cmd == "k") {
     if (calib_state != CALIB_IDLE) return;
     is_cycling = false;

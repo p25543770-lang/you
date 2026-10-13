@@ -75,6 +75,25 @@ def test_api_state_shape(client, operator):
     assert data["lock"]["open"] is False
 
 
+def test_kiosk_steering_endpoint_uses_pin_session_without_operator_login(app, client):
+    """Киоск открыт без логина оператора, но физическая команда закрыта PIN-сессией."""
+    class FakeSteeringSource:
+        name = "master"
+        supports_individual_steer = True
+
+        def steer_module(self, module, angle):
+            return {"ok": True, "angle": angle}
+
+    app.extensions["rc_slam"].source = FakeSteeringSource()
+    command = {"module": "RL", "angle": -8}
+    header = {"X-Robot-Control": "steering"}
+    assert client.post("/api/kiosk_steer", json=command, headers=header).status_code == 401
+    assert client.post("/api/kiosk_lock/verify", json={"pin": DEFAULT_PIN}).status_code == 200
+    response = client.post("/api/kiosk_steer", json=command, headers=header)
+    assert response.status_code == 200
+    assert response.get_json()["module"] == "RL"
+
+
 def test_api_health_reports_source(client, operator):
     login(client)
     body = client.get("/api/health").get_json()
@@ -333,6 +352,35 @@ def test_master_line_parses_tlm_and_ignores_text():
     assert frame["cycle"] is False and frame["opto"] is False
     assert backend.parse_master_line("Цель достигнута. Угол: 12.00°") is None
     assert backend.parse_master_line("@TLM mod=FL deg=abc") is None
+    assert backend.parse_master_line("@TLM mod=DRIVE deg=0") is None
+    assert backend.parse_master_line("@TLM mod=FL deg=nan") is None
+
+
+def test_master_source_queues_only_safe_module_angle_commands():
+    """Команда отправляется только свежему откалиброванному и остановленному модулю."""
+    import queue
+    import threading
+
+    backend = _load_backend()
+    src = object.__new__(backend.MasterSource)
+    src.lock = threading.Lock()
+    src.frames = {}
+    src.commands = queue.Queue(maxsize=4)
+    src.serial_ready = threading.Event()
+    src.serial_ready.set()
+    src.feed("@TLM mod=FR deg=0 tgt=0 moving=0 cal=1 cycle=0 calib=0", now=100.0)
+
+    result = src.steer_module("fr", 12.5, now=100.2)
+    assert result == {"ok": True, "queued": True, "module": "FR", "angle": 12.5}
+    assert src.commands.get_nowait() == b"w FR 12.5\n"
+
+    assert src.steer_module("FR", 33, now=100.2)["reason"] == "angle_limit"
+    assert src.steer_module("FL", 10, now=100.2)["reason"] == "module_offline"
+    src.feed("@TLM mod=RL deg=0 tgt=0 moving=0 cal=0 cycle=0 calib=0", now=100.0)
+    assert src.steer_module("RL", 10, now=100.2)["reason"] == "not_homed"
+    src.feed("@TLM mod=RR deg=0 tgt=0 moving=1 cal=1 cycle=0 calib=0", now=100.0)
+    assert src.steer_module("RR", 10, now=100.2)["reason"] == "module_busy"
+    assert src.steer_module("FR", 10, now=101.2)["reason"] == "module_offline"
 
 
 def test_master_source_reports_each_module_and_empty_for_silent_ones():
