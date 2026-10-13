@@ -19,7 +19,9 @@
   * «ответил на SCAN, но точек нет» — скорость угадана, а мотор не крутится:
     нужен другой уровень линии DTR/RTS (RC_LIDAR_MOTOR) или питание лидара;
   * «нет ответа» — скорость не та (A1/A2M8 — 115200, A2M7/A2M12/A3/S1 — 256000,
-    C1 — 460800, LD06/LD19 — 230400) или лидар подключён не к тому порту.
+    C1 — 460800, LD06/LD19 и LDS-01/LDS-02 — 230400) или лидар подключён не к тому
+    порту. Лидар TurtleBot3 Burger (LDS-01, он же HLS-LFCD2) идёт кадрами 0xFA по
+    42 байта; в списке настроек он назван протоколом ``lds01``.
 
 Проверяются ВСЕ USB-порты (и порт из RC_LIDAR_PORT первым): лидар легко
 переезжает на соседний /dev/ttyUSBx после переподключения.
@@ -39,6 +41,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from robot_control.lidar import (  # noqa: E402
     LIDAR_MIN_POINTS,
     LIDAR_PROBE_TIMEOUT_S,
+    LIDAR_PROTOCOLS,
     discover_ports,
     excluded_ports,
     lidar_profiles,
@@ -51,6 +54,7 @@ from robot_control.lidar import (  # noqa: E402
 PROTOCOL_TITLES = {
     "rplidar": "RPLIDAR (A1/A2/A3/S1/C1)",
     "ld06": "LD06/LD19 (D500 и клоны)",
+    "lds01": "LDS-01/LDS-02 — лидар TurtleBot3 Burger (HLS-LFCD2)",
 }
 
 
@@ -170,7 +174,9 @@ def main(argv=None) -> int:
     )
     parser.add_argument("--port", default="", help="порт или glob (по умолчанию — поиск сам)")
     parser.add_argument("--baud", type=int, default=None, help="перебрать только эту скорость")
-    parser.add_argument("--protocol", choices=["auto", "rplidar", "ld06"], default="auto")
+    parser.add_argument("--protocol", choices=list(LIDAR_PROTOCOLS), default="auto",
+                        help="auto | rplidar | ld06 | lds01 (LDS-01/LDS-02 — TurtleBot3); "
+                             "понимает и синонимы: lds, hls-lfcd2, turtlebot3")
     parser.add_argument("--motor", default="auto",
                         help="управление мотором RPLIDAR: auto | none | dtr-low | dtr-high | rts-low | rts-high")
     parser.add_argument("--list", action="store_true", help="только показать порты и выйти")
@@ -237,7 +243,8 @@ def main(argv=None) -> int:
 
     log("Итог: лидар не найден.")
     log("• скорость зависит от модели: A1/A2M8 — 115200, A2M7/A2M12/A3/S1 — 256000,")
-    log("  C1 — 460800, LD06/LD19 — 230400 (у RPLIDAR A3 на адаптере есть переключатель);")
+    log("  C1 — 460800, LD06/LD19 и LDS-01/LDS-02 (TurtleBot3) — 230400")
+    log("  (у RPLIDAR A3 на адаптере есть переключатель 115200/256000);")
     log("• проверь питание и кабель лидара, а также что порт не занят другой программой;")
     log("• если лидар подключён к мастер-плате (а не к USB) — сканы должен отдавать её протокол.")
     return 1

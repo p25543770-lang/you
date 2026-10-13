@@ -1,10 +1,12 @@
 """Проверки чтения USB/serial лидара: подбор порта, протокола и скорости.
 
 Железа в тестах нет, поэтому pyserial подменяется виртуальными устройствами:
-«RPLIDAR» (отвечает на SCAN и отдаёт точки, пока крутится мотор) и «LD06/LD19»
-(односторонний поток пакетов 0x54 0x2C). Это позволяет проверить ровно те
+«RPLIDAR» (отвечает на SCAN и отдаёт точки, пока крутится мотор), «LD06/LD19»
+(односторонний поток пакетов 0x54 0x2C) и «LDS-01/LDS-02» — лидар TurtleBot3
+Burger, который сыплет кадры 0xFA по 42 байта. Это позволяет проверить ровно те
 ситуации, из-за которых на экране было «скана лидара нет»: мотор не включён
-линией DTR/RTS, другая скорость порта (A3/S1 — 256000), порт занят вторым
+линией DTR/RTS, другая скорость порта (A3/S1 — 256000), лидар не той модели
+(кадры 0xFA против 0x54 на одной и той же скорости 230400), порт занят вторым
 процессом робота.
 """
 
@@ -14,7 +16,9 @@ import importlib.util
 import json
 import logging
 import math
+import os
 import pathlib
+import random
 import sys
 import threading
 import time
@@ -25,15 +29,21 @@ import pytest
 
 from robot_control import lidar
 from robot_control.lidar import (
+    Lds01Stream,
     Ld06Stream,
     LidarManager,
     RplidarStream,
     ScanAccumulator,
     discover_ports,
     ld06_crc_ok,
+    lds01_checksum,
+    lds01_packet_crc_ok,
     lidar_profiles,
+    normalize_angle,
+    parse_lds01_packet,
     parse_rplidar_point,
     probe_port,
+    scan_looks_like_rotation,
 )
 
 # ---------------------------------------------------------------------------
@@ -72,6 +82,32 @@ def encode_ld06_packet(start_deg: float, dist_m: float = 1.0, *, crc_ok: bool = 
     for byte in pkt[:46]:
         crc ^= byte
     pkt[46] = crc if crc_ok else (crc ^ 0xFF)
+    return bytes(pkt)
+
+
+def encode_lds01_packet(
+    index: int,
+    dist_m: float = 1.5,
+    *,
+    rpm: int = 300,
+    crc_ok: bool = True,
+    invalid: bool = False,
+) -> bytes:
+    """42-байтовый пакет LDS-01/LDS-02 (обратный к parse_lds01_packet)."""
+    pkt = bytearray(42)
+    pkt[0] = 0xFA
+    pkt[1] = 0xA0 + (index % 60)
+    pkt[2], pkt[3] = rpm & 0xFF, (rpm >> 8) & 0xFF
+    for i in range(6):
+        off = 4 + i * 6
+        dist_mm = int(round(dist_m * 1000.0)) + i
+        pkt[off], pkt[off + 1] = 200, 0                     # интенсивность
+        word = dist_mm | (0x8000 if invalid else 0)
+        pkt[off + 2], pkt[off + 3] = word & 0xFF, (word >> 8) & 0xFF
+    chk = lds01_checksum(bytes(pkt[:40]))
+    pkt[40], pkt[41] = chk & 0xFF, (chk >> 8) & 0xFF
+    if not crc_ok:
+        pkt[41] ^= 0xFF
     return bytes(pkt)
 
 
@@ -195,6 +231,93 @@ class FakeLd06(FakeDevice):
         return super().read(size, port)
 
 
+class FakeLds01(FakeDevice):
+    """Виртуальный LDS-01/LDS-02 — лидар TurtleBot3 Burger (HLS-LFCD2).
+
+    Отдаёт кадры 0xFA по 42 байта (60 пакетов = 360 точек). ``needs_start=True``
+    повторяет прошивки до 2017.10: без команды ``'b'`` мотор не крутится и данных
+    нет. ``needs_start=False`` — новый firmware, поток идёт сразу.
+    """
+
+    def __init__(
+        self,
+        *,
+        baud: int = 230400,
+        frames: int | None = None,
+        needs_start: bool = True,
+        dist_m: float = 1.5,
+        crc_ok: bool = True,
+        ignore_baud: bool = False,
+    ) -> None:
+        super().__init__(baud=baud)
+        self.frames = frames        # None — поток не кончается, как у настоящего лидара
+        self.needs_start = needs_start
+        self.dist_m = dist_m
+        self.crc_ok = crc_ok
+        #: Отдавать кадры на любой скорости — так проверяем, что чужой поток не
+        #: сходит за RPLIDAR/LD06, когда скорость порта угадана неверно.
+        self.ignore_baud = ignore_baud
+        self.scanning = not needs_start
+        self.sent = 0             # сколько пакетов уже выдано
+        self.started = False      # приходила ли команда запуска
+        self.stopped = False
+
+    @property
+    def total_packets(self) -> int | None:
+        return None if self.frames is None else self.frames * 60
+
+    def write(self, data: bytes) -> int:
+        size = super().write(data)
+        if bytes(data) == lidar.LDS01_CMD_START:
+            self.started = True
+            self.scanning = True
+        elif bytes(data) == lidar.LDS01_CMD_STOP:
+            self.stopped = True
+            self.scanning = False
+        return size
+
+    def read(self, size: int, port: "FakeSerial") -> bytes:
+        if (port.baudrate != self.baud and not self.ignore_baud) or not self.scanning:
+            return b""
+        while len(self.buffer) < size and (self.total_packets is None or self.sent < self.total_packets):
+            index = self.sent % 60
+            self.buffer.extend(
+                encode_lds01_packet(
+                    index,
+                    self.dist_m + 0.001 * (index % 7),
+                    crc_ok=self.crc_ok,
+                )
+            )
+            self.sent += 1
+        return super().read(size, port)
+
+
+class FakeNoise(FakeDevice):
+    """Устройство, которое сыплет случайными байтами: это не лидар.
+
+    Раньше такой поток мог сойти за RPLIDAR, если дескриптор ответа на SCAN
+    принимался «любыми семью байтами после синхрослова» — на экран шёл мусор.
+    Байты выдаются не быстрее скорости порта: иначе «устройство» нагенерировало
+    бы за секунду больше, чем настоящий лидар за минуты, и проверка перебора
+    перестала бы быть похожей на реальность.
+    """
+
+    def __init__(self, *, baud: int = 230400, seed: int = 1) -> None:
+        super().__init__(baud=baud)
+        self.rng = random.Random(seed)
+        self.started = time.monotonic()
+        self.emitted = 0
+
+    def read(self, size: int, port: "FakeSerial") -> bytes:
+        if port.baudrate != self.baud:
+            return b""
+        allowed = int((time.monotonic() - self.started) * self.baud / 10.0)  # 10 бит на байт
+        while self.emitted < allowed and len(self.buffer) < size:
+            self.buffer.append(self.rng.randrange(256))
+            self.emitted += 1
+        return super().read(size, port)
+
+
 class FakeSerialError(Exception):
     """Аналог serial.SerialException."""
 
@@ -308,6 +431,7 @@ def fast_lidar(monkeypatch):
     monkeypatch.setattr(lidar, "LIDAR_PROBE_TIMEOUT_S", 0.05)
     monkeypatch.setattr(lidar, "LIDAR_DATA_TIMEOUT_S", 0.05)
     monkeypatch.setattr(lidar, "LIDAR_RESCAN_S", 0.05)
+    monkeypatch.setattr(lidar, "LIDAR_ATTEMPT_MAX_S", 0.25)
     yield
 
 
@@ -379,6 +503,161 @@ def test_ld06_stream_tolerates_broken_crc():
     assert len(packets) == 1 and len(packets[0][0]) == 12
 
 
+def test_lds01_packet_angles_like_robotis_driver():
+    """Углы LDS-01 считаются как в драйвере ROBOTIS: 359° − номер точки.
+
+    Нумерация важна: карта должна совпадать с ROS-режимом TurtleBot3, где этот
+    лидар работает штатно.
+    """
+    head = parse_lds01_packet(encode_lds01_packet(0, 1.0))
+    assert len(head) == 6
+    assert abs(math.degrees(head[0]["a"]) + 1.0) < 0.05     # 359° == −1° (чуть справа от носа)
+    assert abs(math.degrees(head[5]["a"]) + 6.0) < 0.05
+    assert head[0]["r"] == 1.0
+
+    tail = parse_lds01_packet(encode_lds01_packet(59, 1.0))
+    assert abs(math.degrees(tail[-1]["a"])) < 0.05          # последняя точка витка — «вперёд»
+    assert math.degrees(tail[0]["a"]) > 0                   # 5° — слева
+
+
+def test_lds01_packet_flags_and_range():
+    """Бит «нет измерения» выбрасывает точку, остальные биты слова — маска."""
+    pkt = bytearray(encode_lds01_packet(10, 2.0))
+    pkt[6] |= 0x80                     # младший байт первого слова дальности
+    pkt[7] |= 0x80                     # старший байт: бит 15 (недостоверно)
+    chk = lds01_checksum(bytes(pkt[:40]))
+    pkt[40], pkt[41] = chk & 0xFF, (chk >> 8) & 0xFF
+    pts = parse_lds01_packet(bytes(pkt))
+    assert len(pts) == 5               # первое измерение выброшено
+
+    # Предупреждение о слабом сигнале (бит 14) измерению не мешает: биты маскируются
+    pkt = bytearray(encode_lds01_packet(10, 2.0))
+    pkt[7] |= 0x40
+    chk = lds01_checksum(bytes(pkt[:40]))
+    pkt[40], pkt[41] = chk & 0xFF, (chk >> 8) & 0xFF
+    pts = parse_lds01_packet(bytes(pkt))
+    assert pts[0]["r"] == 2.0
+
+
+def test_lds01_checksum_matches_driver_algorithm():
+    pkt = encode_lds01_packet(7, 1.0)
+    assert lds01_packet_crc_ok(pkt) is True
+    assert lds01_packet_crc_ok(encode_lds01_packet(7, 1.0, crc_ok=False)) is False
+    assert lds01_checksum(bytes(pkt[:40])) == (pkt[40] | (pkt[41] << 8))
+    assert 0 <= lds01_checksum(b"\xff" * 40) <= 0x7FFF      # складывается в 15 бит
+
+
+def test_lds01_stream_joins_split_packets_and_marks_revolution():
+    stream = Lds01Stream()
+    frame = b"".join(encode_lds01_packet(i) for i in range(60))
+    assert stream.feed(frame[:20]) == []                     # пакет разрезан чтением
+    packets = stream.feed(frame[20:])
+    assert len(packets) == 60
+    assert packets[0][1] is True                             # виток начинается пакетом 0xA0
+    assert packets[-1][1] is False
+    assert sum(1 for _, rev in packets if rev) == 1
+    assert sum(len(pts) for pts, _ in packets) == 360
+    assert stream.crc_ok == 60 and stream.crc_bad == 0
+    assert all(pts for pts, _ in packets)
+
+
+def test_lds01_stream_drops_packet_with_bad_checksum():
+    stream = Lds01Stream()
+    assert stream.feed(encode_lds01_packet(0, crc_ok=False)) == []
+    assert stream.crc_bad > 0 and stream.packets == 0
+    packets = stream.feed(encode_lds01_packet(1))
+    assert len(packets) == 1 and stream.packets == 1
+
+
+def test_lds01_stream_without_crc_confirms_stream_by_packet_numbers():
+    """Без контрольной суммы поток подтверждается серией номеров пакетов."""
+    stream = Lds01Stream(check_crc=False)
+    for index in range(lidar.LDS01_WARMUP_PACKETS - 1):
+        assert stream.feed(encode_lds01_packet(index, crc_ok=False)) == []
+    assert len(stream.feed(encode_lds01_packet(lidar.LDS01_WARMUP_PACKETS - 1, crc_ok=False))) == 1
+    # поток подтверждён — дальше пакеты идут как обычно
+    assert len(stream.feed(encode_lds01_packet(lidar.LDS01_WARMUP_PACKETS, crc_ok=False))) == 1
+
+
+def test_lds01_stream_without_crc_rejects_garbage():
+    """«Пакеты» из случайных байт не набирают серию по порядку номеров."""
+    rng = random.Random(7)
+    stream = Lds01Stream(check_crc=False)
+    produced = []
+    for _ in range(400):
+        produced.extend(stream.feed(bytes([0xFA]) + bytes(rng.randrange(256) for _ in range(63))))
+    assert produced == []
+    assert stream.crc_ok == 0
+
+
+def test_lds01_stream_switches_off_crc_for_clones_with_other_formula():
+    """Если КС не сходится ни на одном пакете — читаем поток без неё (как у LD06)."""
+    stream = Lds01Stream(crc_bad_limit=2)
+    for index in range(2):
+        stream.feed(encode_lds01_packet(index, crc_ok=False))
+    assert stream.check_crc is False
+    assert stream.crc_ok == 0 and stream.crc_bad >= 2
+
+
+def test_lds01_full_scan_publishes_all_360_points():
+    published = []
+    stream = Lds01Stream()
+    acc = ScanAccumulator(published.append, min_points=lidar.LIDAR_MIN_POINTS)
+    data = b"".join(encode_lds01_packet(i) for i in range(60)) + encode_lds01_packet(0)
+    for points, revolution in stream.feed(data):
+        acc.add(points, revolution_done=revolution)
+    assert len(published) == 1
+    scan = published[0]
+    assert len(scan) == 360
+    # Все 360 направлений разные и обходятся по кругу (шаг 1°)
+    assert len({round(math.degrees(p["a"]), 1) for p in scan}) == 360
+    assert scan[100]["a"] < scan[50]["a"]
+
+
+def test_scan_looks_like_rotation_separates_scan_from_noise():
+    """Проверка витка: настоящий скан идёт размеренно и закрывает весь круг."""
+    real = [{"a": normalize_angle(math.radians(-1.0 - i)), "r": 2.0} for i in range(360)]
+    assert scan_looks_like_rotation(real) is True
+
+    noise = [{"a": a, "r": 1.0} for a in (
+        0.1, 2.9, -1.4, 2.2, -0.3, 1.9, -2.7, 0.7, 2.5, -1.9,
+        3.0, -0.9, -2.2, 1.1, -2.9, 0.4, 2.0, -1.1, 2.7, -0.1,
+    )]
+    assert scan_looks_like_rotation(noise) is False
+    assert scan_looks_like_rotation([]) is False
+    assert scan_looks_like_rotation([{"a": 0.0, "r": 1.0}, {"a": 0.1, "r": 1.0}]) is False
+
+    # Мусор может разбираться «в упор»: шаг нулевой, но все точки в одну сторону.
+    # Так выглядит поток чужого протокола, который случайно разобрался ровно.
+    stuck = [{"a": -1.558, "r": 2.0} for _ in range(50)]
+    assert scan_looks_like_rotation(stuck) is False
+    # Дуга в полкруга — ещё не виток: у настоящего скана разрыв между соседями
+    # не больше пары градусов, здесь же дыра в 180°.
+    half = [{"a": normalize_angle(math.radians(-1.0 - i)), "r": 2.0} for i in range(180)]
+    assert scan_looks_like_rotation(half) is False
+
+
+def test_lds01_stream_never_looks_like_rplidar_scan():
+    """Поток LDS-01, разобранный как RPLIDAR, не должен сойти за виток.
+
+    Именно так выглядит ложная находка при неверной скорости: байты 0xFA-кадра
+    разбираются «в упор», углы у «точек» почти одинаковые, шаг нулевой — и
+    раньше такой виток считался настоящим, а на экран шёл мусор. Устройства
+    здесь нет вовсе: проверяем сам разбор.
+    """
+    data = b"".join(encode_lds01_packet(i) for i in range(120))
+    stream = RplidarStream()
+    published = []
+    acc = ScanAccumulator(published.append, min_points=lidar.LIDAR_MIN_POINTS, gap_s=0.0)
+    for start in range(0, len(data), 64):
+        for point, is_start in stream.feed(data[start:start + 64]):
+            acc.add([point], revolution_done=is_start)
+    acc.flush()
+
+    assert published, "поток LDS-01 вообще не разобрался как RPLIDAR — проверять нечего"
+    assert all(scan_looks_like_rotation(scan) is False for scan in published)
+
+
 def test_scan_accumulator_publishes_revolution_and_gap():
     published = []
     acc = ScanAccumulator(published.append, min_points=3, gap_s=0.0)
@@ -402,6 +681,18 @@ def test_lidar_profiles_order_and_overrides():
     assert lidar_profiles("ld06") == [("ld06", 230400)]
     assert lidar_profiles("auto", 230400)[0] == ("ld06", 230400)
     assert lidar_profiles("rplidar", 256000)[0] == ("rplidar", 256000)
+
+
+def test_lidar_profiles_know_lds01_turtlebot():
+    """LDS-01 (TurtleBot3 Burger) — кадры 0xFA на 230400, как и LD06/LD19."""
+    assert lidar_profiles("lds01") == [("lds01", 230400)]
+    assert ("lds01", 230400) in lidar_profiles("auto")
+    assert lidar_profiles("hls-lfcd2") == [("lds01", 230400)]      # синоним названия
+    assert lidar_profiles("turtlebot3") == [("lds01", 230400)]
+    # При явной скорости на 230400 проверяются оба потока, которые на ней живут
+    assert ("lds01", 230400) in lidar_profiles("auto", 230400)
+    # Неизвестное значение — это не «ничего», а обычный перебор
+    assert lidar_profiles("что-то своё") == lidar_profiles("auto")
 
 
 def test_discover_ports_configured_glob_and_exclusions(tmp_path, monkeypatch):
@@ -493,6 +784,112 @@ def test_probe_port_finds_ld06(fake_serial, fake_port):
     assert published and len(published[0]) >= lidar.LIDAR_MIN_POINTS
 
 
+def test_probe_port_finds_lds01_turtlebot(fake_serial, fake_port):
+    """Лидар TurtleBot3 Burger (LDS-01): кадры 0xFA на 230400, мотор — командой 'b'.
+
+    На той же скорости 230400 живёт и LD06/LD19 с кадрами 0x54, поэтому перебор
+    обязан отличить один от другого и не выдать мусор за скан.
+    """
+    device = FakeLds01(needs_start=True)
+    FakeSerial.devices[fake_port] = device
+    published = []
+    stop = {"flag": False}
+
+    def publish(points):
+        published.append(points)
+        stop["flag"] = True          # как в scripts/lidar_check.py: одного витка достаточно
+
+    with FakeSerial(fake_port) as ser:
+        found = probe_port(ser, fake_port, timeout=0.05, publish=publish,
+                           stop=lambda: stop["flag"])
+    assert found is not None
+    assert found["protocol"] == "lds01"
+    assert found["baud"] == 230400
+    assert found["motor"] == "none"              # линии USB-переходника не трогаем
+    assert device.started is True                # команда запуска отправлена
+    assert published and len(published[0]) == 360
+    assert lidar.scan_looks_like_rotation(published[0]) is True
+
+
+def test_probe_port_finds_lds01_without_start_command(fake_serial, fake_port):
+    """Прошивка с 2017.10 крутится сама: команда 'b' не обязательна для данных.
+
+    Поток идёт непрерывно, как у настоящего лидара, и до LDS-01 перебор обязан
+    пройти LD06/LD19 на той же скорости, не приняв его кадры за свои.
+    """
+    FakeSerial.devices[fake_port] = FakeLds01(needs_start=False)
+    stop = {"flag": False}
+
+    def publish(points):
+        stop["flag"] = True
+
+    with FakeSerial(fake_port) as ser:
+        found = probe_port(ser, fake_port, timeout=0.05, publish=publish,
+                           stop=lambda: stop["flag"])
+    assert found is not None and found["protocol"] == "lds01"
+
+
+def test_probe_port_does_not_take_foreign_stream_for_rplidar(fake_serial, fake_port):
+    """Поток не той скорости не должен сойти за RPLIDAR/LD06.
+
+    Устройство отдаёт кадры LDS-01 на любой скорости — так выглядит порт, когда
+    скорость угадана неверно: перебор сначала пробует RPLIDAR на 115200, и
+    раньше мусорные «витки» из чужих байт могли сойти за настоящий скан (на
+    экран шла карта из мусора). Теперь такие витки отбраковываются, а лидар
+    находится на своей скорости и со своим протоколом.
+    """
+    FakeSerial.devices[fake_port] = FakeLds01(needs_start=False, ignore_baud=True)
+    published = []
+    stop = {"flag": False}
+
+    def publish(points):
+        published.append(points)
+        stop["flag"] = True      # как в scripts/lidar_check.py: одного витка достаточно
+
+    with FakeSerial(fake_port) as ser:
+        found = probe_port(ser, fake_port, timeout=0.05, publish=publish,
+                           stop=lambda: stop["flag"])
+    assert found is not None
+    assert found["protocol"] == "lds01"
+    assert found["baud"] == 230400
+    assert found["motor"] == "none"
+    # Виток, на котором лидар найден, — настоящий (мусор отбраковывается).
+    assert lidar.scan_looks_like_rotation(published[0]) is True
+
+
+def test_probe_port_leaves_lds01_motor_running(fake_serial, fake_port):
+    """Порт закрывается без команды остановки: иначе мотор каждый раз раскручивать заново."""
+    device = FakeLds01()
+    FakeSerial.devices[fake_port] = device
+    stop = {"flag": False}
+
+    def publish(points):
+        stop["flag"] = True
+
+    with FakeSerial(fake_port) as ser:
+        assert probe_port(ser, fake_port, timeout=0.05, publish=publish,
+                          stop=lambda: stop["flag"]) is not None
+    assert device.stopped is False
+    assert lidar.LDS01_CMD_STOP not in device.written
+
+
+def test_probe_port_does_not_take_random_bytes_for_a_lidar(fake_serial, fake_port):
+    """Поток случайных байт — не скан: лидар не «находится», и перебор не застревает.
+
+    Раньше на порту с чужим устройством, которое сыплет данными непрерывно,
+    чтение шло без ограничения по времени: перебор висел на этом порту вечно и
+    до лидара на соседнем USB не доходил.
+    """
+    FakeSerial.devices[fake_port] = FakeNoise(baud=230400)
+    published = []
+    started = time.monotonic()
+    with FakeSerial(fake_port) as ser:
+        found = probe_port(ser, fake_port, timeout=0.05, publish=published.append)
+    assert found is None
+    assert published == []
+    assert time.monotonic() - started < 30.0
+
+
 def test_probe_port_publishes_nothing_without_real_points(fake_serial, fake_port):
     """Ответ на SCAN есть, но мотор стоит: «скана» из чужих байт быть не должно."""
     FakeSerial.devices[fake_port] = FakeRplidar(motor_line="dtr", motor_level=False)
@@ -532,6 +929,43 @@ def test_manager_reads_fake_rplidar_and_reports_detected(fake_serial, fake_port,
     finally:
         manager.stop()
         worker.join(timeout=2.0)
+
+
+def test_manager_reads_fake_lds01_and_reports_detected(fake_serial, fake_port, monkeypatch):
+    """Порт с лидаром TurtleBot3: менеджер сам находит LDS-01 и отдаёт настоящий скан."""
+    monkeypatch.setenv("RC_LIDAR_PORT", fake_port)
+    monkeypatch.setenv("RC_LIDAR_AUTOPROBE", "0")
+    device = FakeLds01()
+    FakeSerial.devices[fake_port] = device
+    manager = LidarManager()
+    worker = threading.Thread(target=manager._serial_worker, daemon=True)
+    worker.start()
+    try:
+        assert wait_for(lambda: bool(manager.get_scan()))
+        status = manager.get_status()
+        assert status["connected"] is True
+        assert status["detected"]["port"] == fake_port
+        assert status["detected"]["protocol"] == "lds01"
+        assert status["detected"]["baud"] == 230400
+        assert status["reason"].startswith("скан идёт")
+        assert device.started is True
+        scan = manager.get_scan()
+        assert len({round(math.degrees(p["a"]), 1) for p in scan}) == 360
+    finally:
+        manager.stop()
+        worker.join(timeout=2.0)
+
+
+def test_manager_protocol_env_understands_lds01_aliases(fake_serial, fake_port, monkeypatch):
+    """RC_LIDAR_PROTOCOL=lds01 (и синонимы) ограничивает перебор этим протоколом."""
+    monkeypatch.setenv("RC_LIDAR_PORT", fake_port)
+    monkeypatch.setenv("RC_LIDAR_PROTOCOL", "turtlebot3")
+    FakeSerial.devices[fake_port] = FakeLds01(needs_start=False, frames=2)
+    manager = LidarManager()
+    assert manager.protocol == "lds01"
+    assert lidar.lidar_profiles(manager.protocol) == [("lds01", 230400)]
+    assert manager._read_port(fake_serial, fake_port) is True
+    assert manager.get_status()["detected"]["protocol"] == "lds01"
 
 
 def test_manager_reports_missing_pyserial(monkeypatch):
@@ -769,6 +1203,89 @@ def test_discover_ports_counts_one_attempt_per_device(tmp_path, monkeypatch):
 
 
 # ---------------------------------------------------------------------------
+# Проверка на настоящем tty (псевдотерминал) с настоящим pyserial
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.skipif(not hasattr(os, "openpty"), reason="нужен POSIX-псевдотерминал")
+def test_real_pyserial_reads_lds01_from_tty(monkeypatch):
+    """Настоящий pyserial, настоящий tty: порт открывается и скан читается.
+
+    Виртуальные устройства подменяют модуль ``serial`` целиком; здесь проверяется
+    сам путь pyserial (открытие порта, смена скорости, таймауты) — на
+    псевдотерминале, куда «лидар» пишет кадры LDS-01 в темпе порта. Это самое
+    близкое к роботу, что можно проверить без железа.
+    """
+    serial = pytest.importorskip("serial")
+    pty = pytest.importorskip("pty")
+
+    master, slave = pty.openpty()
+    port = os.ttyname(slave)
+    stop = threading.Event()
+    written = {"count": 0}
+
+    def device():
+        """«Железо»: кадры LDS-01 в темпе 230400 бод, пока не остановят."""
+        started = time.monotonic()
+        while not stop.is_set():
+            allowed = int((time.monotonic() - started) * 23040.0)     # 10 бит на байт
+            while written["count"] < allowed:
+                os.write(master, encode_lds01_packet(written["count"] % 60, 1.5))
+                written["count"] += 1
+            time.sleep(0.003)
+
+    thread = threading.Thread(target=device, daemon=True)
+    thread.start()
+    try:
+        monkeypatch.setenv("RC_LIDAR_PORT", port)
+        monkeypatch.setenv("RC_LIDAR_AUTOPROBE", "0")
+        monkeypatch.setenv("RC_LIDAR_PEER_URLS", "")
+
+        # 1. Подбор параметров на порту настоящим pyserial
+        ser = lidar.open_serial(serial, port, 115200)
+        published = []
+        flag = {"stop": False}
+
+        def publish(points):
+            published.append(points)
+            flag["stop"] = True
+
+        try:
+            found = lidar.probe_port(ser, port, timeout=0.3, publish=publish,
+                                     stop=lambda: flag["stop"])
+        finally:
+            ser.close()
+        assert found is not None and found["protocol"] == "lds01"
+        assert found["baud"] == 230400
+        assert published and 20 <= len(published[0]) <= 360
+
+        # 2. Менеджер целиком — как на роботе
+        manager = LidarManager()
+        worker = threading.Thread(target=manager._serial_worker, daemon=True)
+        worker.start()
+        try:
+            # Первый виток после подключения может быть неполным (порт открыли
+            # в середине кадра) — ждём полный виток, как на экране робота
+            assert wait_for(
+                lambda: len(manager.get_scan() or []) == 360, timeout=8.0
+            )
+            status = manager.get_status()
+            assert status["connected"] is True
+            assert status["detected"]["protocol"] == "lds01"
+            scan = manager.get_scan()
+            assert len({round(math.degrees(p["a"]), 1) for p in scan}) == 360
+            assert min(p["r"] for p in scan) == 1.5
+        finally:
+            manager.stop()
+            worker.join(timeout=3.0)
+    finally:
+        stop.set()
+        thread.join(timeout=2.0)
+        os.close(slave)
+        os.close(master)
+
+
+# ---------------------------------------------------------------------------
 # Диагностический скрипт scripts/lidar_check.py
 # ---------------------------------------------------------------------------
 
@@ -797,6 +1314,15 @@ def test_lidar_check_cli_finds_rplidar(fake_serial, fake_port, capsys):
     assert module.main(["--port", fake_port, "--seconds", "0.2"]) == 0
     out = capsys.readouterr().out
     assert "256000" in out and "RC_LIDAR_PORT" in out
+
+
+def test_lidar_check_cli_finds_lds01_turtlebot(fake_serial, fake_port, capsys):
+    FakeSerial.devices[fake_port] = FakeLds01()   # поток не кончается, как у настоящего лидара
+    module = load_lidar_check()
+    assert module.main(["--port", fake_port, "--seconds", "0.2"]) == 0
+    out = capsys.readouterr().out
+    assert "lds01" in out and "TurtleBot3" in out
+    assert "230400" in out
 
 
 def test_lidar_check_cli_reports_dead_port(fake_serial, fake_port, capsys):

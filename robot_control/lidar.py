@@ -1,8 +1,9 @@
-"""Модуль работы с 2D лидаром 360° (RPLIDAR, LD06/LD19, ROS 2 /scan, HTTP API).
+"""Модуль работы с 2D лидаром 360° (RPLIDAR, LDS-01, LD06/LD19, ROS 2 /scan, HTTP).
 
 Поддерживает:
 1. Прямое чтение с USB/serial лидара: RPLIDAR (A1/A2M8 — 115200,
-   A2M7/A2M12/A3/S1 — 256000, C1 — 460800) и LD06/LD19 (230400).
+   A2M7/A2M12/A3/S1 — 256000, C1 — 460800), LD06/LD19 (230400) и
+   LDS-01/LDS-02 — лидар TurtleBot3 Burger (HLS-LFCD2, кадры 0xFA, 230400).
    Модель и скорость обычно неизвестны заранее, поэтому параметры подбираются
    перебором, а признак успеха — реальные точки скана, а не ответ устройства.
 2. Подписку на топик ROS 2 /scan (sensor_msgs/LaserScan), если установлен rclpy.
@@ -11,8 +12,8 @@
 
 Порт можно закрепить вручную: ``RC_LIDAR_PORT=/dev/ttyUSB1`` (можно список или
 glob). Остальные настройки: ``RC_LIDAR_BAUD``, ``RC_LIDAR_PROTOCOL``
-(auto | rplidar | ld06), ``RC_LIDAR_MOTOR`` (auto | none | dtr-low | dtr-high |
-rts-low | rts-high), ``RC_LIDAR_AUTOPROBE``, ``RC_LIDAR_EXCLUDE``.
+(auto | rplidar | ld06 | lds01), ``RC_LIDAR_MOTOR`` (auto | none | dtr-low |
+dtr-high | rts-low | rts-high), ``RC_LIDAR_AUTOPROBE``, ``RC_LIDAR_EXCLUDE``.
 
 Почему столько осторожности: на роботе одновременно работают два процесса с этим
 менеджером (пульт оператора на 8080 и бортовой экран на 8090), а USB-порт лидара
@@ -56,6 +57,10 @@ SERIAL_READ_TIMEOUT_S = 0.2
 LIDAR_PROBE_TIMEOUT_S = 1.4
 #: Сколько ждём точки, прежде чем считать, что поток данных оборвался.
 LIDAR_DATA_TIMEOUT_S = 1.6
+#: Предел одной попытки на порту, пока витка так и не появилось. Нужен потому,
+#: что на порту может оказаться чужое устройство с непрерывным потоком: без
+#: предела перебор висел на нём вечно и до лидара на соседнем USB не доходил.
+LIDAR_ATTEMPT_MAX_S = 4.0
 #: Виток с меньшим числом точек не публикуем: это мусор или чужой протокол.
 LIDAR_MIN_POINTS = 20
 #: Если полный виток не закрывается, публикуем накопленное по паузе.
@@ -67,14 +72,27 @@ LIDAR_RESCAN_S = 2.0
 RPLIDAR_BAUDS = (115200, 256000, 460800)
 #: LD06/LD19 — односторонний поток на 230400, команд не принимает.
 LD06_BAUD = 230400
+#: LDS-01/LDS-02 (TurtleBot3 Burger, он же HLS-LFCD2) — тоже 230400, кадры 0xFA.
+LDS01_BAUD = 230400
 
 #: Профили поиска в порядке частоты моделей: (протокол, скорость).
 LIDAR_PROFILES: Tuple[Tuple[str, int], ...] = (
     ("rplidar", 115200),      # RPLIDAR A1 / A2M8
     ("ld06", LD06_BAUD),      # LD06 / LD19 (комплекты D500 и клоны)
+    ("lds01", LDS01_BAUD),    # LDS-01 / LDS-02 (TurtleBot3 Burger, HLS-LFCD2)
     ("rplidar", 256000),      # RPLIDAR A2M7 / A2M12 / A3 / S1
     ("rplidar", 460800),      # RPLIDAR C1
 )
+
+#: Как в RC_LIDAR_PROTOCOL можно назвать протоколы (синонимы — в _PROTOCOL_ALIASES).
+LIDAR_PROTOCOLS: Tuple[str, ...] = ("auto", "rplidar", "ld06", "lds01")
+_PROTOCOL_ALIASES = {
+    "lds": "lds01", "lds-01": "lds01", "lds_01": "lds01", "lds1": "lds01",
+    "lds02": "lds01", "lds-02": "lds01", "lds2": "lds01",
+    "hls": "lds01", "hls-lfcd2": "lds01", "hls_lfcd2": "lds01", "lfcd2": "lds01",
+    "turtlebot": "lds01", "turtlebot3": "lds01",
+}
+
 
 #: Варианты включения мотора RPLIDAR через линии USB-переходника (MOTOCTL).
 #: У адаптеров A1/A2 это DTR (низкий уровень — мотор включён), у части плат — RTS
@@ -103,9 +121,44 @@ RPLIDAR_CMD_STOP = b"\xa5\x25"
 RPLIDAR_CMD_SCAN = b"\xa5\x20"
 RPLIDAR_SYNC = (0xA5, 0x5A)
 RPLIDAR_ANSWER_SYNC = b"\xa5\x5a"
+#: Стандартный дескриптор ответа RPLIDAR на SCAN: A5 5A 05 00 00 40 81.
+RPLIDAR_ANSWER_SIZE = 0x05
+RPLIDAR_ANSWER_TYPES = (0x81, 0x82)
+
+#: Настоящий виток идёт монотонно (шаг ~1° у RPLIDAR и LDS-01, ~3° у LD06), а
+#: «точки» из чужих байт прыгают по всему кругу: медиана шага угла между
+#: соседними точками отделяет одно от другого с большим запасом.
+SCAN_MAX_MEDIAN_STEP_RAD = math.radians(45.0)
+
+#: Мало того, что виток идёт размеренно — он ещё и закрывает весь круг. Поток
+#: чужого протокола (LDS-01 на скорости RPLIDAR, LD06 как RPLIDAR и т. п.) может
+#: разбираться «в упор»: точки тогда выходят с крошечным шагом, но все в одном
+#: направлении — медиана шага у такого мусора нулевая, и раньше он сходил за
+#: настоящий скан. Настоящий виток оставляет разрыв не больше пары градусов,
+#: так что запас в 90° огромный.
+SCAN_MAX_GAP_RAD = math.radians(90.0)
 
 LD06_SYNC = b"\x54\x2c"
 LD06_PACKET_LEN = 47
+
+#: LDS-01 / LDS-02 (TurtleBot3 Burger, HLS-LFCD2): кадр 42 байта, 60 пакетов по
+#: 6 измерений — 360 точек на виток, скорость 230400.
+LDS01_HEADER = 0xFA
+LDS01_PACKET_LEN = 42
+LDS01_INDEX_BASE = 0xA0
+LDS01_PACKETS_PER_SCAN = 60
+LDS01_READINGS_PER_PACKET = 6
+LDS01_CMD_START = b"b"  # запуск вращения (нужен прошивкам до 2017.10)
+LDS01_CMD_STOP = b"e"   # остановка вращения (мы её не шлём: пусть мотор крутится)
+LDS01_INVALID_FLAG = 0x8000  # старший бит слова дальности: измерение недостоверно
+LDS01_RANGE_MASK = 0x3FFF    # дальность занимает младшие 14 бит
+LDS01_RANGE_MIN_M = 0.05
+LDS01_RANGE_MAX_M = 16.0
+#: Сколько пакетов с неверной КС ждём, прежде чем читать поток без проверки.
+LDS01_CRC_BAD_LIMIT = 60
+#: Сколько пакетов подряд должно прийти строго по порядку номеров, чтобы поверить
+#: потоку без контрольной суммы (у настоящего лидара номера идут по кругу).
+LDS01_WARMUP_PACKETS = 12
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
@@ -126,6 +179,17 @@ def _env_int(name: str) -> Optional[int]:
     except ValueError:
         log.warning("Лидар: %s=%r — не число, игнорирую", name, raw)
         return None
+
+
+def normalize_protocol(value: str) -> str:
+    """Приводит RC_LIDAR_PROTOCOL к одному из ``LIDAR_PROTOCOLS``.
+
+    Понимает синонимы: ``lds-01``, ``hls-lfcd2``, ``turtlebot3`` → ``lds01`` —
+    чтобы лидар TurtleBot3 можно было назвать так, как он написан на корпусе.
+    """
+    proto = (value or "").strip().lower().replace(" ", "")
+    proto = _PROTOCOL_ALIASES.get(proto, proto)
+    return proto if proto in LIDAR_PROTOCOLS else "auto"
 
 
 def normalize_angle(rad: float) -> float:
@@ -194,6 +258,72 @@ def parse_rplidar_point(b: bytes) -> Optional[dict[str, float]]:
     # В RPLIDAR угол по часовой стрелке, в RUS SLAM против часовой от оси X
     rad = normalize_angle(-math.radians(angle_deg))
     return {"a": round(rad, 4), "r": round(dist_m, 3)}
+
+
+def lds01_checksum(data: bytes) -> int:
+    """Контрольная сумма LDS-01 (HLS-LFCD2) по первым 40 байтам пакета.
+
+    Алгоритм из драйвера ROBOTIS/HLDS: идём по данным 16-битными словами
+    (младший байт первым), каждый раз сдвигая накопленное влево на бит, затем
+    складываем младшие 15 бит со всем остальным — получается 15-битное число.
+    """
+    chk32 = 0
+    limit = len(data) - (len(data) % 2)  # неполный хвост в расчёт не идёт
+    for i in range(0, limit, 2):
+        chk32 = (chk32 << 1) + (data[i] | (data[i + 1] << 8))
+    return ((chk32 & 0x7FFF) + (chk32 >> 15)) & 0x7FFF
+
+
+def lds01_packet_crc_ok(pkt: bytes) -> bool:
+    """Совпадает ли контрольная сумма пакета LDS-01 с записанной в нём."""
+    if len(pkt) < LDS01_PACKET_LEN:
+        return False
+    expected = pkt[40] | (pkt[41] << 8)
+    return lds01_checksum(pkt[: LDS01_PACKET_LEN - 2]) == expected
+
+
+def parse_lds01_packet(pkt: bytes) -> list[dict[str, float]]:
+    """Разбирает 42-байтовый пакет LDS-01 / LDS-02 (TurtleBot3 Burger).
+
+    Раскладка пакета:
+
+    ============ ==========================================================
+    байт 0       0xFA — заголовок
+    байт 1       0xA0 + номер пакета (0…59), метр: 6° на пакет
+    байты 2..3   скорость вращения, младший байт первым
+    байты 4..39  шесть измерений по 6 байт: интенсивность (u16),
+                 дальность в мм (u16), резерв (u16)
+    байты 40..41 контрольная сумма (см. :func:`lds01_checksum`)
+    ============ ==========================================================
+
+    Угол точки считается как у драйвера ROBOTIS (``hls_lfcd_lds_driver``):
+    359 − (номер пакета·6 + i) градусов против часовой стрелки от направления
+    вперёд. Нумерацию и направление отсчёта не меняем — иначе карта повернулась
+    бы относительно ROS-режима, где этот лидар работает штатно.
+
+    В слове дальности старший бит означает недостоверное измерение (такие точки
+    выбрасываются), а сама дальность занимает младшие 14 бит. Контрольная сумма
+    здесь не проверяется (см. :func:`lds01_packet_crc_ok` и ``Lds01Stream``).
+    """
+    if len(pkt) < LDS01_PACKET_LEN or pkt[0] != LDS01_HEADER:
+        return []
+    index = pkt[1] - LDS01_INDEX_BASE
+    if not 0 <= index < LDS01_PACKETS_PER_SCAN:
+        return []
+
+    pts: list[dict[str, float]] = []
+    for i in range(LDS01_READINGS_PER_PACKET):
+        offset = 4 + i * 6
+        raw = pkt[offset + 2] | (pkt[offset + 3] << 8)
+        if raw & LDS01_INVALID_FLAG:
+            continue
+        dist_m = (raw & LDS01_RANGE_MASK) / 1000.0
+        if dist_m < LDS01_RANGE_MIN_M or dist_m > LDS01_RANGE_MAX_M:
+            continue
+        angle_deg = 359.0 - float(index * LDS01_READINGS_PER_PACKET + i)
+        rad = normalize_angle(math.radians(angle_deg))
+        pts.append({"a": round(rad, 4), "r": round(dist_m, 3)})
+    return pts
 
 
 def ld06_crc_ok(pkt: bytes) -> bool:
@@ -420,6 +550,111 @@ class Ld06Stream:
             return packet
 
 
+class Lds01Stream:
+    """Разбор потока LDS-01 / LDS-02 (TurtleBot3 Burger): кадры 0xFA по 42 байта.
+
+    Виток — 60 пакетов (360 точек); границей витка служит пакет с индексом 0xA0,
+    как и в драйвере ROBOTIS. Контрольная сумма проверяется, но если у устройства
+    она не сходится ни на одном пакете (встречаются прошивки с другой формулой),
+    поток читается без неё — тогда единственной защитой остаётся строгий порядок
+    номеров пакетов: у настоящего лидара он идёт по кругу 0xA0…0xDB без пропусков,
+    и точкам верим лишь после серии из ``LDS01_WARMUP_PACKETS`` пакетов подряд.
+    """
+
+    def __init__(
+        self,
+        *,
+        check_crc: bool = True,
+        crc_bad_limit: int = LDS01_CRC_BAD_LIMIT,
+        max_buffer: int = 8192,
+    ) -> None:
+        self.buffer = bytearray()
+        self.check_crc = check_crc
+        self.crc_bad_limit = crc_bad_limit
+        self.crc_ok = 0            # пакетов принято с верной контрольной суммой
+        self.crc_bad = 0           # пакетов забраковано по контрольной сумме
+        self.packets = 0           # пакетов отдано
+        self.max_buffer = max_buffer
+        self._expected_index: Optional[int] = None
+        self._run = 0             # сколько пакетов подряд идут по порядку номеров
+        self._confirmed = False   # потоку без контрольной суммы уже можно верить
+
+    def feed(self, chunk: bytes) -> list[Tuple[list[dict[str, float]], bool]]:
+        """Добавляет байты потока → [(точки пакета, виток_завершён), ...]."""
+        out: list[Tuple[list[dict[str, float]], bool]] = []
+        if chunk:
+            self.buffer.extend(chunk)
+            if len(self.buffer) > self.max_buffer:
+                del self.buffer[: len(self.buffer) - LDS01_PACKET_LEN]
+        while True:
+            packet = self._next_packet()
+            if packet is None:
+                return out
+            index = packet[1] - LDS01_INDEX_BASE
+            self.packets += 1
+            # Пакет с индексом 0xA0 начинает новый виток: к этому моменту в
+            # накопителе лежат точки предыдущего (359…0°), и он закрывается.
+            out.append((parse_lds01_packet(packet), index == 0))
+
+    def _next_packet(self) -> Optional[bytes]:
+        """Ищет в буфере очередной пакет; None — данных пока не хватает."""
+        while True:
+            start = self._find_start()
+            if start < 0:
+                # заголовок мог разрезаться между чтениями — держим последний байт
+                if len(self.buffer) > 1:
+                    del self.buffer[:-1]
+                return None
+            if start:
+                del self.buffer[:start]
+            if len(self.buffer) < LDS01_PACKET_LEN:
+                return None
+            packet = bytes(self.buffer[:LDS01_PACKET_LEN])
+
+            if self.check_crc and not lds01_packet_crc_ok(packet):
+                self.crc_bad += 1
+                if self.crc_bad >= self.crc_bad_limit and self.crc_ok == 0:
+                    self.check_crc = False
+                    log.info(
+                        "Лидар: у LDS-01/LDS-02 не сходится контрольная сумма — "
+                        "читаю поток без проверки"
+                    )
+                del self.buffer[:1]  # контрольная сумма не та — ищем заголовок дальше
+                continue
+
+            index = packet[1] - LDS01_INDEX_BASE
+            if not self.check_crc and not self._confirmed:
+                # Без контрольной суммы верить пакету сразу нельзя: «пакеты» из
+                # чужих байт тоже начинаются с 0xFA и допустимого номера. Зато
+                # у настоящего лидара номера идут строго по кругу, поэтому поток
+                # признаём своим только после серии пакетов подряд по порядку.
+                self._run = self._run + 1 if index == self._expected_index else 1
+                self._expected_index = (index + 1) % LDS01_PACKETS_PER_SCAN
+                del self.buffer[:LDS01_PACKET_LEN]
+                if self._run < LDS01_WARMUP_PACKETS:
+                    continue
+                self._confirmed = True
+                log.info(
+                    "Лидар: LDS-01/LDS-02 читается без контрольной суммы — "
+                    "поток подтверждён по порядку номеров пакетов"
+                )
+                return packet
+
+            del self.buffer[:LDS01_PACKET_LEN]
+            self._expected_index = (index + 1) % LDS01_PACKETS_PER_SCAN
+            if self.check_crc:
+                self.crc_ok += 1
+            return packet
+
+    def _find_start(self) -> int:
+        """Индекс первого байта кадра (0xFA + допустимый номер пакета) или −1."""
+        last = LDS01_INDEX_BASE + LDS01_PACKETS_PER_SCAN - 1
+        for i in range(len(self.buffer) - 1):
+            if self.buffer[i] == LDS01_HEADER and LDS01_INDEX_BASE <= self.buffer[i + 1] <= last:
+                return i
+        return -1
+
+
 def read_rplidar_stream(
     ser,
     publish: Callable[[list[dict[str, float]]], None],
@@ -467,6 +702,76 @@ def read_ld06_stream(
             break
     acc.flush()
     return total
+
+
+def lds01_start_scan(ser) -> None:
+    """Просит LDS-01 начать вращение (``b``).
+
+    Нужно прошивкам до 2017.10, новым не мешает. Команду остановки (``e``) не
+    отправляем: мотор должен крутиться и после закрытия порта — иначе при каждом
+    переподключении лидар тратил бы секунды на раскрутку и перебор его не находил.
+    """
+    try:
+        ser.write(LDS01_CMD_START)
+    except Exception as exc:  # noqa: BLE001 — порт мог пропасть
+        log.debug("Лидар: не удалось отправить команду запуска LDS-01: %s", exc)
+
+
+def read_lds01_stream(
+    ser,
+    publish: Callable[[list[dict[str, float]]], None],
+    stop: Callable[[], bool],
+    *,
+    timeout: float = LIDAR_DATA_TIMEOUT_S,
+    min_points: int = LIDAR_MIN_POINTS,
+    check_crc: bool = True,
+) -> int:
+    """Читает поток LDS-01/LDS-02 до тишины и публикует витки. Возвращает число точек."""
+    stream = Lds01Stream(check_crc=check_crc)
+    acc = ScanAccumulator(publish, min_points=min_points)
+    last_point = time.monotonic()
+    total = 0
+    while not stop():
+        chunk = ser.read(256)
+        for points, revolution in stream.feed(chunk):
+            last_point = time.monotonic()
+            total += len(points)
+            acc.add(points, revolution_done=revolution)
+        if not chunk and time.monotonic() - last_point > timeout:
+            break
+    acc.flush()
+    return total
+
+
+def scan_looks_like_rotation(
+    points: Sequence[dict[str, float]],
+    max_median_step: float = SCAN_MAX_MEDIAN_STEP_RAD,
+    max_gap: float = SCAN_MAX_GAP_RAD,
+) -> bool:
+    """Похож ли набор точек на настоящий виток лидара (луч идёт размеренно)?
+
+    Настоящий виток RPLIDAR/LDS-01/LD06 идёт монотонно — шаг между соседними
+    точками около градуса, и точки закрывают весь круг. Если скорость порта
+    угадана неверно (например, поток LDS-01 читают как RPLIDAR на 115200) или
+    выбран чужой протокол, «точки» получаются из случайных байт: они либо
+    прыгают по всему кругу, либо, наоборот, разбираются «в упор» — встают в одно
+    направление с нулевым шагом. Поэтому проверяем оба признака: медиана шага
+    (мусор с прыжками) и наибольший разрыв между соседними углами (мусор,
+    слипшийся в одну сторону). На переборе такой виток не считается удачей:
+    иначе лидар «находился» бы, а карта на экране была из мусора.
+    """
+    if len(points) < 3:
+        return False
+    steps = sorted(
+        abs(normalize_angle(cur["a"] - prev["a"]))
+        for prev, cur in zip(points, points[1:])
+    )
+    if steps[len(steps) // 2] >= max_median_step:
+        return False
+    angles = sorted(normalize_angle(p["a"]) % math.tau for p in points)
+    gaps = [cur - prev for prev, cur in zip(angles, angles[1:])]
+    gaps.append(angles[0] + math.tau - angles[-1])
+    return max(gaps) <= max_gap
 
 
 # ============================================================================
@@ -566,20 +871,23 @@ def discover_ports(
 
 
 def lidar_profiles(protocol: str = "auto", baud: Optional[int] = None) -> list[Tuple[str, int]]:
-    """Список (протокол, скорость) для подбора: от частых моделей к редким."""
-    proto = (protocol or "auto").strip().lower()
+    """Список (протокол, скорость) для подбора: от частых моделей к редким.
+
+    На 230400 работают сразу два протокола — LD06/LD19 (кадры 0x54) и
+    LDS-01/LDS-02 от TurtleBot3 (кадры 0xFA), поэтому при ``auto`` проверяются
+    оба: сначала тот, у кого пакет защищён контрольной суммой.
+    """
+    proto = normalize_protocol(protocol)
     profiles = list(LIDAR_PROFILES)
-    if proto in {"rplidar", "ld06"}:
-        profiles = [p for p in profiles if p[0] == proto] or [
-            (proto, LD06_BAUD if proto == "ld06" else RPLIDAR_BAUDS[0])
-        ]
+    if proto != "auto":
+        only_baud = {"ld06": LD06_BAUD, "lds01": LDS01_BAUD}.get(proto, RPLIDAR_BAUDS[0])
+        profiles = [p for p in profiles if p[0] == proto] or [(proto, only_baud)]
     if baud:
         rate = int(baud)
         preferred = [p for p in profiles if p[1] == rate]
         rest = [p for p in profiles if p[1] != rate]
-        extra = [(proto_name, rate) for proto_name in ("rplidar", "ld06")]
-        if proto in {"rplidar", "ld06"}:
-            extra = [(proto, rate)]
+        names = (proto,) if proto != "auto" else ("rplidar", "ld06", "lds01")
+        extra = [(name, rate) for name in names]
         profiles = preferred + [p for p in extra if p[1] == rate] + rest
 
     seen: set[Tuple[str, int]] = set()
@@ -631,7 +939,17 @@ def _flush_input(ser) -> None:
 
 def rplidar_handshake(ser, variant: Tuple[Optional[str], Optional[bool]], *,
                       timeout: float = 0.6, stop: Optional[Callable[[], bool]] = None) -> bool:
-    """Включает мотор, посылает SCAN и ждёт дескриптор ответа (0xA5 0x5A …)."""
+    """Включает мотор, посылает SCAN и ждёт стандартный дескриптор ответа.
+
+    Ответ RPLIDAR на SCAN — ``A5 5A 05 00 00 40 81`` (длина 5, тип «измерение»).
+    Ждём именно его: раньше за ответ принимались любые семь байт после
+    синхрослова, и чужой поток на этой скорости (например, LDS-01, читаемый не
+    на своей скорости) иногда «отвечал» сам — лидар находился там, где его нет,
+    а на экран шёл мусор. Нестандартный дескриптор тоже принимаем, но только как
+    запасной вариант, если стандартного за отведённое время не было: у клонов он
+    бывает свой, а от мусорного скана дальше защищает проверка витка
+    (:func:`scan_looks_like_rotation`).
+    """
     stop = stop or (lambda: False)
     apply_motor_variant(ser, variant)
     time.sleep(0.05)  # мотору нужно тронуться, а лидару — сбросить буфер
@@ -646,6 +964,7 @@ def rplidar_handshake(ser, variant: Tuple[Optional[str], Optional[bool]], *,
 
     deadline = time.monotonic() + max(0.1, float(timeout))
     buf = bytearray()
+    loose = False
     while time.monotonic() < deadline and not stop():
         chunk = ser.read(7)
         if not chunk:
@@ -654,12 +973,18 @@ def rplidar_handshake(ser, variant: Tuple[Optional[str], Optional[bool]], *,
         idx = buf.find(RPLIDAR_ANSWER_SYNC)
         if idx >= 0 and len(buf) - idx >= 7:
             header = bytes(buf[idx: idx + 7])
-            if header[2] != 0x05:
-                log.debug("Лидар: нестандартный дескриптор ответа: %s", header.hex(" "))
-            return True
+            if header[2] == RPLIDAR_ANSWER_SIZE and header[6] in RPLIDAR_ANSWER_TYPES:
+                return True
+            if not loose:
+                loose = True
+                log.debug("Лидар: нестандартный дескриптор ответа на SCAN: %s", header.hex(" "))
+            del buf[idx]  # ищем стандартный ответ дальше, синхрослово отброшено
+            continue
         if len(buf) > 64:
             del buf[:-1]
-    return False
+    if loose:
+        log.warning("Лидар: ответ на SCAN нестандартный — сужу о лидаре по точкам, а не по дескриптору")
+    return loose
 
 
 def probe_port(
@@ -674,6 +999,7 @@ def probe_port(
     publish: Optional[Callable[[list[dict[str, float]]], None]] = None,
     on_found: Optional[Callable[[dict[str, Any]], None]] = None,
     min_points: int = LIDAR_MIN_POINTS,
+    attempt_max: Optional[float] = None,
 ) -> Optional[dict[str, Any]]:
     """Подбирает параметры лидара на уже открытом порту.
 
@@ -684,10 +1010,23 @@ def probe_port(
     попадал бы на экран.
     """
     stop = stop or (lambda: False)
-    state: dict[str, Any] = {"found": False, "probe": {"port": port}}
+    budget = LIDAR_ATTEMPT_MAX_S if attempt_max is None else float(attempt_max)
+    state: dict[str, Any] = {"found": False, "probe": {"port": port}, "noise": 0}
 
     def on_scan(points: list[dict[str, float]]) -> None:
         if not state["found"]:
+            # Первый виток — доказательство, что на порту настоящий лидар. Если
+            # скорость или протокол угаданы неверно, точки получаются из чужих
+            # байт и разбросаны по всему кругу: такой виток не считаем находкой
+            # и не отдаём на экран (иначе «лидар» находился бы на любом мусоре).
+            if not scan_looks_like_rotation(points):
+                if not state["noise"]:
+                    log.debug(
+                        "Лидар: %s — виток не похож на настоящий скан (%d точек), "
+                        "продолжаю перебор", port, len(points),
+                    )
+                state["noise"] += 1
+                return
             state["found"] = True
             if on_found is not None:
                 on_found(dict(state["probe"]))
@@ -715,14 +1054,37 @@ def probe_port(
                 }
             )
 
+            # Одна попытка не может длиться бесконечно: чужое устройство на порту
+            # (телеметрия модуля, GPS, лидар другой модели) может сыпать данными
+            # непрерывно, и перебор застревал бы на нём навсегда. Как только виток
+            # найден, читаем поток дальше без ограничения — иначе на каждом круге
+            # скана появлялась бы пауза на переоткрытие порта.
+            attempt_deadline = time.monotonic() + budget
+
+            def attempt_stop() -> bool:
+                if stop():
+                    return True
+                return not state["found"] and time.monotonic() >= attempt_deadline
+
             if proto == "rplidar":
                 if not rplidar_handshake(
                     ser, variant, timeout=min(0.6, max(0.2, timeout / 2)), stop=stop
                 ):
                     break  # нет ответа на SCAN — на этой скорости устройства нет
-                got = read_rplidar_stream(ser, on_scan, stop, timeout=timeout, min_points=min_points)
+                got = read_rplidar_stream(
+                    ser, on_scan, attempt_stop, timeout=timeout, min_points=min_points
+                )
+            elif proto == "lds01":
+                # LDS-01 сыплет кадры сам, но прошивки до 2017.10 не крутят мотор
+                # без команды 'b' — она же полезна после чужой команды 'e'.
+                lds01_start_scan(ser)
+                got = read_lds01_stream(
+                    ser, on_scan, attempt_stop, timeout=timeout, min_points=min_points
+                )
             else:
-                got = read_ld06_stream(ser, on_scan, stop, timeout=timeout, min_points=min_points)
+                got = read_ld06_stream(
+                    ser, on_scan, attempt_stop, timeout=timeout, min_points=min_points
+                )
 
             if state["found"]:
                 state["probe"]["points"] = got
@@ -756,7 +1118,12 @@ class LidarManager:
         self.port = port or os.environ.get("RC_LIDAR_PORT") or None
         self.baud = _env_int("RC_LIDAR_BAUD")
         raw_protocol = (os.environ.get("RC_LIDAR_PROTOCOL") or "auto").strip().lower()
-        self.protocol = raw_protocol if raw_protocol in {"auto", "rplidar", "ld06"} else "auto"
+        self.protocol = normalize_protocol(raw_protocol)
+        if raw_protocol and self.protocol == "auto" and raw_protocol != "auto":
+            log.warning(
+                "Лидар: неизвестный RC_LIDAR_PROTOCOL=%r — беру auto (%s)",
+                raw_protocol, " | ".join(LIDAR_PROTOCOLS),
+            )
         raw_motor = (os.environ.get("RC_LIDAR_MOTOR") or "auto").strip().lower()
         self.motor = raw_motor if raw_motor in MOTOR_MODES else "auto"
         self.autoprobe = _env_bool("RC_LIDAR_AUTOPROBE", True)
@@ -1081,7 +1448,8 @@ class LidarManager:
                     reason = "лидар не ответил ни на одном из %d портов (%s)" % (
                         len(items), checked)
                     hint = ("проверь питание и кабель лидара; скорость зависит от модели: "
-                            "115200 (A1/A2M8), 256000 (A2M7/A2M12/A3/S1), 460800 (C1), 230400 (LD06/LD19); "
+                            "115200 (A1/A2M8), 256000 (A2M7/A2M12/A3/S1), 460800 (C1), "
+                            "230400 (LD06/LD19 и LDS-01/LDS-02 от TurtleBot3); "
                             "полный разбор — .venv/bin/python scripts/lidar_check.py")
                 note = self._excluded_note()
                 if note:
@@ -1136,8 +1504,9 @@ class LidarManager:
             self.detected = None
             self._set_status(
                 "лидар на %s не отвечает" % port,
-                hint="проверь скорость (A3/S1 — 256000, C1 — 460800, LD06/LD19 — 230400) "
-                     "и переключатель на USB-адаптере; полный прогон: scripts/lidar_check.py",
+                hint="проверь скорость (A3/S1 — 256000, C1 — 460800, LD06/LD19 и "
+                     "LDS-01/LDS-02 — 230400) и переключатель на USB-адаптере; "
+                     "полный прогон: scripts/lidar_check.py",
                 quiet=True,
             )
             return False

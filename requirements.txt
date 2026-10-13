@@ -1,5 +1,5 @@
 Flask==3.1.3
 gunicorn==23.0.0
-# Чтение лидара (RPLIDAR, LD06/LD19) и мастер-платы по USB/UART.
+# Чтение лидара (RPLIDAR, LDS-01/LDS-02 от TurtleBot3, LD06/LD19) и мастер-платы по USB/UART.
 # Колесо лежит в vendor/, поэтому установка идёт и без интернета.
 pyserial==3.5
