@@ -1,4 +1,6 @@
-# Запуск веб-пульта как службы Ubuntu.
+# Запуск веб-пульта как службы Ubuntu (автозапуск — по желанию: без
+# `systemctl enable` служба просто стоит на месте, а пульт запускается
+# вручную — ./scripts/start.sh).
 #
 # Установка:
 #   sudo useradd --system --home /opt/robot-control --shell /usr/sbin/nologin robotctl || true
@@ -8,6 +10,8 @@
 #   sudo systemctl daemon-reload
 #   sudo systemctl enable --now robot-control
 #   journalctl -u robot-control -f
+#
+# Выключить автозапуск:  ./scripts/autostart.sh off  (или sudo systemctl disable --now robot-control)
 #
 [Unit]
 Description=Robot control web console (operator login)

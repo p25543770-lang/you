@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import logging
 import math
 import pathlib
 import sys
@@ -202,8 +203,11 @@ class FakeSerial:
     """Минимальный порт: только то, что использует robot_control.lidar."""
 
     devices: dict[str, FakeDevice] = {}
+    #: Все попытки открыть порт — по ним видно, что перебор прошёл весь список.
+    opened: list[str] = []
 
     def __init__(self, port: str, baudrate: int = 115200, timeout: float = 0.2, exclusive: bool = True) -> None:
+        FakeSerial.opened.append(port)
         device = FakeSerial.devices.get(port)
         if device is None:
             raise FakeSerialError("could not open port %s" % port)
@@ -257,8 +261,36 @@ def fake_serial(monkeypatch):
     module.SerialException = FakeSerialError
     monkeypatch.setitem(sys.modules, "serial", module)
     FakeSerial.devices = {}
+    FakeSerial.opened = []
     yield module
     FakeSerial.devices = {}
+    FakeSerial.opened = []
+
+
+@pytest.fixture
+def fake_usb(tmp_path, monkeypatch):
+    """Подменяет /dev/ttyUSB* на существующие файлы во временной папке.
+
+    Возвращает функцию, которая «подключает» очередной USB-порт и отдаёт его
+    путь — так проверяется перебор нескольких портов без железа.
+    """
+    paths: list[str] = []
+
+    def make(name: str) -> str:
+        path = tmp_path / name
+        path.write_text("")
+        paths.append(str(path))
+        return str(path)
+
+    def fake_glob(pattern, **_):
+        if "ttyUSB" in pattern:
+            return sorted(p for p in paths if "ttyUSB" in p)
+        if "ttyACM" in pattern:
+            return sorted(p for p in paths if "ttyACM" in p)
+        return []
+
+    monkeypatch.setattr(lidar.glob, "glob", fake_glob)
+    return make
 
 
 @pytest.fixture
@@ -611,6 +643,129 @@ def test_second_process_takes_scan_over_http(fake_serial, monkeypatch):
         server.shutdown()
         server.server_close()
         thread.join(timeout=2.0)
+
+
+def test_manager_goes_through_every_usb_port(fake_serial, fake_usb, monkeypatch):
+    """Лидар переподключили на соседний порт — перебор обязан пройти все.
+
+    Раньше поиск начинался всегда с одного и того же порта, и после
+    переподключения лидара на другой /dev/ttyUSBx приложение могло упереться
+    в пустой порт и никогда не дойти до остальных.
+    """
+    ports = [fake_usb("ttyUSB0"), fake_usb("ttyUSB1"), fake_usb("ttyUSB2")]
+    FakeSerial.devices[ports[2]] = FakeRplidar()       # лидар — на третьем порту
+    manager = LidarManager()
+    worker = threading.Thread(target=manager._serial_worker, daemon=True)
+    worker.start()
+    try:
+        assert wait_for(lambda: bool(manager.get_scan()))
+        assert manager.detected["port"] == ports[2]
+        assert set(ports) <= set(FakeSerial.opened), "перебор не дошёл до всех портов"
+        status = manager.get_status()
+        assert status["connected"] is True
+        assert status["detected"]["port"] == ports[2]
+    finally:
+        manager.stop()
+        worker.join(timeout=2.0)
+
+
+def test_manager_finds_lidar_on_other_port_when_port_is_pinned(fake_serial, fake_usb, monkeypatch):
+    """RC_LIDAR_PORT — только первый в очереди, а не единственный порт.
+
+    С RC_LIDAR_AUTOPROBE=0 поиск сначала идёт по закреплённому порту, но если
+    данных там нет, следующий круг всё равно перебирает все USB-порты.
+    """
+    pinned = fake_usb("ttyUSB0")                       # порт из .env — пустой
+    moved = fake_usb("ttyUSB1")                        # лидар переехал сюда
+    FakeSerial.devices[moved] = FakeRplidar()
+    monkeypatch.setenv("RC_LIDAR_PORT", pinned)
+    monkeypatch.setenv("RC_LIDAR_AUTOPROBE", "0")
+    manager = LidarManager()
+    worker = threading.Thread(target=manager._serial_worker, daemon=True)
+    worker.start()
+    try:
+        assert wait_for(lambda: bool(manager.get_scan()))
+        assert manager.detected["port"] == moved
+    finally:
+        manager.stop()
+        worker.join(timeout=2.0)
+
+
+def test_manager_reports_every_port_it_checked(fake_serial, fake_usb, monkeypatch):
+    """Мёртвый порт не сбивает перебор: порты проверяются по очереди, результат виден в статусе."""
+    ports = [fake_usb("ttyUSB0"), fake_usb("ttyUSB1")]
+    FakeSerial.devices[ports[1]] = FakeLd06()          # лидар — на втором порту
+    manager = LidarManager()
+    worker = threading.Thread(target=manager._serial_worker, daemon=True)
+    worker.start()
+    try:
+        assert wait_for(lambda: bool(manager.get_scan()))
+        assert FakeSerial.opened[:2] == ports, "первый круг должен пройти порты по очереди"
+        status = manager.get_status()
+        assert status["detected"]["port"] == ports[1]
+        assert status["tried"], "в статусе должен быть список проверенных портов"
+        assert all(set(item) == {"port", "ok", "note"} for item in status["tried"])
+    finally:
+        manager.stop()
+        worker.join(timeout=2.0)
+
+
+def test_manager_logs_one_result_per_round_not_every_cycle(fake_serial, fake_usb, caplog):
+    """Итог перебора идёт в журнал один раз, а не каждые 2 секунды.
+
+    Раньше причина менялась от круга к кругу (порядок портов вращался), и
+    journalctl на роботе без лидара забивался одинаковыми строками.
+    """
+    fake_usb("ttyUSB0")
+    fake_usb("ttyUSB1")
+    manager = LidarManager()
+    # Своё имя потока: в общем прогоне рядом могут работать менеджеры других
+    # тестов, и их записи в общий журнал не должны попадать в счёт.
+    worker = threading.Thread(target=manager._serial_worker, daemon=True, name="lidar-rounds-test")
+
+    def ours(record):
+        return record.levelno >= logging.WARNING and record.threadName == worker.name
+
+    with caplog.at_level(logging.WARNING, logger="robot_control.lidar"):
+        worker.start()
+        try:
+            assert wait_for(lambda: any(ours(r) for r in caplog.records))
+            time.sleep(0.3)          # за это время (RESCAN=0.05) проходит ещё несколько кругов
+        finally:
+            manager.stop()
+            worker.join(timeout=2.0)
+    warnings = [r.getMessage() for r in caplog.records if ours(r)]
+    assert len(warnings) == 1, warnings
+
+
+def test_candidate_ports_rotate_so_search_does_not_stick_to_one_usb(fake_usb, monkeypatch):
+    """Каждый круг перебора начинается со следующего порта — очередь идёт по кругу."""
+    ports = [fake_usb("ttyUSB0"), fake_usb("ttyUSB1"), fake_usb("ttyUSB2")]
+    manager = LidarManager()
+    assert manager.candidate_ports() == ports
+    assert manager.candidate_ports() == ports[1:] + ports[:1]
+    assert manager.candidate_ports() == ports[2:] + ports[:2]
+    # круг замкнулся: каждый порт успел побыть первым
+    assert manager.candidate_ports() == ports
+
+
+def test_discover_ports_counts_one_attempt_per_device(tmp_path, monkeypatch):
+    """Один и тот же порт по symlink'у и по /dev/ttyUSBx — одна попытка, а не две."""
+    real = tmp_path / "ttyUSB4"
+    real.write_text("")
+    link = tmp_path / "rplidar"
+    link.symlink_to(real)
+
+    def fake_glob(pattern, **_):
+        if "rplidar" in pattern:
+            return [str(link)]
+        if "ttyUSB" in pattern:
+            return [str(real)]
+        return []
+
+    monkeypatch.setattr(lidar.glob, "glob", fake_glob)
+    ports = discover_ports(configured=str(link), autoprobe=True)
+    assert ports == [str(link)]
 
 
 # ---------------------------------------------------------------------------

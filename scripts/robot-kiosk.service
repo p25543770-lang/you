@@ -13,6 +13,10 @@
 #   sudo systemctl enable --now robot-kiosk
 #   journalctl -u robot-kiosk -f
 #
+# Автозапуск — по желанию: `enable` включает его, `disable` выключает.
+# Разом выключить весь автозапуск (службы + ярлык сеанса + точка доступа):
+#   ./scripts/autostart.sh off
+#
 # Порт можно поменять: RC_KIOSK_PORT=8091 в /opt/robot-control/.env
 #
 [Unit]
