@@ -19,12 +19,14 @@
         <span style="display:block; font-size:11px; color:var(--muted); letter-spacing:.08em; margin-top:4px;">ОПЕРАТОР 8080</span>
       </div>
 
+      {% if request.endpoint != 'panel.dashboard' %}
       <nav class="nav" aria-label="Навигация">
         <a class="nav-link {% if request.path == '/' %}is-active{% endif %}" href="{{ u('slam.main') }}">Главная</a>
         <a class="nav-link {% if request.path.startswith('/kiosk') %}is-active{% endif %}" href="{{ u('slam.kiosk') }}">Киоск</a>
         <a class="nav-link {% if request.path.startswith('/console') %}is-active{% endif %}" href="{{ u('slam.console') }}">Пульт</a>
         <a class="nav-link {% if request.path.startswith('/service') %}is-active{% endif %}" href="{{ u('panel.service') }}">Сервис</a>
       </nav>
+      {% endif %}
       {% if session_user %}
       <button id="sidebar-themes-toggle" class="sidebar-themes-toggle" type="button" aria-expanded="false" aria-controls="sidebar-themes">Темы</button>
       <div id="sidebar-themes" class="sidebar-themes" role="list" aria-label="Темы" hidden></div>

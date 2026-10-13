@@ -294,7 +294,7 @@ class SimSource:
 
     def _payload(self, motors, volts, amps, speed):
         battery = pack_state(volts, amps, self.soc, temp_c=self.bat_temp)
-        return {
+        payload = {
             "motors": motors,
             "battery": battery,
             "cargo": {"kg": 80, "closed": True},
@@ -304,6 +304,12 @@ class SimSource:
             "powerKw": round(battery["watts"] / 1000.0, 2),
             "linkOk": True,
         }
+        try:
+            from robot_control.lidar import generate_demo_scan
+            payload["lidar"] = generate_demo_scan(t=time.time(), speed=speed)
+        except Exception:
+            pass
+        return payload
 
 
 class NoSource:
@@ -669,6 +675,19 @@ class RosSource:
         try:
             self.scan = scan_points(msg)
             self.scan_at = time.time()
+            try:
+                from robot_control.lidar import LidarManager
+                LidarManager.get_instance().feed_scan_msg(
+                    ranges=list(msg.ranges),
+                    angle_min=float(msg.angle_min),
+                    angle_max=float(msg.angle_max),
+                    angle_increment=float(msg.angle_increment),
+                    range_min=float(msg.range_min),
+                    range_max=float(msg.range_max),
+                    source_label="ros",
+                )
+            except Exception:
+                pass
         except Exception:                                            # noqa: BLE001
             pass
 
@@ -871,6 +890,14 @@ class App:
         out["source"] = getattr(self.source, "name", "unknown")
         out["uptimeSec"] = int(time.time() - self.started)
         out["ts"] = time.time()
+        mgr_scan = None
+        try:
+            from robot_control.lidar import LidarManager
+            mgr_scan = LidarManager.get_instance().get_scan()
+        except Exception:
+            pass
+        if mgr_scan is not None:
+            out["lidar"] = mgr_scan
         return out
 
     def open_lock(self, pin):

@@ -22,11 +22,15 @@ import glob
 import importlib.util
 import logging
 import os
+import math
 import re
 import time
 from pathlib import Path
 
-from flask import Blueprint, jsonify, request, send_from_directory, session
+from flask import Blueprint, Response, jsonify, request, send_from_directory, session
+
+from robot_control.camera import CameraManager
+from robot_control.lidar import LidarManager
 
 log = logging.getLogger("robot_control.slam")
 
@@ -276,11 +280,13 @@ def create_blueprint(state, guard=None) -> Blueprint:
     @bp.get("/api/kiosk_state")
     def api_kiosk_state():
         """Публичная телеметрия и признак, поддерживает ли источник адресный поворот."""
+        mgr_scan = LidarManager.get_instance().get_scan()
         snap = state.snapshot()
+        lidar_data = mgr_scan if mgr_scan is not None else snap.get("lidar")
         public = {
             "battery": snap.get("battery"),
             "motors": snap.get("motors"),
-            "lidar": snap.get("lidar"),
+            "lidar": lidar_data,
             "speedMps": snap.get("speedMps"),
             "powerKw": snap.get("powerKw"),
             "mode": snap.get("mode"),
@@ -338,7 +344,97 @@ def create_blueprint(state, guard=None) -> Blueprint:
     @bp.get("/api/state")
     @guard
     def api_state():
-        return jsonify({"ok": True, "data": state.snapshot()})
+        snap = state.snapshot()
+        if snap.get("lidar") is None:
+            snap["lidar"] = LidarManager.get_instance().get_scan()
+        snap["cameras"] = CameraManager.get_instance().list_cameras()
+        return jsonify({"ok": True, "data": snap})
+
+    # ----------------------------- ЛИДАР --------------------------------- #
+    @bp.get("/api/lidar")
+    @bp.get("/api/scan")
+    def api_lidar_get():
+        mgr = LidarManager.get_instance()
+        scan = mgr.get_scan()
+        if scan is None and hasattr(state, "source"):
+            try:
+                src_data = getattr(state.source, "read", lambda: {})()
+                scan = src_data.get("lidar")
+            except Exception:
+                pass
+        status = mgr.get_status()
+        status["scan"] = scan
+        status["count"] = len(scan) if scan else 0
+        return jsonify(status)
+
+    @bp.post("/api/lidar")
+    @bp.post("/api/scan")
+    def api_lidar_post():
+        body = request.get_json(silent=True) or {}
+        mgr = LidarManager.get_instance()
+        if "points" in body or "scan" in body:
+            pts = body.get("points") or body.get("scan") or []
+            count = mgr.feed_points(pts, source_label="api")
+            return jsonify({"ok": True, "count": count})
+        elif "ranges" in body:
+            count = mgr.feed_scan_msg(
+                ranges=body.get("ranges", []),
+                angle_min=float(body.get("angle_min", -math.pi)),
+                angle_max=float(body.get("angle_max", math.pi)),
+                angle_increment=float(body.get("angle_increment", 0.0174)),
+                range_min=float(body.get("range_min", 0.05)),
+                range_max=float(body.get("range_max", 12.0)),
+                source_label="api_ranges",
+            )
+            return jsonify({"ok": True, "count": count})
+        return jsonify({"ok": False, "error": "expected 'points' or 'ranges'"}), 400
+
+    # ---------------------------- КАМЕРЫ --------------------------------- #
+    @bp.get("/api/cameras")
+    def api_cameras():
+        mgr = CameraManager.get_instance()
+        return jsonify({"ok": True, "cameras": mgr.list_cameras()})
+
+    @bp.get("/api/camera/<int:cam_id>/stream")
+    def api_camera_stream(cam_id: int):
+        mgr = CameraManager.get_instance()
+        return Response(
+            mgr.generate_mjpeg_stream(cam_id),
+            mimetype="multipart/x-mixed-replace; boundary=frame",
+        )
+
+    @bp.get("/api/camera/front/stream")
+    def api_camera_front_stream():
+        return api_camera_stream(0)
+
+    @bp.get("/api/camera/rear/stream")
+    def api_camera_rear_stream():
+        return api_camera_stream(1)
+
+    @bp.get("/api/camera/<int:cam_id>/frame")
+    def api_camera_frame(cam_id: int):
+        mgr = CameraManager.get_instance()
+        frame = mgr.get_frame(cam_id)
+        if frame:
+            return Response(frame, mimetype="image/jpeg")
+        return Response(status=404)
+
+    @bp.get("/api/camera/front/frame")
+    def api_camera_front_frame():
+        return api_camera_frame(0)
+
+    @bp.get("/api/camera/rear/frame")
+    def api_camera_rear_frame():
+        return api_camera_frame(1)
+
+    @bp.post("/api/camera/<int:cam_id>/frame")
+    def api_camera_feed(cam_id: int):
+        mgr = CameraManager.get_instance()
+        data = request.get_data()
+        if data:
+            mgr.feed_frame(cam_id, data)
+            return jsonify({"ok": True})
+        return jsonify({"ok": False, "error": "empty data"}), 400
 
     @bp.get("/api/audit")
     @guard
