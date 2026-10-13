@@ -464,14 +464,40 @@
     return d.lidar.filter((p) => p && Number.isFinite(p.a) && Number.isFinite(p.r) && p.r >= 0);
   }
 
+  function demoLidar() {
+    const pts = [];
+    const t = Date.now() / 1000;
+    const speed = 0.7;
+    for (let i = 0; i < 180; i++) {
+      const a = (i / 180) * Math.PI * 2 - Math.PI;
+      const cosA = Math.cos(a);
+      const sinA = Math.sin(a);
+      const rx = Math.abs(cosA) > 1e-4 ? Math.abs(3.5 / cosA) : 12;
+      const ry = Math.abs(sinA) > 1e-4 ? Math.abs(2.5 / sinA) : 12;
+      let r = Math.min(rx, ry);
+      if (Math.abs(a - 0.6) < 0.08) r = 1.8 + Math.sin(t) * 0.1;
+      if (Math.abs(a + 0.9) < 0.07) r = 2.4;
+      r += Math.sin(t * speed + a * 3) * 0.1;
+      if (r < 0.4) r = 0.4;
+      if (r > 9.8) r = 9.8;
+      pts.push({ a, r });
+    }
+    return pts;
+  }
+
   function renderLidar(view, d) {
     const canvas = $('lidar-canvas');
     if (!canvas) return;
-    const pts = lidarPoints(d);
+    let pts = lidarPoints(d);
+    let isDemo = false;
+    if (!pts.length && DEMO) {
+      pts = demoLidar();
+      isDemo = true;
+    }
     const has = pts.length > 0;
     const near = has ? Math.min(...pts.map((p) => p.r)) : null;
 
-    setText($('lidar-meta'), has ? 'в реальном времени · ' + pts.length + ' точек' : 'нет скана');
+    setText($('lidar-meta'), has ? (isDemo ? 'демо · ' + pts.length + ' точек' : 'в реальном времени · ' + pts.length + ' точек') : 'нет скана');
     setText($('lidar-count'), has ? String(pts.length) : '—');
     setText($('lidar-near'), near === null ? '—' : fmt(near, 2) + ' м');
     $('lidar-empty').hidden = has;
@@ -532,21 +558,193 @@
     setText($('route-to'), parts[1] || '—');
   }
 
-  /* ------------------------------------------------------------ камеры — передняя и задняя, ниже шасси (без симуляции) */
+  /* ------------------------------------------------------------ камеры — передняя и задняя, поддержка USB-вебок и потока */
+  const WEBCAM = {
+    frontVideo: null,
+    rearVideo: null,
+    frontReady: false,
+    rearReady: false,
+    backendFront: null,
+    backendRear: null,
+    backendActive: false,
+    checkingBackend: false,
+    starting: false,
+    started: false,
+  };
+
+  async function checkBackendCameras() {
+    if (WEBCAM.checkingBackend) return;
+    WEBCAM.checkingBackend = true;
+    try {
+      const r = await fetch('api/cameras');
+      if (r.ok) {
+        const j = await r.json();
+        if (j && Array.isArray(j.cameras)) {
+          const activeCams = j.cameras.filter((c) => c.active || c.exists);
+          if (activeCams.length > 0) {
+            if (!WEBCAM.backendFront) {
+              const imgF = new Image();
+              imgF.src = 'api/camera/0/stream';
+              imgF.onload = () => { WEBCAM.backendActive = true; };
+              WEBCAM.backendFront = imgF;
+            }
+            if (activeCams.length > 1 && !WEBCAM.backendRear) {
+              const imgR = new Image();
+              imgR.src = 'api/camera/1/stream';
+              WEBCAM.backendRear = imgR;
+            }
+            WEBCAM.backendActive = true;
+          }
+        }
+      }
+    } catch (e) {}
+  }
+
+  async function startBrowserWebcams() {
+    if (WEBCAM.starting || (WEBCAM.frontReady && WEBCAM.rearReady)) return;
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return;
+    WEBCAM.starting = true;
+
+    try {
+      let devices = [];
+      try {
+        const all = await navigator.mediaDevices.enumerateDevices();
+        devices = all.filter((d) => d.kind === 'videoinput');
+      } catch (e) {}
+
+      // Передняя вебка
+      if (!WEBCAM.frontReady) {
+        try {
+          const fConstraints = {
+            video: devices.length > 0
+              ? { deviceId: { ideal: devices[0].deviceId }, width: { ideal: 640 }, height: { ideal: 360 } }
+              : { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 360 } }
+          };
+          const fStream = await navigator.mediaDevices.getUserMedia(fConstraints);
+          if (!WEBCAM.frontVideo) {
+            WEBCAM.frontVideo = document.createElement('video');
+            WEBCAM.frontVideo.autoplay = true;
+            WEBCAM.frontVideo.muted = true;
+            WEBCAM.frontVideo.playsInline = true;
+            WEBCAM.frontVideo.style.display = 'none';
+            document.body.appendChild(WEBCAM.frontVideo);
+          }
+          WEBCAM.frontVideo.srcObject = fStream;
+          await WEBCAM.frontVideo.play().catch(() => {});
+          WEBCAM.frontReady = true;
+        } catch (err) {
+          console.warn('Передняя камера не запущена:', err);
+        }
+      }
+
+      // Задняя вебка
+      if (devices.length > 1 && !WEBCAM.rearReady) {
+        try {
+          const rConstraints = {
+            video: { deviceId: { exact: devices[1].deviceId }, width: { ideal: 640 }, height: { ideal: 360 } }
+          };
+          const rStream = await navigator.mediaDevices.getUserMedia(rConstraints);
+          if (!WEBCAM.rearVideo) {
+            WEBCAM.rearVideo = document.createElement('video');
+            WEBCAM.rearVideo.autoplay = true;
+            WEBCAM.rearVideo.muted = true;
+            WEBCAM.rearVideo.playsInline = true;
+            WEBCAM.rearVideo.style.display = 'none';
+            document.body.appendChild(WEBCAM.rearVideo);
+          }
+          WEBCAM.rearVideo.srcObject = rStream;
+          await WEBCAM.rearVideo.play().catch(() => {});
+          WEBCAM.rearReady = true;
+        } catch (err) {
+          console.warn('Задняя камера не запущена:', err);
+        }
+      }
+      WEBCAM.started = true;
+    } catch (err) {
+      console.warn('Ошибка доступа к вебкам:', err);
+    } finally {
+      WEBCAM.starting = false;
+    }
+  }
+
+  function drawDemoCamera(ctx, cw, ch, d, isRear) {
+    const t = Date.now() / 1000;
+    const speed = typeof d.speedMps === 'number' ? Math.max(0, d.speedMps) : 0.5;
+    const rawOff = (t * speed * 40) % 40;
+    const offset = isRear ? (40 - rawOff) % 40 : rawOff;
+
+    const sky = ctx.createLinearGradient(0, 0, 0, ch * 0.48);
+    sky.addColorStop(0, '#0f1f1a');
+    sky.addColorStop(1, '#152a22');
+    ctx.fillStyle = sky;
+    ctx.fillRect(0, 0, cw, ch * 0.48);
+
+    ctx.fillStyle = '#1b2f27';
+    ctx.fillRect(0, ch * 0.48 - 1, cw, 2);
+
+    ctx.fillStyle = '#111c17';
+    ctx.beginPath();
+    ctx.moveTo(cw * 0.5 - 12, ch * 0.48);
+    ctx.lineTo(cw * 0.5 + 12, ch * 0.48);
+    ctx.lineTo(cw, ch);
+    ctx.lineTo(0, ch);
+    ctx.closePath();
+    ctx.fill();
+
+    ctx.strokeStyle = '#2b4037';
+    ctx.lineWidth = 1;
+    ctx.beginPath();
+    ctx.moveTo(cw * 0.5 - 12, ch * 0.48); ctx.lineTo(0, ch);
+    ctx.moveTo(cw * 0.5 + 12, ch * 0.48); ctx.lineTo(cw, ch);
+    ctx.stroke();
+
+    ctx.strokeStyle = 'rgba(255,255,255,.9)';
+    ctx.lineWidth = 2;
+    ctx.setLineDash([14, 14]);
+    ctx.lineDashOffset = -offset * 2;
+    ctx.beginPath();
+    ctx.moveTo(cw * 0.5, ch * 0.48);
+    ctx.lineTo(cw * 0.5, ch);
+    ctx.stroke();
+    ctx.setLineDash([]);
+
+    ctx.fillStyle = 'rgba(0,0,0,.38)';
+    ctx.fillRect(0, ch - 18, cw, 18);
+    ctx.fillStyle = '#9fe36b';
+    ctx.font = '700 10px Inter, sans-serif';
+    ctx.textAlign = 'left';
+    ctx.fillText(isRear ? 'CAM 1 · задняя' : 'CAM 0 · передняя', 8, ch - 6);
+    ctx.textAlign = 'right';
+    ctx.fillStyle = '#dbe7e1';
+    ctx.font = '10px ui-monospace, monospace';
+    ctx.fillText(speed.toFixed(2) + ' м/с · ' + new Date().toLocaleTimeString('ru-RU', { hour12: false }), cw - 8, ch - 6);
+  }
+
   function renderCamera(view, d) {
     const meta = $('cam-meta');
-    // без симуляции: камеры показывают реальный сигнал, пока его нет — «нет сигнала»
-    const hasCam = Array.isArray(d.cam) && d.cam.length || Array.isArray(d.camera) && d.camera.length;
-    if (meta) setText(meta, hasCam ? 'LIVE · 30 fps' : 'нет сигнала');
     const front = $('cam-canvas');
     const rear = $('cam-rear-canvas');
     const emptyF = $('cam-empty');
     const emptyR = $('cam-rear-empty');
-    // пока симуляции убраны — всегда показываем «нет сигнала» до появления реального потока
-    if (emptyF) emptyF.hidden = false;
-    if (emptyR) emptyR.hidden = false;
-    if (front) drawCamera(front, d, false, false);
-    if (rear) drawCamera(rear, d, false, true);
+
+    const hasLiveF = (WEBCAM.frontReady && WEBCAM.frontVideo && WEBCAM.frontVideo.videoWidth > 0) ||
+                     (WEBCAM.backendFront && WEBCAM.backendFront.naturalWidth > 0);
+    const hasLiveR = (WEBCAM.rearReady && WEBCAM.rearVideo && WEBCAM.rearVideo.videoWidth > 0) ||
+                     (WEBCAM.backendRear && WEBCAM.backendRear.naturalWidth > 0);
+    const hasLive = hasLiveF || hasLiveR || DEMO;
+
+    if (meta) {
+      if (hasLiveF && hasLiveR) setText(meta, '2× LIVE · 30 fps');
+      else if (hasLiveF) setText(meta, 'CAM 0 · LIVE · 30 fps');
+      else if (DEMO) setText(meta, 'демо · 30 fps');
+      else setText(meta, 'нет сигнала');
+    }
+
+    if (emptyF) emptyF.hidden = hasLiveF || DEMO;
+    if (emptyR) emptyR.hidden = hasLiveR || DEMO;
+
+    if (front) drawCamera(front, d, hasLiveF, false);
+    if (rear) drawCamera(rear, d, hasLiveR, true);
   }
 
   function drawCamera(canvas, d, live, isRear) {
@@ -563,17 +761,67 @@
     const w = W, h = H;
     ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
     const cw = w / dpr, ch = h / dpr;
+
+    let videoSource = null;
+    if (isRear) {
+      if (WEBCAM.rearReady && WEBCAM.rearVideo && WEBCAM.rearVideo.videoWidth > 0) {
+        videoSource = WEBCAM.rearVideo;
+      } else if (WEBCAM.backendRear && WEBCAM.backendRear.complete && WEBCAM.backendRear.naturalWidth > 0) {
+        videoSource = WEBCAM.backendRear;
+      }
+    } else {
+      if (WEBCAM.frontReady && WEBCAM.frontVideo && WEBCAM.frontVideo.videoWidth > 0) {
+        videoSource = WEBCAM.frontVideo;
+      } else if (WEBCAM.backendFront && WEBCAM.backendFront.complete && WEBCAM.backendFront.naturalWidth > 0) {
+        videoSource = WEBCAM.backendFront;
+      }
+    }
+
+    if (videoSource) {
+      try {
+        ctx.drawImage(videoSource, 0, 0, cw, ch);
+      } catch (e) {
+        ctx.fillStyle = '#0b1411';
+        ctx.fillRect(0, 0, cw, ch);
+      }
+      ctx.strokeStyle = 'rgba(255,255,255,.2)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(cw * 0.5, ch * 0.3); ctx.lineTo(cw * 0.5, ch * 0.7);
+      ctx.moveTo(cw * 0.3, ch * 0.5); ctx.lineTo(cw * 0.7, ch * 0.5);
+      ctx.stroke();
+
+      ctx.fillStyle = 'rgba(0,0,0,.45)';
+      ctx.fillRect(0, ch - 18, cw, 18);
+      ctx.fillStyle = '#9fe36b';
+      ctx.font = '700 10px Inter, sans-serif';
+      ctx.textAlign = 'left';
+      ctx.fillText(isRear ? 'CAM 1 · задняя' : 'CAM 0 · передняя', 8, ch - 5);
+      ctx.textAlign = 'right';
+      ctx.fillStyle = '#dbe7e1';
+      ctx.font = '10px ui-monospace, monospace';
+      const vw = videoSource.videoWidth || videoSource.naturalWidth || 640;
+      const vh = videoSource.videoHeight || videoSource.naturalHeight || 360;
+      ctx.fillText(`${vw}×${vh} · LIVE`, cw - 8, ch - 5);
+      return;
+    }
+
+    if (DEMO) {
+      drawDemoCamera(ctx, cw, ch, d, isRear);
+      return;
+    }
+
     ctx.fillStyle = '#0b1411';
     ctx.fillRect(0, 0, cw, ch);
     ctx.fillStyle = '#6f877d';
     ctx.font = '11px Inter, sans-serif';
     ctx.textAlign = 'center';
-    ctx.fillText('нет сигнала — камера не подключена', cw/2, ch/2);
+    ctx.fillText('кликните для включения вебки', cw / 2, ch / 2);
     ctx.strokeStyle = 'rgba(255,255,255,.06)';
     ctx.lineWidth = 1;
     ctx.beginPath();
-    ctx.moveTo(cw*0.5, ch*0.22); ctx.lineTo(cw*0.5, ch*0.78);
-    ctx.moveTo(cw*0.22, ch*0.5); ctx.lineTo(cw*0.78, ch*0.5);
+    ctx.moveTo(cw * 0.5, ch * 0.22); ctx.lineTo(cw * 0.5, ch * 0.78);
+    ctx.moveTo(cw * 0.22, ch * 0.5); ctx.lineTo(cw * 0.78, ch * 0.5);
     ctx.stroke();
   }
 
@@ -725,9 +973,19 @@
     driveTick();
   }
 
+  function initWebcams() {
+    checkBackendCameras();
+    startBrowserWebcams();
+    const frontVp = $('cam-viewport-front');
+    const rearVp = $('cam-viewport-rear');
+    if (frontVp) frontVp.addEventListener('click', () => { startBrowserWebcams(); checkBackendCameras(); });
+    if (rearVp) rearVp.addEventListener('click', () => { startBrowserWebcams(); checkBackendCameras(); });
+  }
+
   function boot() {
     initLinks();
     syncNav();
+    initWebcams();
     window.addEventListener('hashchange', syncNav);
     window.addEventListener('keydown', (e) => { if (!isTyping(e)) driveKey(e, true); });
     window.addEventListener('keyup', (e) => { if (!isTyping(e)) driveKey(e, false); });

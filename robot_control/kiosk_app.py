@@ -46,10 +46,12 @@ try:
 except ImportError:  # pragma: no cover - не-POSIX платформы
     fcntl = None  # type: ignore[assignment]
 
-from flask import Flask, jsonify, redirect, request
+from flask import Flask, Response, jsonify, redirect, request
 from werkzeug.serving import make_server
 
+from robot_control.camera import CameraManager
 from robot_control.config import PROJECT_ROOT, Config
+from robot_control.lidar import LidarManager
 from robot_control.slam import (
     GUI_DIR,
     KIOSK_PAGE,
@@ -461,18 +463,105 @@ def create_kiosk_app(config: Config | None = None) -> Flask:
     def api_state():
         if state is None:
             return jsonify({"ok": False, "error": "no source"}), 503
+        mgr_scan = LidarManager.get_instance().get_scan()
         snap = state.snapshot()
+        lidar_data = mgr_scan if mgr_scan is not None else snap.get("lidar")
         # Только публичные показатели — АКБ, шасси, лидар, скорость/мощность/связь.
         return jsonify({"ok": True, "data": {
             "battery": snap.get("battery"),
             "motors": snap.get("motors"),
-            "lidar": snap.get("lidar"),
+            "lidar": lidar_data,
             "speedMps": snap.get("speedMps"),
             "powerKw": snap.get("powerKw"),
             "mode": snap.get("mode"),
             "linkOk": snap.get("linkOk"),
             "ts": snap.get("ts"),
         }})
+
+    @app.get("/api/lidar")
+    @app.get("/api/scan")
+    def api_kiosk_lidar_get():
+        mgr = LidarManager.get_instance()
+        scan = mgr.get_scan()
+        if scan is None and state and hasattr(state, "source"):
+            try:
+                src_data = getattr(state.source, "read", lambda: {})()
+                scan = src_data.get("lidar")
+            except Exception:
+                pass
+        status = mgr.get_status()
+        status["scan"] = scan
+        status["count"] = len(scan) if scan else 0
+        return jsonify(status)
+
+    @app.post("/api/lidar")
+    @app.post("/api/scan")
+    def api_kiosk_lidar_post():
+        body = request.get_json(silent=True) or {}
+        mgr = LidarManager.get_instance()
+        if "points" in body or "scan" in body:
+            pts = body.get("points") or body.get("scan") or []
+            count = mgr.feed_points(pts, source_label="api")
+            return jsonify({"ok": True, "count": count})
+        elif "ranges" in body:
+            import math
+            count = mgr.feed_scan_msg(
+                ranges=body.get("ranges", []),
+                angle_min=float(body.get("angle_min", -math.pi)),
+                angle_max=float(body.get("angle_max", math.pi)),
+                angle_increment=float(body.get("angle_increment", 0.0174)),
+                range_min=float(body.get("range_min", 0.05)),
+                range_max=float(body.get("range_max", 12.0)),
+                source_label="api_ranges",
+            )
+            return jsonify({"ok": True, "count": count})
+        return jsonify({"ok": False, "error": "expected 'points' or 'ranges'"}), 400
+
+    @app.get("/api/cameras")
+    def api_kiosk_cameras():
+        mgr = CameraManager.get_instance()
+        return jsonify({"ok": True, "cameras": mgr.list_cameras()})
+
+    @app.get("/api/camera/<int:cam_id>/stream")
+    def api_kiosk_camera_stream(cam_id: int):
+        mgr = CameraManager.get_instance()
+        return Response(
+            mgr.generate_mjpeg_stream(cam_id),
+            mimetype="multipart/x-mixed-replace; boundary=frame",
+        )
+
+    @app.get("/api/camera/front/stream")
+    def api_kiosk_camera_front_stream():
+        return api_kiosk_camera_stream(0)
+
+    @app.get("/api/camera/rear/stream")
+    def api_kiosk_camera_rear_stream():
+        return api_kiosk_camera_stream(1)
+
+    @app.get("/api/camera/<int:cam_id>/frame")
+    def api_kiosk_camera_frame(cam_id: int):
+        mgr = CameraManager.get_instance()
+        frame = mgr.get_frame(cam_id)
+        if frame:
+            return Response(frame, mimetype="image/jpeg")
+        return Response(status=404)
+
+    @app.get("/api/camera/front/frame")
+    def api_kiosk_camera_front_frame():
+        return api_kiosk_camera_frame(0)
+
+    @app.get("/api/camera/rear/frame")
+    def api_kiosk_camera_rear_frame():
+        return api_kiosk_camera_frame(1)
+
+    @app.post("/api/camera/<int:cam_id>/frame")
+    def api_kiosk_camera_feed(cam_id: int):
+        mgr = CameraManager.get_instance()
+        data = request.get_data()
+        if data:
+            mgr.feed_frame(cam_id, data)
+            return jsonify({"ok": True})
+        return jsonify({"ok": False, "error": "empty data"}), 400
 
     @app.get("/api/kiosk_lock")
     def api_kiosk_lock():

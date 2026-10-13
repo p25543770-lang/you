@@ -243,13 +243,40 @@
     }
   }
 
+  function demoLidar() {
+    const pts = [];
+    const t = Date.now() / 1000;
+    const speed = 0.7;
+    for (let i = 0; i < 180; i++) {
+      const a = (i / 180) * Math.PI * 2 - Math.PI;
+      const cosA = Math.cos(a);
+      const sinA = Math.sin(a);
+      const rx = Math.abs(cosA) > 1e-4 ? Math.abs(3.5 / cosA) : 12;
+      const ry = Math.abs(sinA) > 1e-4 ? Math.abs(2.5 / sinA) : 12;
+      let r = Math.min(rx, ry);
+      if (Math.abs(a - 0.6) < 0.08) r = 1.8 + Math.sin(t) * 0.1;
+      if (Math.abs(a + 0.9) < 0.07) r = 2.4;
+      r += Math.sin(t * speed + a * 3) * 0.1;
+      if (r < 0.4) r = 0.4;
+      if (r > 9.8) r = 9.8;
+      pts.push({ a, r });
+    }
+    return pts;
+  }
+
   function renderLidar(d) {
     const canvas = $('lidar-canvas');
-    const pts = lidarPoints(d);
+    let pts = lidarPoints(d);
+    let isDemo = false;
+    const demoReq = new URLSearchParams(window.location.search).get('demo') === '1' || localStorage.getItem('kiosk_demo') === '1';
+    if (!pts.length && (demoReq || (typeof autoScanOn !== 'undefined' && autoScanOn))) {
+      pts = demoLidar();
+      isDemo = true;
+    }
     const has = pts.length > 0;
     const near = has ? Math.min.apply(null, pts.map((p) => p.r)) : null;
 
-    setText($('lidar-meta'), has ? 'в реальном времени · ' + pts.length + ' точек' : 'нет скана');
+    setText($('lidar-meta'), has ? (isDemo ? 'демо · ' + pts.length + ' точек' : 'в реальном времени · ' + pts.length + ' точек') : 'нет скана');
     setText($('lidar-count'), has ? String(pts.length) : '—');
     setText($('lidar-near'), near == null ? '—' : fmt(near, 2) + ' м');
     $('lidar-empty').hidden = has;
@@ -1291,15 +1318,110 @@
 
     // также клик по оверлею вне? не нужно
 
-    // --- КАМЕРЫ: без симуляции — показываем «нет сигнала» до реального потока ---
+    // --- КАМЕРЫ: поддержка USB-вебок, бэкенд-стримов и демо ---
+    let cam1Video = null, cam2Video = null;
+    let cam1Ready = false, cam2Ready = false;
+    let backendImg1 = null, backendImg2 = null;
+    let startingWebcams = false;
+
+    async function checkBackendCams() {
+      try {
+        const r = await fetch('api/cameras');
+        if (r.ok) {
+          const j = await r.json();
+          if (j && Array.isArray(j.cameras)) {
+            const active = j.cameras.filter((c) => c.active || c.exists);
+            if (active.length > 0) {
+              if (!backendImg1) {
+                const img1 = new Image();
+                img1.src = 'api/camera/0/stream';
+                backendImg1 = img1;
+              }
+              if (active.length > 1 && !backendImg2) {
+                const img2 = new Image();
+                img2.src = 'api/camera/1/stream';
+                backendImg2 = img2;
+              }
+            }
+          }
+        }
+      } catch (e) {}
+    }
+
+    async function startBrowserCams() {
+      if (startingWebcams || (cam1Ready && cam2Ready)) return;
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) return;
+      startingWebcams = true;
+      try {
+        let devs = [];
+        try {
+          const all = await navigator.mediaDevices.enumerateDevices();
+          devs = all.filter((d) => d.kind === 'videoinput');
+        } catch (e) {}
+
+        if (!cam1Ready) {
+          try {
+            const c1 = {
+              video: devs.length > 0
+                ? { deviceId: { ideal: devs[0].deviceId }, width: { ideal: 640 }, height: { ideal: 360 } }
+                : { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 360 } }
+            };
+            const s1 = await navigator.mediaDevices.getUserMedia(c1);
+            if (!cam1Video) {
+              cam1Video = document.createElement('video');
+              cam1Video.autoplay = true;
+              cam1Video.muted = true;
+              cam1Video.playsInline = true;
+              cam1Video.style.display = 'none';
+              document.body.appendChild(cam1Video);
+            }
+            cam1Video.srcObject = s1;
+            await cam1Video.play().catch(() => {});
+            cam1Ready = true;
+          } catch (e) {
+            console.warn('Передняя вебка не запустилась:', e);
+          }
+        }
+
+        if (devs.length > 1 && !cam2Ready) {
+          try {
+            const c2 = {
+              video: { deviceId: { exact: devs[1].deviceId }, width: { ideal: 640 }, height: { ideal: 360 } }
+            };
+            const s2 = await navigator.mediaDevices.getUserMedia(c2);
+            if (!cam2Video) {
+              cam2Video = document.createElement('video');
+              cam2Video.autoplay = true;
+              cam2Video.muted = true;
+              cam2Video.playsInline = true;
+              cam2Video.style.display = 'none';
+              document.body.appendChild(cam2Video);
+            }
+            cam2Video.srcObject = s2;
+            await cam2Video.play().catch(() => {});
+            cam2Ready = true;
+          } catch (e) {
+            console.warn('Задняя вебка не запустилась:', e);
+          }
+        }
+      } catch (e) {
+        console.warn('Ошибка доступа к вебкам:', e);
+      } finally {
+        startingWebcams = false;
+      }
+    }
+
     function startCamLoops() {
       if (camLoopsStarted) return;
       camLoopsStarted = true;
-      if (cam1Empty) cam1Empty.hidden = false;
-      if (cam2Empty) cam2Empty.hidden = false;
-      if (cam1Chip) { cam1Chip.textContent = 'нет сигнала'; cam1Chip.className = 'cam-chip'; }
-      if (cam2Chip) { cam2Chip.textContent = 'нет сигнала'; cam2Chip.className = 'cam-chip'; }
-      return;
+
+      checkBackendCams();
+      startBrowserCams();
+
+      const c1View = $('cam1-view');
+      const c2View = $('cam2-view');
+      if (c1View) c1View.addEventListener('click', () => { startBrowserCams(); checkBackendCams(); });
+      if (c2View) c2View.addEventListener('click', () => { startBrowserCams(); checkBackendCams(); });
 
       const ctx1 = cam1Canvas ? cam1Canvas.getContext('2d') : null;
       const ctx2 = cam2Canvas ? cam2Canvas.getContext('2d') : null;
@@ -1318,86 +1440,184 @@
       function drawCam1(now) {
         if (!ctx1 || !cam1Canvas) return;
         const {w, h} = resize(cam1Canvas, ctx1);
-        const t = (now - t0) / 1000;
-        // фон — асфальт
-        ctx1.fillStyle = '#0f0f0f';
-        ctx1.fillRect(0,0,w,h);
-        // перспектива дороги
-        const grad = ctx1.createLinearGradient(0,0,0,h);
-        grad.addColorStop(0,'#1a1a1c');
-        grad.addColorStop(0.55,'#141416');
-        grad.addColorStop(1,'#0e0e0e');
-        ctx1.fillStyle = grad;
-        ctx1.fillRect(0,0,w,h);
-        // разметка
-        ctx1.strokeStyle = 'rgba(255,255,255,.22)';
-        ctx1.setLineDash([18,18]);
-        ctx1.lineWidth = 3;
-        ctx1.beginPath();
-        ctx1.moveTo(w/2, h*0.35);
-        ctx1.lineTo(w/2, h);
-        ctx1.stroke();
-        ctx1.setLineDash([]);
-        // бордюры
-        ctx1.strokeStyle = '#2a2a2c';
-        ctx1.lineWidth = 2;
-        ctx1.beginPath();
-        ctx1.moveTo(w*0.18, h*0.35); ctx1.lineTo(0, h);
-        ctx1.moveTo(w*0.82, h*0.35); ctx1.lineTo(w, h);
-        ctx1.stroke();
-        // движущийся прямоугольник — будто ящик/робот впереди
-        const x = w/2 + Math.sin(t*0.7)*w*0.18;
-        const y = h*0.52 + Math.sin(t*0.9)*6;
-        ctx1.fillStyle = '#ffffff';
-        ctx1.globalAlpha = 0.95;
-        ctx1.fillRect(x-36, y-18, 72, 36);
-        ctx1.globalAlpha = 1;
-        ctx1.fillStyle = 'rgba(255,255,255,.08)';
-        ctx1.fillRect(0, h-48, w, 48);
-        // перекрестие
-        ctx1.strokeStyle = 'rgba(255,255,255,.55)';
+
+        let src1 = null;
+        if (cam1Ready && cam1Video && cam1Video.videoWidth > 0) src1 = cam1Video;
+        else if (backendImg1 && backendImg1.complete && backendImg1.naturalWidth > 0) src1 = backendImg1;
+
+        if (src1) {
+          try {
+            ctx1.drawImage(src1, 0, 0, w, h);
+          } catch (e) {
+            ctx1.fillStyle = '#0f0f0f'; ctx1.fillRect(0, 0, w, h);
+          }
+          if (cam1Empty) cam1Empty.hidden = true;
+          if (cam1Chip) { cam1Chip.textContent = '● LIVE · передняя'; cam1Chip.className = 'cam-chip ok'; }
+          const vw = src1.videoWidth || src1.naturalWidth || 640;
+          const vh = src1.videoHeight || src1.naturalHeight || 360;
+          if (cam1Meta) cam1Meta.textContent = `${vw}×${vh} · 30 fps`;
+
+          // перекрестие
+          ctx1.strokeStyle = 'rgba(255,255,255,.3)';
+          ctx1.lineWidth = 1;
+          ctx1.beginPath();
+          ctx1.moveTo(w / 2 - 14, h / 2); ctx1.lineTo(w / 2 + 14, h / 2);
+          ctx1.moveTo(w / 2, h / 2 - 14); ctx1.lineTo(w / 2, h / 2 + 14);
+          ctx1.stroke();
+          ctx1.fillStyle = 'rgba(255,255,255,.85)';
+          ctx1.font = '11px ui-monospace, monospace';
+          ctx1.fillText('CAM 1 · LIVE · ' + new Date().toLocaleTimeString('ru-RU'), 10, 18);
+          anim1 = requestAnimationFrame(drawCam1);
+          return;
+        }
+
+        const isDemo = new URLSearchParams(window.location.search).get('demo') === '1' || localStorage.getItem('kiosk_demo') === '1';
+        if (isDemo) {
+          if (cam1Empty) cam1Empty.hidden = true;
+          if (cam1Chip) { cam1Chip.textContent = '● LIVE · демо'; cam1Chip.className = 'cam-chip ok'; }
+          const t = (now - t0) / 1000;
+          ctx1.fillStyle = '#0f0f0f';
+          ctx1.fillRect(0, 0, w, h);
+          const grad = ctx1.createLinearGradient(0, 0, 0, h);
+          grad.addColorStop(0, '#1a1a1c');
+          grad.addColorStop(0.55, '#141416');
+          grad.addColorStop(1, '#0e0e0e');
+          ctx1.fillStyle = grad;
+          ctx1.fillRect(0, 0, w, h);
+          ctx1.strokeStyle = 'rgba(255,255,255,.22)';
+          ctx1.setLineDash([18, 18]);
+          ctx1.lineWidth = 3;
+          ctx1.beginPath();
+          ctx1.moveTo(w / 2, h * 0.35); ctx1.lineTo(w / 2, h);
+          ctx1.stroke();
+          ctx1.setLineDash([]);
+          ctx1.strokeStyle = '#2a2a2c';
+          ctx1.lineWidth = 2;
+          ctx1.beginPath();
+          ctx1.moveTo(w * 0.18, h * 0.35); ctx1.lineTo(0, h);
+          ctx1.moveTo(w * 0.82, h * 0.35); ctx1.lineTo(w, h);
+          ctx1.stroke();
+          const x = w / 2 + Math.sin(t * 0.7) * w * 0.18;
+          const y = h * 0.52 + Math.sin(t * 0.9) * 6;
+          ctx1.fillStyle = '#ffffff';
+          ctx1.globalAlpha = 0.95;
+          ctx1.fillRect(x - 36, y - 18, 72, 36);
+          ctx1.globalAlpha = 1;
+          ctx1.fillStyle = 'rgba(255,255,255,.08)';
+          ctx1.fillRect(0, h - 48, w, 48);
+          ctx1.strokeStyle = 'rgba(255,255,255,.55)';
+          ctx1.lineWidth = 1;
+          ctx1.beginPath();
+          ctx1.moveTo(w / 2 - 14, h / 2); ctx1.lineTo(w / 2 + 14, h / 2);
+          ctx1.moveTo(w / 2, h / 2 - 14); ctx1.lineTo(w / 2, h / 2 + 14);
+          ctx1.stroke();
+          ctx1.fillStyle = 'rgba(255,255,255,.75)';
+          ctx1.font = '11px ui-monospace, monospace';
+          ctx1.fillText('CAM 1 · 30fps · ' + new Date().toLocaleTimeString('ru-RU'), 10, 18);
+          anim1 = requestAnimationFrame(drawCam1);
+          return;
+        }
+
+        // Режим ожидания вебки
+        ctx1.fillStyle = '#0b1411';
+        ctx1.fillRect(0, 0, w, h);
+        ctx1.fillStyle = '#6f877d';
+        ctx1.font = '12px Inter, sans-serif';
+        ctx1.textAlign = 'center';
+        ctx1.fillText('кликните для включения вебки', w / 2, h / 2);
+        ctx1.strokeStyle = 'rgba(255,255,255,.06)';
         ctx1.lineWidth = 1;
         ctx1.beginPath();
-        ctx1.moveTo(w/2-14, h/2); ctx1.lineTo(w/2+14, h/2);
-        ctx1.moveTo(w/2, h/2-14); ctx1.lineTo(w/2, h/2+14);
+        ctx1.moveTo(w * 0.5, h * 0.22); ctx1.lineTo(w * 0.5, h * 0.78);
+        ctx1.moveTo(w * 0.22, h * 0.5); ctx1.lineTo(w * 0.78, h * 0.5);
         ctx1.stroke();
-        ctx1.fillStyle = 'rgba(255,255,255,.75)';
-        ctx1.font = '11px ui-monospace, monospace';
-        ctx1.fillText('CAM 1 · 30fps · ' + new Date().toLocaleTimeString('ru-RU'), 10, 18);
+        if (cam1Empty) cam1Empty.hidden = false;
+        if (cam1Chip) { cam1Chip.textContent = 'нет сигнала'; cam1Chip.className = 'cam-chip'; }
         anim1 = requestAnimationFrame(drawCam1);
       }
+
       function drawCam2(now) {
         if (!ctx2 || !cam2Canvas) return;
         const {w, h} = resize(cam2Canvas, ctx2);
-        const t = (now - t0) / 1000;
-        ctx2.fillStyle = '#0a0a0a';
-        ctx2.fillRect(0,0,w,h);
-        const grad = ctx2.createLinearGradient(0,0,0,h);
-        grad.addColorStop(0,'#141416');
-        grad.addColorStop(1,'#0a0a0a');
-        ctx2.fillStyle = grad;
-        ctx2.fillRect(0,0,w,h);
-        // сетка пола
-        ctx2.strokeStyle = '#222226';
+
+        let src2 = null;
+        if (cam2Ready && cam2Video && cam2Video.videoWidth > 0) src2 = cam2Video;
+        else if (backendImg2 && backendImg2.complete && backendImg2.naturalWidth > 0) src2 = backendImg2;
+
+        if (src2) {
+          try {
+            ctx2.drawImage(src2, 0, 0, w, h);
+          } catch (e) {
+            ctx2.fillStyle = '#0f0f0f'; ctx2.fillRect(0, 0, w, h);
+          }
+          if (cam2Empty) cam2Empty.hidden = true;
+          if (cam2Chip) { cam2Chip.textContent = '● LIVE · кормовая'; cam2Chip.className = 'cam-chip ok'; }
+          const vw = src2.videoWidth || src2.naturalWidth || 640;
+          const vh = src2.videoHeight || src2.naturalHeight || 360;
+          if (cam2Meta) cam2Meta.textContent = `${vw}×${vh} · 30 fps`;
+
+          ctx2.strokeStyle = 'rgba(255,255,255,.3)';
+          ctx2.lineWidth = 1;
+          ctx2.beginPath();
+          ctx2.moveTo(w / 2 - 14, h / 2); ctx2.lineTo(w / 2 + 14, h / 2);
+          ctx2.moveTo(w / 2, h / 2 - 14); ctx2.lineTo(w / 2, h / 2 + 14);
+          ctx2.stroke();
+          ctx2.fillStyle = 'rgba(255,255,255,.85)';
+          ctx2.font = '11px ui-monospace, monospace';
+          ctx2.fillText('CAM 2 · LIVE · ' + new Date().toLocaleTimeString('ru-RU'), 10, 18);
+          anim2 = requestAnimationFrame(drawCam2);
+          return;
+        }
+
+        const isDemo = new URLSearchParams(window.location.search).get('demo') === '1' || localStorage.getItem('kiosk_demo') === '1';
+        if (isDemo) {
+          if (cam2Empty) cam2Empty.hidden = true;
+          if (cam2Chip) { cam2Chip.textContent = '● LIVE · демо'; cam2Chip.className = 'cam-chip ok'; }
+          const t = (now - t0) / 1000;
+          ctx2.fillStyle = '#0a0a0a';
+          ctx2.fillRect(0, 0, w, h);
+          const grad = ctx2.createLinearGradient(0, 0, 0, h);
+          grad.addColorStop(0, '#141416');
+          grad.addColorStop(1, '#0a0a0a');
+          ctx2.fillStyle = grad;
+          ctx2.fillRect(0, 0, w, h);
+          ctx2.strokeStyle = '#222226';
+          ctx2.lineWidth = 1;
+          for (let i = 0; i < w; i += 40) { ctx2.beginPath(); ctx2.moveTo(i + (t * 18) % 40, 0); ctx2.lineTo(i + (t * 18) % 40, h); ctx2.stroke(); }
+          for (let j = 0; j < h; j += 36) { ctx2.beginPath(); ctx2.moveTo(0, j); ctx2.lineTo(w, j); ctx2.stroke(); }
+          const sx = w * 0.5 + Math.cos(t * 0.5) * w * 0.12;
+          ctx2.fillStyle = '#ffffff';
+          ctx2.fillRect(sx - 42, h * 0.35, 84, h * 0.45);
+          ctx2.fillStyle = '#1a1a1c';
+          ctx2.fillRect(sx - 30, h * 0.45, 60, 8);
+          ctx2.fillRect(sx - 30, h * 0.62, 60, 8);
+          const vg = ctx2.createRadialGradient(w / 2, h / 2, w * 0.35, w / 2, h / 2, w * 0.85);
+          vg.addColorStop(0, 'transparent');
+          vg.addColorStop(1, 'rgba(0,0,0,.55)');
+          ctx2.fillStyle = vg;
+          ctx2.fillRect(0, 0, w, h);
+          ctx2.fillStyle = 'rgba(255,255,255,.75)';
+          ctx2.font = '11px ui-monospace, monospace';
+          ctx2.fillText('CAM 2 · 30fps · ' + new Date().toLocaleTimeString('ru-RU'), 10, 18);
+          anim2 = requestAnimationFrame(drawCam2);
+          return;
+        }
+
+        // Режим ожидания
+        ctx2.fillStyle = '#0b1411';
+        ctx2.fillRect(0, 0, w, h);
+        ctx2.fillStyle = '#6f877d';
+        ctx2.font = '12px Inter, sans-serif';
+        ctx2.textAlign = 'center';
+        ctx2.fillText('кликните для включения вебки', w / 2, h / 2);
+        ctx2.strokeStyle = 'rgba(255,255,255,.06)';
         ctx2.lineWidth = 1;
-        for (let i=0;i<w;i+=40) { ctx2.beginPath(); ctx2.moveTo(i + (t*18)%40, 0); ctx2.lineTo(i + (t*18)%40, h); ctx2.stroke(); }
-        for (let j=0;j<h;j+=36) { ctx2.beginPath(); ctx2.moveTo(0,j); ctx2.lineTo(w,j); ctx2.stroke(); }
-        // объект сзади — стена/стеллаж
-        const sx = w*0.5 + Math.cos(t*0.5)*w*0.12;
-        ctx2.fillStyle = '#ffffff';
-        ctx2.fillRect(sx-42, h*0.35, 84, h*0.45);
-        ctx2.fillStyle = '#1a1a1c';
-        ctx2.fillRect(sx-30, h*0.45, 60, 8);
-        ctx2.fillRect(sx-30, h*0.62, 60, 8);
-        // виньетка
-        const vg = ctx2.createRadialGradient(w/2,h/2, w*0.35, w/2,h/2, w*0.85);
-        vg.addColorStop(0,'transparent');
-        vg.addColorStop(1,'rgba(0,0,0,.55)');
-        ctx2.fillStyle = vg;
-        ctx2.fillRect(0,0,w,h);
-        ctx2.fillStyle = 'rgba(255,255,255,.75)';
-        ctx2.font = '11px ui-monospace, monospace';
-        ctx2.fillText('CAM 2 · 30fps · ' + new Date().toLocaleTimeString('ru-RU'), 10, 18);
+        ctx2.beginPath();
+        ctx2.moveTo(w * 0.5, h * 0.22); ctx2.lineTo(w * 0.5, h * 0.78);
+        ctx2.moveTo(w * 0.22, h * 0.5); ctx2.lineTo(w * 0.78, h * 0.5);
+        ctx2.stroke();
+        if (cam2Empty) cam2Empty.hidden = false;
+        if (cam2Chip) { cam2Chip.textContent = 'нет сигнала'; cam2Chip.className = 'cam-chip'; }
         anim2 = requestAnimationFrame(drawCam2);
       }
       if (ctx1) requestAnimationFrame(drawCam1);
