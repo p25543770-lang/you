@@ -477,7 +477,8 @@ def create_kiosk_app(config: Config | None = None) -> Flask:
     def api_state():
         if state is None:
             return jsonify({"ok": False, "error": "no source"}), 503
-        mgr_scan = LidarManager.get_instance().get_scan()
+        lidar = LidarManager.get_instance()
+        mgr_scan = lidar.get_scan()
         snap = state.snapshot()
         lidar_data = mgr_scan if mgr_scan is not None else snap.get("lidar")
         # Телеметрия и признак поддержки публичны; команды модулю — только после PIN.
@@ -485,6 +486,9 @@ def create_kiosk_app(config: Config | None = None) -> Flask:
             "battery": snap.get("battery"),
             "motors": snap.get("motors"),
             "lidar": lidar_data,
+            # Причина, если скана нет: экран пишет её прямо под картой,
+            # а не молчит (порт не найден, скорость не та, порт занят и т. д.).
+            "lidarStatus": lidar.get_status(),
             "speedMps": snap.get("speedMps"),
             "powerKw": snap.get("powerKw"),
             "mode": snap.get("mode"),

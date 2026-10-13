@@ -246,6 +246,17 @@
     return pts;
   }
 
+  // Почему скана нет: сервер отдаёт причину (порт не найден, скорость не та,
+  // мотор не включён, порт занят вторым процессом робота). Молчать нельзя —
+  // иначе «скана лидара нет» выглядит как поломка экрана.
+  function lidarReason(d) {
+    const st = d && d.lidarStatus;
+    if (!st || typeof st !== 'object') return '';
+    const reason = st.reason ? String(st.reason) : '';
+    const hint = st.hint ? String(st.hint) : '';
+    return hint ? reason + ' — ' + hint : reason;
+  }
+
   function renderLidar(d) {
     const canvas = $('lidar-canvas');
     let pts = lidarPoints(d);
@@ -258,10 +269,16 @@
     const has = pts.length > 0;
     const near = has ? Math.min.apply(null, pts.map((p) => p.r)) : null;
 
+    const reason = has ? '' : lidarReason(d);
     setText($('lidar-meta'), has ? (isDemo ? 'демо · ' + pts.length + ' точек' : 'в реальном времени · ' + pts.length + ' точек') : 'нет скана');
     setText($('lidar-count'), has ? String(pts.length) : '—');
     setText($('lidar-near'), near == null ? '—' : fmt(near, 2) + ' м');
-    $('lidar-empty').hidden = has;
+    const empty = $('lidar-empty');
+    if (empty) {
+      empty.hidden = has;
+      if (!has) setText(empty, reason ? 'скана лидара нет · ' + reason : 'скана лидара нет');
+      empty.title = reason;
+    }
     drawLidar(canvas, pts);
   }
 

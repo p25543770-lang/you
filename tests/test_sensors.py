@@ -183,3 +183,33 @@ def test_kiosk_lidar_and_camera_api(kiosk_client):
     cams_res = kiosk_client.get("/api/cameras")
     assert cams_res.status_code == 200
     assert len(cams_res.get_json()["cameras"]) >= 2
+
+
+def test_lidar_status_explains_why_there_is_no_scan(client, operator):
+    """В ответе /api/lidar есть причина отсутствия скана — её показывает экран."""
+    from conftest import login
+
+    assert login(client).status_code in (302, 303)
+    status = client.get("/api/lidar").get_json()
+    assert status["ok"] is True
+    assert isinstance(status["reason"], str) and status["reason"]
+    assert "detected" in status and "candidates" in status
+
+    # причина видна и в телеметрии основного экрана
+    state = client.get("/api/state").get_json()
+    assert state["data"]["lidarStatus"]["reason"] == status["reason"]
+
+
+def test_lidar_status_shows_scan_when_points_arrive(client, operator):
+    from conftest import login
+
+    assert login(client).status_code in (302, 303)
+    client.post(
+        "/api/lidar",
+        data=json.dumps({"points": [{"a": 0.1, "r": 2.0}, {"a": -0.1, "r": 3.0}]}),
+        content_type="application/json",
+    )
+    status = client.get("/api/lidar").get_json()
+    assert status["connected"] is True
+    assert status["points_count"] == 2
+    assert status["reason"].startswith("скан идёт")

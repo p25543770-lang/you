@@ -46,6 +46,34 @@ journalctl -u robot-control -f
 Юнит запускает сервис под непривилегированным пользователем `robotctl` с
 `ProtectSystem=strict` и записью только в `data/` и `var/`.
 
+## 4b. Лидар (USB/UART)
+
+Лидар читает само приложение (`robot_control/lidar.py`): порт, протокол и
+скорость подбираются перебором, мотор RPLIDAR включается линией USB-переходника.
+Ничего запускать вручную не нужно, но пользователю сервиса нужен доступ к порту:
+
+```bash
+sudo usermod -aG dialout robotctl         # если сервис работает не от root
+sudo .venv/bin/python scripts/lidar_check.py   # что видно на портах
+```
+
+Скорость зависит от модели: A1/A2M8 — 115200, A2M7/A2M12/A3/S1 — 256000,
+C1 — 460800, LD06/LD19 — 230400. У RPLIDAR A3 на USB-адаптере есть переключатель
+115200/256000 — он должен совпадать. Чтобы не тратить время на перебор, закрепите
+порт в `.env`: `RC_LIDAR_PORT=/dev/ttyUSB1`, при необходимости `RC_LIDAR_BAUD` и
+`RC_LIDAR_MOTOR` (см. `GET /api/lidar`, поле `detected` — там найденные параметры).
+
+Постоянное имя порта (если лидаров на машине несколько):
+
+```bash
+sudo tee /etc/udev/rules.d/60-rplidar.rules >/dev/null <<'RULE'
+SUBSYSTEM=="tty", ATTRS{idVendor}=="10c4", ATTRS{idProduct}=="ea60", SYMLINK+="rplidar"
+RULE
+sudo udevadm control --reload && sudo udevadm trigger
+```
+
+После этого порт всегда `/dev/rplidar` — приложение находит его автоматически.
+
 ## 5. Бортовой экран (киоск, порт 8090)
 
 Дисплей робота показывает только телеметрию: АКБ, мини-шасси, лидар. Вход не
@@ -137,3 +165,5 @@ sudo apt install -y python3-certbot-apache   # или сгенерировать
 | Точка не поднимается | `nmcli device status`, свободен ли адаптер от другой сети |
 | Сессии слетают после рестарта | не задан `RC_SECRET_KEY` |
 | Порт занят | смените `RC_PORT` в `.env` |
+| На экране «скана лидара нет» | под картой написана причина; подробнее — `scripts/lidar_check.py`, `RC_LIDAR_PORT`, группа `dialout`, скорость под модель (см. раздел 4b) |
+| Лидар отвечает, но точек нет | мотор: перебрать `RC_LIDAR_MOTOR` (`dtr-low`, `rts-low`, …) или проверить питание лидара |
