@@ -345,8 +345,12 @@ def create_blueprint(state, guard=None) -> Blueprint:
     @guard
     def api_state():
         snap = state.snapshot()
+        lidar = LidarManager.get_instance()
         if snap.get("lidar") is None:
-            snap["lidar"] = LidarManager.get_instance().get_scan()
+            snap["lidar"] = lidar.get_scan()
+        # Причина, если скана нет: экран пишет её под картой (порт лидара не
+        # найден, не та скорость, порт занят вторым процессом робота и т. д.).
+        snap["lidarStatus"] = lidar.get_status()
         snap["cameras"] = CameraManager.get_instance().list_cameras()
         return jsonify({"ok": True, "data": snap})
 

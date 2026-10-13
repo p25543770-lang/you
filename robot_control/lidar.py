@@ -1,27 +1,131 @@
 """Модуль работы с 2D лидаром 360° (RPLIDAR, LD06/LD19, ROS 2 /scan, HTTP API).
 
 Поддерживает:
-1. Прямое чтение с USB/serial лидара (RPLIDAR A1/A2/A3/S1/C1, LD06/LD19, YDLidar)
-   через порт RC_LIDAR_PORT или автоопределение (/dev/rplidar, /dev/ttyUSB*).
+1. Прямое чтение с USB/serial лидара: RPLIDAR (A1/A2M8 — 115200,
+   A2M7/A2M12/A3/S1 — 256000, C1 — 460800) и LD06/LD19 (230400).
+   Модель и скорость обычно неизвестны заранее, поэтому параметры подбираются
+   перебором, а признак успеха — реальные точки скана, а не ответ устройства.
 2. Подписку на топик ROS 2 /scan (sensor_msgs/LaserScan), если установлен rclpy.
 3. Приём скана через HTTP API (POST /api/lidar или POST /api/scan).
 4. Демо-генератор скана (стены склада с препятствиями) для отладки без железа.
+
+Порт можно закрепить вручную: ``RC_LIDAR_PORT=/dev/ttyUSB1`` (можно список или
+glob). Остальные настройки: ``RC_LIDAR_BAUD``, ``RC_LIDAR_PROTOCOL``
+(auto | rplidar | ld06), ``RC_LIDAR_MOTOR`` (auto | none | dtr-low | dtr-high |
+rts-low | rts-high), ``RC_LIDAR_AUTOPROBE``, ``RC_LIDAR_EXCLUDE``.
+
+Почему столько осторожности: на роботе одновременно работают два процесса с этим
+менеджером (пульт оператора на 8080 и бортовой экран на 8090), а USB-порт лидара
+можно открыть только один раз. Поэтому порт защищён межпроцессным замком, а
+второй процесс берёт готовый скан у первого по HTTP — иначе половина экранов
+навсегда показывала бы «нет скана» без единой строчки в журнале.
+
+Диагностика: ``python3 scripts/lidar_check.py`` печатает, что видно на портах;
+причина отсутствия скана лежит в ``GET /api/lidar`` (поле ``reason``) и на
+экране робота в подписи «скана лидара нет».
 """
 
 from __future__ import annotations
 
 import glob
+import json
 import logging
 import math
 import os
+import re
 import threading
 import time
-from typing import Any, List, Optional, Tuple
+import urllib.error
+import urllib.request
+from pathlib import Path
+from typing import Any, Callable, Iterable, Optional, Sequence, Tuple
+
+try:  # POSIX (робот на Ubuntu): межпроцессный замок на порт лидара.
+    import fcntl
+except ImportError:  # pragma: no cover - не-POSIX платформы
+    fcntl = None  # type: ignore[assignment]
 
 log = logging.getLogger("robot_control.lidar")
 
 LIDAR_MAX_AGE_S = 1.0  # скан старше 1 с считается устаревшим
 LIDAR_DEFAULT_RANGE_M = 10.0
+
+#: Таймаут одного чтения порта, с: от него зависят отклик на stop() и переподключение.
+SERIAL_READ_TIMEOUT_S = 0.2
+#: Сколько ждём реальные точки, прежде чем считать набор параметров неудачным.
+LIDAR_PROBE_TIMEOUT_S = 1.4
+#: Сколько ждём точки, прежде чем считать, что поток данных оборвался.
+LIDAR_DATA_TIMEOUT_S = 1.6
+#: Виток с меньшим числом точек не публикуем: это мусор или чужой протокол.
+LIDAR_MIN_POINTS = 20
+#: Если полный виток не закрывается, публикуем накопленное по паузе.
+LIDAR_PUBLISH_GAP_S = 0.35
+#: Пауза перед новым кругом поиска порта.
+LIDAR_RESCAN_S = 2.0
+
+#: Скорости RPLIDAR по моделям (у A3 на USB-адаптере есть переключатель 115200/256000).
+RPLIDAR_BAUDS = (115200, 256000, 460800)
+#: LD06/LD19 — односторонний поток на 230400, команд не принимает.
+LD06_BAUD = 230400
+
+#: Профили поиска в порядке частоты моделей: (протокол, скорость).
+LIDAR_PROFILES: Tuple[Tuple[str, int], ...] = (
+    ("rplidar", 115200),      # RPLIDAR A1 / A2M8
+    ("ld06", LD06_BAUD),      # LD06 / LD19 (комплекты D500 и клоны)
+    ("rplidar", 256000),      # RPLIDAR A2M7 / A2M12 / A3 / S1
+    ("rplidar", 460800),      # RPLIDAR C1
+)
+
+#: Варианты включения мотора RPLIDAR через линии USB-переходника (MOTOCTL).
+#: У адаптеров A1/A2 это DTR (низкий уровень — мотор включён), у части плат — RTS
+#: и с обратной полярностью; последний вариант — линии не трогаем (у многих
+#: клонов мотор питается постоянно). Перебираем, пока не пойдут точки.
+RPLIDAR_MOTOR_VARIANTS: Tuple[Tuple[Optional[str], Optional[bool]], ...] = (
+    ("dtr", False),
+    ("rts", False),
+    ("dtr", True),
+    ("rts", True),
+    (None, None),
+)
+
+#: Настройка RC_LIDAR_MOTOR → варианты линий (сколько вариантов — столько попыток).
+MOTOR_MODES: dict[str, Tuple[Tuple[Optional[str], Optional[bool]], ...]] = {
+    "auto": RPLIDAR_MOTOR_VARIANTS,
+    "none": ((None, None),),
+    "off": ((None, None),),
+    "dtr-low": (("dtr", False),),
+    "dtr-high": (("dtr", True),),
+    "rts-low": (("rts", False),),
+    "rts-high": (("rts", True),),
+}
+
+RPLIDAR_CMD_STOP = b"\xa5\x25"
+RPLIDAR_CMD_SCAN = b"\xa5\x20"
+RPLIDAR_SYNC = (0xA5, 0x5A)
+RPLIDAR_ANSWER_SYNC = b"\xa5\x5a"
+
+LD06_SYNC = b"\x54\x2c"
+LD06_PACKET_LEN = 47
+
+DATA_DIR = Path(__file__).resolve().parent.parent / "data"
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    return raw.strip().lower() in {"1", "true", "yes", "on", "да"}
+
+
+def _env_int(name: str) -> Optional[int]:
+    raw = (os.environ.get(name) or "").strip()
+    if not raw:
+        return None
+    try:
+        return int(raw)
+    except ValueError:
+        log.warning("Лидар: %s=%r — не число, игнорирую", name, raw)
+        return None
 
 
 def normalize_angle(rad: float) -> float:
@@ -92,11 +196,23 @@ def parse_rplidar_point(b: bytes) -> Optional[dict[str, float]]:
     return {"a": round(rad, 4), "r": round(dist_m, 3)}
 
 
+def ld06_crc_ok(pkt: bytes) -> bool:
+    """Контрольная сумма пакета LD06/LD19: XOR всех байт, кроме последнего."""
+    if len(pkt) < LD06_PACKET_LEN:
+        return False
+    crc = 0
+    for byte in pkt[: LD06_PACKET_LEN - 1]:
+        crc ^= byte
+    return crc == pkt[LD06_PACKET_LEN - 1]
+
+
 def parse_ld06_packet(pkt: bytes) -> list[dict[str, float]]:
     """Разбирает 47-байтовый пакет LD06 / LD19.
 
     Заголовок: 0x54, 0x2C.
     12 точек измерений на пакет.
+    Контрольная сумма здесь не проверяется (см. ``ld06_crc_ok``): у части
+    клонов она не считается, а поток всё равно несёт корректные данные.
     """
     if len(pkt) < 47 or pkt[0] != 0x54 or pkt[1] != 0x2C:
         return []
@@ -157,23 +273,504 @@ def generate_demo_scan(t: Optional[float] = None, speed: float = 0.5) -> list[di
     return pts
 
 
-class LidarManager:
-    """Менеджер лидара: собирает данные из ROS 2, Serial USB или HTTP API."""
+# ============================================================================
+# Разбор потока данных лидара
+# ============================================================================
+class ScanAccumulator:
+    """Собирает точки в виток и публикует его.
 
-    _instance: Optional[LidarManager] = None
+    Лидару нужно время на оборот (RPLIDAR A1 — 5…10 Гц, LD06/LD19 — 10…15 Гц),
+    поэтому публикуем не каждую точку, а готовый виток; если виток не
+    закрывается (клоны без достоверного бита начала), отдаём накопленное по
+    паузе, чтобы на экране не было пустой карты.
+    """
+
+    def __init__(
+        self,
+        publish: Callable[[list[dict[str, float]]], None],
+        *,
+        min_points: int = LIDAR_MIN_POINTS,
+        gap_s: float = LIDAR_PUBLISH_GAP_S,
+        clock: Callable[[], float] = time.monotonic,
+    ) -> None:
+        self._publish = publish
+        self._min_points = max(1, int(min_points))
+        self._gap_s = float(gap_s)
+        self._clock = clock
+        self._points: list[dict[str, float]] = []
+        self._published_at = clock()
+        self.published = 0
+
+    @property
+    def pending(self) -> int:
+        return len(self._points)
+
+    def add(self, points: Sequence[dict[str, float]], revolution_done: bool = False) -> bool:
+        """Добавляет точки. True — опубликовали виток (или накопленное по паузе)."""
+        published = False
+        if revolution_done:
+            published = self.flush()
+        if points:
+            self._points.extend(points)
+        if len(self._points) >= self._min_points and self._clock() - self._published_at >= self._gap_s:
+            published = self.flush() or published
+        return published
+
+    def flush(self) -> bool:
+        """Публикует накопленное, если точек хватает. True — опубликовали."""
+        points = self._points
+        if len(points) < self._min_points:
+            return False
+        self._points = []
+        self._published_at = self._clock()
+        self.published += 1
+        self._publish(points)
+        return True
+
+
+class RplidarStream:
+    """Разбор стандартного протокола RPLIDAR: точки по 5 байт, бит начала витка."""
+
+    def __init__(self, *, max_buffer: int = 4096) -> None:
+        self.buffer = bytearray()
+        self.max_buffer = max_buffer
+        self.points = 0
+
+    def feed(self, chunk: bytes) -> list[Tuple[dict[str, float], bool]]:
+        """Добавляет байты потока → [(точка, начало_витка), ...]."""
+        out: list[Tuple[dict[str, float], bool]] = []
+        if chunk:
+            self.buffer.extend(chunk)
+            if len(self.buffer) > self.max_buffer:
+                del self.buffer[: len(self.buffer) - 5]
+        while len(self.buffer) >= 5:
+            point = parse_rplidar_point(bytes(self.buffer[:5]))
+            if point is None:
+                del self.buffer[:1]  # синхронизация потеряна — ищем заново
+                continue
+            is_start = bool(self.buffer[0] & 0x01)
+            del self.buffer[:5]
+            self.points += 1
+            out.append((point, is_start))
+        return out
+
+
+class Ld06Stream:
+    """Разбор потока LD06/LD19: пакеты 0x54 0x2C по 12 точек."""
+
+    def __init__(
+        self,
+        *,
+        check_crc: bool = True,
+        crc_bad_limit: int = 40,
+        max_buffer: int = 8192,
+    ) -> None:
+        self.buffer = bytearray()
+        self.check_crc = check_crc
+        self.crc_bad_limit = crc_bad_limit
+        self.crc_ok = 0
+        self.crc_bad = 0
+        self.packets = 0
+        self.max_buffer = max_buffer
+        self._prev_start: Optional[float] = None
+
+    def feed(self, chunk: bytes) -> list[Tuple[list[dict[str, float]], bool]]:
+        """Добавляет байты потока → [(точки пакета, виток_завершён), ...]."""
+        out: list[Tuple[list[dict[str, float]], bool]] = []
+        if chunk:
+            self.buffer.extend(chunk)
+            if len(self.buffer) > self.max_buffer:
+                del self.buffer[: len(self.buffer) - LD06_PACKET_LEN]
+        while True:
+            packet = self._next_packet()
+            if packet is None:
+                return out
+            pts = parse_ld06_packet(packet)
+            if not pts:
+                continue
+            self.packets += 1
+            start_angle = (packet[4] | (packet[5] << 8)) * 0.01
+            revolution = self._prev_start is not None and start_angle + 1e-9 < self._prev_start
+            self._prev_start = start_angle
+            out.append((pts, revolution))
+
+    def _next_packet(self) -> Optional[bytes]:
+        while True:
+            start = self.buffer.find(LD06_SYNC)
+            if start < 0:
+                # заголовок мог разрезаться между чтениями — держим последний байт
+                if len(self.buffer) > 1:
+                    del self.buffer[:-1]
+                return None
+            if start:
+                del self.buffer[:start]
+            if len(self.buffer) < LD06_PACKET_LEN:
+                return None
+            packet = bytes(self.buffer[:LD06_PACKET_LEN])
+            if self.check_crc and not ld06_crc_ok(packet):
+                self.crc_bad += 1
+                if self.crc_bad >= self.crc_bad_limit and self.crc_ok == 0:
+                    # у части клонов CRC не считается — читаем поток без проверки
+                    self.check_crc = False
+                    log.info("Лидар: у LD06/LD19 не сходится CRC — читаю поток без проверки")
+                del self.buffer[:1]
+                continue
+            del self.buffer[:LD06_PACKET_LEN]
+            self.crc_ok += 1
+            return packet
+
+
+def read_rplidar_stream(
+    ser,
+    publish: Callable[[list[dict[str, float]]], None],
+    stop: Callable[[], bool],
+    *,
+    timeout: float = LIDAR_DATA_TIMEOUT_S,
+    min_points: int = LIDAR_MIN_POINTS,
+) -> int:
+    """Читает точки RPLIDAR до тишины и публикует витки. Возвращает число точек."""
+    stream = RplidarStream()
+    acc = ScanAccumulator(publish, min_points=min_points)
+    last_point = time.monotonic()
+    while not stop():
+        chunk = ser.read(64)
+        for point, is_start in stream.feed(chunk):
+            last_point = time.monotonic()
+            acc.add([point], revolution_done=is_start)
+        if not chunk and time.monotonic() - last_point > timeout:
+            break
+    acc.flush()  # хвост витка — чтобы последний скан не пропал
+    return stream.points
+
+
+def read_ld06_stream(
+    ser,
+    publish: Callable[[list[dict[str, float]]], None],
+    stop: Callable[[], bool],
+    *,
+    timeout: float = LIDAR_DATA_TIMEOUT_S,
+    min_points: int = LIDAR_MIN_POINTS,
+    check_crc: bool = True,
+) -> int:
+    """Читает поток LD06/LD19 до тишины и публикует витки. Возвращает число точек."""
+    stream = Ld06Stream(check_crc=check_crc)
+    acc = ScanAccumulator(publish, min_points=min_points)
+    last_point = time.monotonic()
+    total = 0
+    while not stop():
+        chunk = ser.read(256)
+        for points, revolution in stream.feed(chunk):
+            last_point = time.monotonic()
+            total += len(points)
+            acc.add(points, revolution_done=revolution)
+        if not chunk and time.monotonic() - last_point > timeout:
+            break
+    acc.flush()
+    return total
+
+
+# ============================================================================
+# Подбор порта и параметров лидара
+# ============================================================================
+def _natural_key(path: str) -> Tuple[str, int]:
+    """Сортировка /dev/ttyUSB2 < /dev/ttyUSB10 (обычный sorted даёт наоборот)."""
+    digits = re.sub(r"\D", "", path)
+    return (path.rstrip("0123456789"), int(digits) if digits else 0)
+
+
+def excluded_ports() -> set[str]:
+    """Порты, которые лидару трогать нельзя: мастер и модули шасси."""
+    ports: set[str] = set()
+    raw = os.environ.get("RC_LIDAR_EXCLUDE") or ""
+    for name in ("RC_SLAM_PORT", "RC_SLAM_MASTER_PORT"):
+        value = os.environ.get(name)
+        if value:
+            raw = raw + "," + value
+    raw = raw + "," + (os.environ.get("RC_SLAM_PORTS") or "")
+    for chunk in raw.split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        ports.add(chunk)
+        ports.add(os.path.realpath(chunk))
+    return ports
+
+
+def discover_ports(
+    *,
+    configured: Optional[str] = None,
+    autoprobe: bool = True,
+    excluded: Iterable[str] = (),
+) -> list[str]:
+    """Порты-кандидаты для лидара: сначала заданные вручную, потом symlink'и, потом tty.
+
+    ``configured`` может быть списком через запятую и поддерживает glob
+    (``RC_LIDAR_PORT=/dev/ttyUSB1`` или ``/dev/serial/by-id/*lidar*``).
+    """
+    blocked = {p for p in excluded if p}
+    blocked |= {os.path.realpath(p) for p in blocked}
+    found: list[str] = []
+
+    def add(path: str) -> None:
+        if not path or not os.path.exists(path):
+            return
+        if path in blocked or os.path.realpath(path) in blocked:
+            return
+        if path not in found:
+            found.append(path)
+
+    patterns: list[str] = []
+    for chunk in (configured or "").replace(";", ",").split(","):
+        chunk = chunk.strip()
+        if chunk:
+            patterns.append(chunk)
+    for pattern in patterns:
+        for path in sorted(glob.glob(pattern), key=_natural_key):
+            add(path)
+
+    # Именованные устройства: правило udev (см. README) или постоянные symlink'и.
+    for pattern in (
+        "/dev/rplidar*",
+        "/dev/lidar*",
+        "/dev/ldlidar*",
+        "/dev/serial/by-id/*lidar*",
+        "/dev/serial/by-id/*rplidar*",
+        "/dev/serial/by-id/*lds*",
+        "/dev/serial/by-id/*ld19*",
+        "/dev/serial/by-id/*ld06*",
+    ):
+        for path in sorted(glob.glob(pattern), key=_natural_key):
+            add(path)
+
+    # Остальные USB-порты — только если разрешён автоподбор (иначе можно
+    # задеть платы моторов, которые висят на соседних ttyUSB).
+    if autoprobe:
+        for pattern in ("/dev/ttyUSB*", "/dev/ttyACM*"):
+            for path in sorted(glob.glob(pattern), key=_natural_key):
+                add(path)
+
+    return found
+
+
+def lidar_profiles(protocol: str = "auto", baud: Optional[int] = None) -> list[Tuple[str, int]]:
+    """Список (протокол, скорость) для подбора: от частых моделей к редким."""
+    proto = (protocol or "auto").strip().lower()
+    profiles = list(LIDAR_PROFILES)
+    if proto in {"rplidar", "ld06"}:
+        profiles = [p for p in profiles if p[0] == proto] or [
+            (proto, LD06_BAUD if proto == "ld06" else RPLIDAR_BAUDS[0])
+        ]
+    if baud:
+        rate = int(baud)
+        preferred = [p for p in profiles if p[1] == rate]
+        rest = [p for p in profiles if p[1] != rate]
+        extra = [(proto_name, rate) for proto_name in ("rplidar", "ld06")]
+        if proto in {"rplidar", "ld06"}:
+            extra = [(proto, rate)]
+        profiles = preferred + [p for p in extra if p[1] == rate] + rest
+
+    seen: set[Tuple[str, int]] = set()
+    out: list[Tuple[str, int]] = []
+    for item in profiles:
+        if item not in seen:
+            seen.add(item)
+            out.append(item)
+    return out
+
+
+def motor_variants(motor: str = "auto") -> Tuple[Tuple[Optional[str], Optional[bool]], ...]:
+    """Варианты управления мотором RPLIDAR из настройки RC_LIDAR_MOTOR."""
+    mode = (motor or "auto").strip().lower()
+    if mode in MOTOR_MODES:
+        return MOTOR_MODES[mode]
+    log.warning("Лидар: неизвестное RC_LIDAR_MOTOR=%r — беру auto", motor)
+    return RPLIDAR_MOTOR_VARIANTS
+
+
+def motor_variant_name(variant: Tuple[Optional[str], Optional[bool]]) -> str:
+    line, level = variant
+    if line is None:
+        return "none"
+    return "%s-%s" % (line, "low" if level is False else "high")
+
+
+def apply_motor_variant(ser, variant: Tuple[Optional[str], Optional[bool]]) -> None:
+    """Выставляет линии USB-переходника так, чтобы мотор RPLIDAR крутился."""
+    line, level = variant
+    if line is None or level is None:
+        return
+    try:
+        # DTR у части драйверов дёргает устройство при открытии порта — ставим явно.
+        if line == "dtr":
+            ser.dtr = bool(level)
+        else:
+            ser.rts = bool(level)
+    except Exception as exc:  # noqa: BLE001 — драйвер может не уметь линии
+        log.debug("Лидар: не удалось выставить %s=%s: %s", line, level, exc)
+
+
+def _flush_input(ser) -> None:
+    try:
+        ser.reset_input_buffer()
+    except Exception:  # noqa: BLE001 — у самодельных «портов» метода может не быть
+        pass
+
+
+def rplidar_handshake(ser, variant: Tuple[Optional[str], Optional[bool]], *,
+                      timeout: float = 0.6, stop: Optional[Callable[[], bool]] = None) -> bool:
+    """Включает мотор, посылает SCAN и ждёт дескриптор ответа (0xA5 0x5A …)."""
+    stop = stop or (lambda: False)
+    apply_motor_variant(ser, variant)
+    time.sleep(0.05)  # мотору нужно тронуться, а лидару — сбросить буфер
+    _flush_input(ser)
+    try:
+        ser.write(RPLIDAR_CMD_STOP)
+        time.sleep(0.02)
+        ser.write(RPLIDAR_CMD_SCAN)
+    except Exception as exc:  # noqa: BLE001 — порт мог пропасть
+        log.debug("Лидар: запись в порт не удалась: %s", exc)
+        return False
+
+    deadline = time.monotonic() + max(0.1, float(timeout))
+    buf = bytearray()
+    while time.monotonic() < deadline and not stop():
+        chunk = ser.read(7)
+        if not chunk:
+            continue
+        buf.extend(chunk)
+        idx = buf.find(RPLIDAR_ANSWER_SYNC)
+        if idx >= 0 and len(buf) - idx >= 7:
+            header = bytes(buf[idx: idx + 7])
+            if header[2] != 0x05:
+                log.debug("Лидар: нестандартный дескриптор ответа: %s", header.hex(" "))
+            return True
+        if len(buf) > 64:
+            del buf[:-1]
+    return False
+
+
+def probe_port(
+    ser,
+    port: str,
+    *,
+    protocol: str = "auto",
+    baud: Optional[int] = None,
+    motor: str = "auto",
+    timeout: float = LIDAR_PROBE_TIMEOUT_S,
+    stop: Optional[Callable[[], bool]] = None,
+    publish: Optional[Callable[[list[dict[str, float]]], None]] = None,
+    on_found: Optional[Callable[[dict[str, Any]], None]] = None,
+    min_points: int = LIDAR_MIN_POINTS,
+) -> Optional[dict[str, Any]]:
+    """Подбирает параметры лидара на уже открытом порту.
+
+    Возвращает {"port", "protocol", "baud", "motor", "points"} или None.
+    ``publish(точки)`` вызывается на каждом готовом витке; первый вызов означает,
+    что данные реально пошли (``on_found`` срабатывает на нём же). Пока данные не
+    пошли, витков не публикуем — иначе «скан» из случайных байт чужого протокола
+    попадал бы на экран.
+    """
+    stop = stop or (lambda: False)
+    state: dict[str, Any] = {"found": False, "probe": {"port": port}}
+
+    def on_scan(points: list[dict[str, float]]) -> None:
+        if not state["found"]:
+            state["found"] = True
+            if on_found is not None:
+                on_found(dict(state["probe"]))
+        if publish is not None:
+            publish(points)
+
+    for proto, rate in lidar_profiles(protocol, baud):
+        if stop() or state["found"]:
+            break
+        variants = motor_variants(motor) if proto == "rplidar" else ((None, None),)
+        for variant in variants:
+            if stop() or state["found"]:
+                break
+            try:
+                ser.baudrate = rate
+            except Exception as exc:  # noqa: BLE001
+                log.debug("Лидар: %s: не переключить скорость %d: %s", port, rate, exc)
+                return None
+            _flush_input(ser)
+            state["probe"].update(
+                {
+                    "protocol": proto,
+                    "baud": rate,
+                    "motor": motor_variant_name(variant),
+                }
+            )
+
+            if proto == "rplidar":
+                if not rplidar_handshake(
+                    ser, variant, timeout=min(0.6, max(0.2, timeout / 2)), stop=stop
+                ):
+                    break  # нет ответа на SCAN — на этой скорости устройства нет
+                got = read_rplidar_stream(ser, on_scan, stop, timeout=timeout, min_points=min_points)
+            else:
+                got = read_ld06_stream(ser, on_scan, stop, timeout=timeout, min_points=min_points)
+
+            if state["found"]:
+                state["probe"]["points"] = got
+                return state["probe"]
+            if proto == "rplidar" and got:
+                log.info(
+                    "Лидар: %s ответил на SCAN (%d бод), но точек нет "
+                    "(мотор: %s) — пробую другую линию мотора",
+                    port, rate, motor_variant_name(variant),
+                )
+    return None
+
+
+def open_serial(serial_module, port: str, baud: int):
+    """Открывает порт лидара с нашим таймаутом (и эксклюзивно, если умеет pyserial)."""
+    try:
+        return serial_module.Serial(port, baud, timeout=SERIAL_READ_TIMEOUT_S, exclusive=True)
+    except TypeError:  # pyserial < 3.3 — параметра exclusive ещё нет
+        return serial_module.Serial(port, baud, timeout=SERIAL_READ_TIMEOUT_S)
+
+
+# ============================================================================
+# Менеджер лидара
+# ============================================================================
+class LidarManager:
+    """Менеджер лидара: собирает данные из ROS 2, USB/serial или HTTP API."""
+
+    _instance: Optional["LidarManager"] = None
 
     def __init__(self, port: Optional[str] = None):
-        self.port = port or os.environ.get("RC_LIDAR_PORT")
+        self.port = port or os.environ.get("RC_LIDAR_PORT") or None
+        self.baud = _env_int("RC_LIDAR_BAUD")
+        raw_protocol = (os.environ.get("RC_LIDAR_PROTOCOL") or "auto").strip().lower()
+        self.protocol = raw_protocol if raw_protocol in {"auto", "rplidar", "ld06"} else "auto"
+        raw_motor = (os.environ.get("RC_LIDAR_MOTOR") or "auto").strip().lower()
+        self.motor = raw_motor if raw_motor in MOTOR_MODES else "auto"
+        self.autoprobe = _env_bool("RC_LIDAR_AUTOPROBE", True)
+        self.excluded = excluded_ports()
+        self.peer_urls = peer_urls()
+
         self.lock = threading.Lock()
         self.scan: list[dict[str, float]] = []
         self.scan_at: float = 0.0
         self.source_type: str = "none"
+        self.reason: str = "лидар: идёт поиск порта"
+        self.hint: str = ""
+        self.detected: Optional[dict[str, Any]] = None
+        self.last_error: str = ""
+        self.candidates: list[str] = []
+
         self._stop = False
         self._thread: Optional[threading.Thread] = None
         self._ros_started = False
+        self._lock_fd: Optional[int] = None
+        self._peer_misses = 0
+        self._peer_reason = ""
+
+    # --------------------------- жизненный цикл --------------------------- #
 
     @classmethod
-    def get_instance(cls, port: Optional[str] = None) -> LidarManager:
+    def get_instance(cls, port: Optional[str] = None) -> "LidarManager":
         if cls._instance is None:
             cls._instance = LidarManager(port)
             cls._instance.start()
@@ -190,6 +787,9 @@ class LidarManager:
 
     def stop(self) -> None:
         self._stop = True
+        self._release_port_lock()
+
+    # ----------------------------- приём данных ---------------------------- #
 
     def feed_points(self, points: list[dict[str, float]], source_label: str = "api") -> int:
         """Принимает готовый список точек [{'a': ..., 'r': ...}]."""
@@ -233,7 +833,9 @@ class LidarManager:
             self.source_type = source_label
         return len(pts)
 
-    def get_scan(self, max_age: float = LIDAR_MAX_AGE_S, allow_demo: bool = False) -> Optional[list[dict[str, float]]]:
+    def get_scan(
+        self, max_age: float = LIDAR_MAX_AGE_S, allow_demo: bool = False
+    ) -> Optional[list[dict[str, float]]]:
         """Возвращает свежий скан или None (если устарел)."""
         now = time.time()
         with self.lock:
@@ -244,7 +846,7 @@ class LidarManager:
         return None
 
     def get_status(self) -> dict[str, Any]:
-        """Статус работы лидара для API /api/lidar."""
+        """Статус работы лидара для API /api/lidar и подписи на экране."""
         now = time.time()
         with self.lock:
             scan = list(self.scan)
@@ -253,6 +855,13 @@ class LidarManager:
 
         is_fresh = bool(scan and (now - scan_at) < LIDAR_MAX_AGE_S)
         near = min((p["r"] for p in scan), default=None) if scan else None
+
+        if is_fresh:
+            reason = "скан идёт: %s" % src
+        elif scan:
+            reason = "скан устарел (%.1f с без точек)" % (now - scan_at)
+        else:
+            reason = self.reason
 
         return {
             "ok": True,
@@ -263,7 +872,248 @@ class LidarManager:
             "age_s": round(now - scan_at, 2) if scan_at > 0 else None,
             "nearest_m": near if is_fresh else None,
             "configured_port": self.port,
+            "reason": reason,
+            "hint": self.hint,
+            "detected": dict(self.detected) if self.detected else None,
+            "candidates": list(self.candidates),
+            "last_error": self.last_error or None,
         }
+
+    # --------------------------- поиск и чтение --------------------------- #
+
+    def candidate_ports(self) -> list[str]:
+        """Порты-кандидаты, найденный ранее — первым."""
+        ports = discover_ports(
+            configured=self.port, autoprobe=self.autoprobe, excluded=self.excluded
+        )
+        detected_port = (self.detected or {}).get("port")
+        if detected_port and detected_port in ports:
+            ports.remove(detected_port)
+            ports.insert(0, detected_port)
+        self.candidates = ports
+        return ports
+
+    def _set_status(self, reason: str, hint: str = "", *, warn: bool = False) -> None:
+        """Меняет причину «нет скана»; в журнал пишет только при изменении."""
+        if reason == self.reason and hint == self.hint:
+            return
+        self.reason = reason
+        self.hint = hint
+        text = reason + ((" (" + hint + ")") if hint else "")
+        if warn:
+            log.warning("Лидар: %s", text)
+        else:
+            log.info("Лидар: %s", text)
+
+    def _store_scan(self, points: list[dict[str, float]], source_label: str) -> None:
+        with self.lock:
+            self.scan = list(points)
+            self.scan_at = time.time()
+            self.source_type = source_label
+
+    def _ros_owns_lidar(self) -> bool:
+        """ROS 2 уже отдаёт /scan — не отбираем у него USB-порт."""
+        if self.port or self.baud or self.protocol != "auto":
+            return False
+        return self._ros_started
+
+    def _serial_worker(self) -> None:
+        """Поток поиска порта лидара и чтения скана."""
+        try:
+            import serial  # pyserial
+        except ImportError:
+            self._set_status(
+                "нет библиотеки pyserial — USB-лидар не читается",
+                hint="поставь пакет: .venv/bin/pip install pyserial (или ./scripts/ensure_deps.sh)",
+                warn=True,
+            )
+            return
+
+        while not self._stop:
+            if self._ros_owns_lidar():
+                self._set_status("скан идёт из ROS 2 (/scan) — USB-порт не трогаю")
+                time.sleep(LIDAR_RESCAN_S)
+                continue
+
+            ports = self.candidate_ports()
+            if not ports:
+                self._set_status(
+                    "порт лидара не найден",
+                    hint="подключи лидар или задай RC_LIDAR_PORT (список портов: "
+                         "ls /dev/ttyUSB* /dev/serial/by-id/; проверка: scripts/lidar_check.py)",
+                )
+                time.sleep(LIDAR_RESCAN_S)
+                continue
+
+            progressed = False
+            for port in ports:
+                if self._stop:
+                    return
+                if not self._acquire_port_lock(port):
+                    # Порт читает второй процесс робота: пульт (8080) и бортовой
+                    # экран (8090) поднимают этот менеджер одновременно, а порт
+                    # открывается только один раз.
+                    if self._peer_cycle():
+                        progressed = True
+                        break
+                    peer_reason = ("; сосед сообщает: " + self._peer_reason) if self._peer_reason else ""
+                    self._set_status(
+                        "порт %s занят другой программой" % port,
+                        hint="его читает второй процесс пульта, rplidar_ros или Serial Monitor; "
+                             "останови лишнее или задай RC_LIDAR_PORT" + peer_reason,
+                        warn=True,
+                    )
+                    continue
+                try:
+                    if self._read_port(serial, port):
+                        progressed = True
+                        break
+                finally:
+                    self._release_port_lock()
+            if not progressed:
+                time.sleep(LIDAR_RESCAN_S)
+
+    def _read_port(self, serial, port: str) -> bool:
+        """Подбирает параметры и читает скан. True — данные шли (до обрыва)."""
+        self._set_status("подбираю параметры порта %s…" % port)
+        try:
+            ser = open_serial(serial, port, RPLIDAR_BAUDS[0])
+        except Exception as exc:  # noqa: BLE001 — порт занят/пропал/нет прав
+            self.last_error = "%s: %s" % (port, exc)
+            hint = ""
+            if isinstance(exc, PermissionError) or "permission" in str(exc).lower():
+                hint = "добавь пользователя в группу dialout: sudo usermod -aG dialout $USER (и перезайди)"
+            elif getattr(serial, "SerialException", None) and isinstance(exc, serial.SerialException):
+                hint = "порт занят другой программой (второй пульт, rplidar_ros, Serial Monitor)"
+            self._set_status("порт %s не открылся" % port, hint=hint, warn=True)
+            return False
+
+        try:
+            found = probe_port(
+                ser,
+                port,
+                protocol=self.protocol,
+                baud=self.baud,
+                motor=self.motor,
+                timeout=LIDAR_PROBE_TIMEOUT_S,
+                stop=lambda: self._stop,
+                publish=lambda pts: self._store_scan(pts, "serial:%s" % os.path.basename(port)),
+                on_found=self._mark_found,
+            )
+        except Exception as exc:  # noqa: BLE001 — кабель выдернули на ходу
+            self.last_error = "%s: %s" % (port, exc)
+            self._set_status("обрыв связи с портом %s" % port, hint=str(exc), warn=True)
+            return False
+        finally:
+            try:
+                ser.close()
+            except Exception:  # noqa: BLE001
+                pass
+
+        if not found:
+            self.detected = None
+            self._set_status(
+                "лидар на %s не отвечает" % port,
+                hint="проверь скорость (A3/S1 — 256000, C1 — 460800, LD06/LD19 — 230400) "
+                     "и переключатель на USB-адаптере; полный прогон: scripts/lidar_check.py",
+                warn=True,
+            )
+            return False
+
+        self.last_error = ""
+        if self.detected is None:  # данные шли, но поток уже оборвался
+            self._mark_found(found)
+        return True
+
+    def _mark_found(self, probe: dict[str, Any]) -> None:
+        """Запоминает рабочие параметры порта (и пишет об этом в журнал один раз)."""
+        port = str(probe.get("port") or "")
+        self.detected = {
+            "port": port,
+            "protocol": probe.get("protocol"),
+            "baud": probe.get("baud"),
+            "motor": probe.get("motor"),
+        }
+        self.last_error = ""
+        self._set_status(
+            "лидар на связи: %s, %s бод, мотор %s"
+            % (os.path.basename(port), probe.get("baud"), probe.get("motor"))
+        )
+        log.info(
+            "Лидар: найден на %s (%s %s бод, мотор: %s)",
+            port, probe.get("protocol"), probe.get("baud"), probe.get("motor"),
+        )
+
+    # ------------------ межпроцессный замок и обмен сканом ------------------ #
+
+    def _lock_path(self, port: str) -> Path:
+        name = re.sub(r"[^A-Za-z0-9_.-]", "_", port.strip("/").replace("/", "-")) or "port"
+        return DATA_DIR / ("lidar-%s.lock" % name)
+
+    def _acquire_port_lock(self, port: str) -> bool:
+        """Пытается занять порт. False — его уже читает другой процесс робота."""
+        if fcntl is None or not port:  # не-POSIX: замки недоступны, читаем как читали
+            return True
+        try:
+            path = self._lock_path(port)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            fd = os.open(str(path), os.O_RDWR | os.O_CREAT, 0o644)
+        except OSError as exc:  # нет каталога data/ и т.п. — не мешаем чтению
+            log.debug("Лидар: замок порта %s недоступен: %s", port, exc)
+            return True
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            os.close(fd)
+            return False
+        self._release_port_lock()
+        self._lock_fd = fd
+        return True
+
+    def _release_port_lock(self) -> None:
+        fd, self._lock_fd = self._lock_fd, None
+        if fd is None:
+            return
+        try:
+            if fcntl is not None:
+                fcntl.flock(fd, fcntl.LOCK_UN)
+        except OSError:
+            pass
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+
+    def _peer_cycle(self) -> bool:
+        """Берёт готовый скан у второго процесса робота (у него занят порт)."""
+        for url in self.peer_urls:
+            data = _fetch_json(url)
+            if not isinstance(data, dict):
+                continue
+            scan = data.get("scan")
+            if isinstance(scan, list) and scan:
+                count = self.feed_points(scan, source_label="peer")
+                detected = data.get("detected")
+                if isinstance(detected, dict):
+                    self.detected = {
+                        "port": detected.get("port"),
+                        "protocol": detected.get("protocol"),
+                        "baud": detected.get("baud"),
+                        "motor": detected.get("motor"),
+                    }
+                self._peer_reason = ""
+                self._set_status(
+                    "скан берётся у второго процесса робота (%d точек)" % count,
+                    hint="этот процесс сам порт лидара не открывает",
+                )
+                time.sleep(0.25)  # сосед обновляет скан со скоростью лидара (10 Гц)
+                return True
+            reason = str(data.get("reason") or "")
+            if reason:
+                self._peer_reason = reason
+        self._peer_misses += 1
+        time.sleep(0.4)
+        return False
 
     # ----------------------- ROS 2 интеграция ----------------------- #
 
@@ -306,7 +1156,8 @@ class LidarManager:
                 if not rclpy.ok():
                     rclpy.init(args=None)
                 node = LidarBridgeNode()
-                manager._ros_started = True
+                manager._ros_started = True  # noqa: SLF001
+                manager._set_status("скан идёт из ROS 2 (/scan)")  # noqa: SLF001
                 log.info("Лидар: подключён топик ROS 2 /scan")
                 rclpy.spin(node)
             except Exception as exc:  # noqa: BLE001
@@ -314,77 +1165,22 @@ class LidarManager:
 
         threading.Thread(target=spin, daemon=True).start()
 
-    # ----------------------- Serial USB лидар ----------------------- #
 
-    def _find_lidar_port(self) -> Optional[str]:
-        if self.port and os.path.exists(self.port):
-            return self.port
-        # Поиск по udev symlinks
-        for pattern in ("/dev/rplidar*", "/dev/serial/by-id/*lidar*", "/dev/serial/by-id/*rplidar*"):
-            found = sorted(glob.glob(pattern))
-            if found:
-                return found[0]
-        # Проверка стандартных портов ttyUSB (исключая порт мастера если задан)
-        master_port = os.environ.get("RC_SLAM_PORT", "/dev/ttyACM0")
-        for p in ("/dev/ttyUSB0", "/dev/ttyUSB1", "/dev/ttyUSB2", "/dev/ttyUSB3", "/dev/ttyACM1"):
-            if p != master_port and os.path.exists(p):
-                return p
+def peer_urls() -> list[str]:
+    """Адреса второго процесса робота, у которого можно взять готовый скан."""
+    raw = os.environ.get("RC_LIDAR_PEER_URLS")
+    if raw is not None:
+        return [u.strip() for u in raw.split(",") if u.strip()]
+    return ["http://127.0.0.1:8090/api/lidar", "http://127.0.0.1:8080/api/lidar"]
+
+
+def _fetch_json(url: str, timeout: float = 1.0) -> Optional[dict]:
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as response:  # noqa: S310
+            if response.status != 200:
+                return None
+            return json.loads(response.read().decode("utf-8", "replace"))
+    except (urllib.error.URLError, OSError, ValueError, json.JSONDecodeError):
         return None
-
-    def _serial_worker(self) -> None:
-        """Поток прямого чтения с порта лидара."""
-        try:
-            import serial
-        except ImportError:
-            log.info("Лидар: pyserial не установлен — прямое чтение с USB serial выключено")
-            return
-
-        while not self._stop:
-            port = self._find_lidar_port()
-            if not port:
-                time.sleep(2.0)
-                continue
-
-            try:
-                # Пробуем RPLIDAR на 115200 (A1/A2) или 256000
-                log.info("Лидар: попытка подключения к %s", port)
-                with serial.Serial(port, 115200, timeout=1.0) as ser:
-                    # Сброс и запуск сканирования RPLIDAR
-                    ser.dtr = False
-                    ser.rts = True
-                    time.sleep(0.05)
-                    ser.dtr = True
-                    # Команда SCAN: 0xA5 0x20
-                    ser.write(b"\xa5\x20")
-                    time.sleep(0.05)
-
-                    # Читаем дескриптор ответа (7 байт: 0xA5 0x5A ...)
-                    header = ser.read(7)
-                    if len(header) == 7 and header[0] == 0xA5 and header[1] == 0x5A:
-                        log.info("Лидар: обнаружен RPLIDAR на %s", port)
-                        self._read_rplidar_loop(ser, port)
-                        continue
-
-                    # Проверяем на протокол LD06 (230400 бод)
-            except Exception as exc:  # noqa: BLE001
-                log.debug("Лидар порт %s: %s", port, exc)
-
-            time.sleep(2.0)
-
-    def _read_rplidar_loop(self, ser, port_name: str) -> None:
-        current_rev: list[dict[str, float]] = []
-        while not self._stop:
-            pkt = ser.read(5)
-            if len(pkt) < 5:
-                continue
-            is_new_rev = bool(pkt[0] & 0x01)
-            pt = parse_rplidar_point(pkt)
-            if pt:
-                current_rev.append(pt)
-
-            if is_new_rev and len(current_rev) > 20:
-                with self.lock:
-                    self.scan = list(current_rev)
-                    self.scan_at = time.time()
-                    self.source_type = f"serial:{os.path.basename(port_name)}"
-                current_rev = []
+    except Exception:  # noqa: BLE001 — соседний процесс может ответить чем угодно
+        return None

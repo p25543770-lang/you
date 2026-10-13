@@ -109,8 +109,12 @@ def test_telemetry_api_returns_only_public_values(kiosk_client):
         assert body["ok"] is True
         assert set(body["data"]) == {
             "battery", "motors", "lidar", "speedMps", "powerKw", "mode", "linkOk", "ts",
-            "source", "steeringControl",
+            "source", "steeringControl", "lidarStatus",
         }
+        # причина «нет скана» видна на экране, а не только в журнале
+        status = body["data"]["lidarStatus"]
+        assert status["ok"] is True
+        assert isinstance(status["reason"], str) and status["reason"]
 
 
 def test_steering_endpoint_requires_pin_and_command_header(kiosk_client):
