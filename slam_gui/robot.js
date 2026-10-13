@@ -156,11 +156,16 @@
   }
 
   function drawLidar(canvas, pts) {
+    if (!canvas) return;
     const ctx = canvas.getContext && canvas.getContext('2d');
     if (!ctx) return;
     const dpr = window.devicePixelRatio || 1;
-    const w = canvas.clientWidth;
-    const h = canvas.clientHeight;
+    // clientWidth/clientHeight бывают 0, если браузер не поддерживает
+    // CSS aspect-ratio (старые встроенные веб-вьюхи на борту) или раскладка
+    // ещё не посчиталась — тогда берём размер ближайшего предка/канвы, чтобы
+    // карта лидара не оставалась пустой навсегда.
+    const w = canvas.clientWidth || (canvas.parentElement && canvas.parentElement.clientWidth) || canvas.width || 280;
+    const h = canvas.clientHeight || (canvas.parentElement && canvas.parentElement.clientHeight) || canvas.height || 280;
     if (!w || !h) return;
     if (canvas.width !== Math.round(w * dpr) || canvas.height !== Math.round(h * dpr)) {
       canvas.width = Math.round(w * dpr);
