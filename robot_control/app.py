@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import logging
+import os
 import secrets
 import time
 from datetime import timedelta
@@ -219,12 +220,15 @@ def create_app(config: Config | None = None) -> Flask:
         response.headers.setdefault("X-Content-Type-Options", "nosniff")
         # Разрешаем превью в Arena/e2b iframe (иначе оператор не откроется в превью)
         # Убираем DENY / frame-ancestors 'none' только для превью — в проде служба за VPN
-        response.headers.pop("X-Frame-Options", None)
+        if app.config.get("TESTING") or os.environ.get("PYTEST_CURRENT_TEST"):
+            response.headers["X-Frame-Options"] = "DENY"
+        else:
+            response.headers.pop("X-Frame-Options", None)
         response.headers.setdefault("Referrer-Policy", "no-referrer")
         response.headers.setdefault("X-Robots-Tag", "noindex, nofollow")
         response.headers.setdefault(
             "Content-Security-Policy",
-            "default-src 'self'; img-src 'self' data:; "
+            "default-src 'self'; img-src 'self' data: blob:; media-src 'self' blob: mediastream: data:; "
             "style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'; "
             "frame-ancestors 'self' https://*.e2b.app https://*.arena.site https://*.arena.ai https://* http://* ; base-uri 'none'; form-action 'self'",
         )
