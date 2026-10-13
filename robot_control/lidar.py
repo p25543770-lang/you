@@ -506,18 +506,29 @@ def discover_ports(
 
     ``configured`` может быть списком через запятую и поддерживает glob
     (``RC_LIDAR_PORT=/dev/ttyUSB1`` или ``/dev/serial/by-id/*lidar*``).
+
+    Порт из настройки — только **первый в очереди**, а не единственный:
+    лидар переподключают, и после перезагрузки он оказывается на другом
+    ``/dev/ttyUSBx``. Поэтому ``autoprobe=True`` (по умолчанию) добавляет в
+    список все USB-порты машины, и один и тот же порт, попавший и по
+    symlink'у, и по имени tty, добавляется один раз (сравнение по realpath) —
+    иначе перебор тратил бы на него двойное время.
     """
     blocked = {p for p in excluded if p}
     blocked |= {os.path.realpath(p) for p in blocked}
     found: list[str] = []
+    seen_real: set[str] = set()
 
     def add(path: str) -> None:
         if not path or not os.path.exists(path):
             return
-        if path in blocked or os.path.realpath(path) in blocked:
+        real = os.path.realpath(path)
+        if path in blocked or real in blocked:
             return
-        if path not in found:
-            found.append(path)
+        if path in found or real in seen_real:
+            return
+        found.append(path)
+        seen_real.add(real)
 
     patterns: list[str] = []
     for chunk in (configured or "").replace(";", ",").split(","):
@@ -542,10 +553,12 @@ def discover_ports(
         for path in sorted(glob.glob(pattern), key=_natural_key):
             add(path)
 
-    # Остальные USB-порты — только если разрешён автоподбор (иначе можно
-    # задеть платы моторов, которые висят на соседних ttyUSB).
+    # Остальные USB-порты — по умолчанию (``autoprobe``): перебор обязан
+    # пройти их все, даже если RC_LIDAR_PORT задан одним портом. Иначе после
+    # переподключения лидара на соседний порт приложение навсегда оставалось
+    # без скана («обращается только к одному USB»).
     if autoprobe:
-        for pattern in ("/dev/ttyUSB*", "/dev/ttyACM*"):
+        for pattern in ("/dev/serial/by-id/*", "/dev/ttyUSB*", "/dev/ttyACM*"):
             for path in sorted(glob.glob(pattern), key=_natural_key):
                 add(path)
 
@@ -766,6 +779,14 @@ class LidarManager:
         self._lock_fd: Optional[int] = None
         self._peer_misses = 0
         self._peer_reason = ""
+        # С какого порта начинать очередной круг перебора и что нашли в
+        # прошлом круге (видно в GET /api/lidar → tried).
+        self._rotate = 0
+        self._fallback_all = False
+        self.tried: list[dict[str, Any]] = []
+        self._logged_ports: tuple[str, ...] = ()
+        self._logged_reason = ""
+        self._logged_hint = ""
 
     # --------------------------- жизненный цикл --------------------------- #
 
@@ -876,29 +897,63 @@ class LidarManager:
             "hint": self.hint,
             "detected": dict(self.detected) if self.detected else None,
             "candidates": list(self.candidates),
+            # Результат последнего круга перебора: видно, что проверены все
+            # порты, а не один (``ok`` — на нём пошли данные).
+            "tried": [dict(item) for item in self.tried],
             "last_error": self.last_error or None,
         }
 
     # --------------------------- поиск и чтение --------------------------- #
 
-    def candidate_ports(self) -> list[str]:
-        """Порты-кандидаты, найденный ранее — первым."""
+    def candidate_ports(self, *, wide: bool = True) -> list[str]:
+        """Порты для очередного круга перебора, начиная со следующего за прошлым.
+
+        Перебор идёт по кругу: если лидар стоял на одном порту, а потом его
+        переподключили (или порт заняла другая программа), круг начинается не с
+        него, а со следующего кандидата — «залипания» на одном USB нет.
+        ``wide=False`` (``RC_LIDAR_AUTOPROBE=0``) — узкий список: только порт из
+        ``RC_LIDAR_PORT`` и именованные symlink'и; полный перебор в этом случае
+        делает :meth:`_serial_worker` на следующем круге.
+        """
         ports = discover_ports(
-            configured=self.port, autoprobe=self.autoprobe, excluded=self.excluded
+            configured=self.port, autoprobe=wide, excluded=self.excluded
         )
-        detected_port = (self.detected or {}).get("port")
-        if detected_port and detected_port in ports:
-            ports.remove(detected_port)
-            ports.insert(0, detected_port)
+        if ports:
+            step = self._rotate % len(ports)
+            if step:
+                ports = ports[step:] + ports[:step]
+            self._rotate = step + 1
         self.candidates = ports
         return ports
 
-    def _set_status(self, reason: str, hint: str = "", *, warn: bool = False) -> None:
-        """Меняет причину «нет скана»; в журнал пишет только при изменении."""
+    def _excluded_note(self) -> str:
+        """Подсказка про порты, которые лидару запрещено трогать (мастер/шасси)."""
+        if not self.excluded:
+            return ""
+        ports = sorted(p for p in self.excluded if p)
+        return ("исключены порты мастера/модулей шасси: %s — если лидар подключён "
+                "туда, убери порт из RC_SLAM_PORT/RC_SLAM_PORTS или из RC_LIDAR_EXCLUDE"
+                % ", ".join(ports))
+
+    def _set_status(self, reason: str, hint: str = "", *, warn: bool = False,
+                    quiet: bool = False) -> None:
+        """Меняет причину «нет скана»; в журнал пишет только при изменении.
+
+        ``quiet`` — для частых сообщений о ходе перебора портов: на экране они
+        видны (это и есть ответ «что происходит»), а журнал не засоряется.
+        Итог круга перебора в журнал повторно не пишется, даже если между
+        кругами статус успел пробежать по портам (``quiet``-сообщения).
+        """
         if reason == self.reason and hint == self.hint:
             return
         self.reason = reason
         self.hint = hint
+        if quiet:
+            return
+        if reason == self._logged_reason and hint == self._logged_hint:
+            return
+        self._logged_reason = reason
+        self._logged_hint = hint
         text = reason + ((" (" + hint + ")") if hint else "")
         if warn:
             log.warning("Лидар: %s", text)
@@ -935,47 +990,114 @@ class LidarManager:
                 time.sleep(LIDAR_RESCAN_S)
                 continue
 
-            ports = self.candidate_ports()
+            wide = self.autoprobe or self._fallback_all
+            ports = self.candidate_ports(wide=wide)
             if not ports:
-                self._set_status(
-                    "порт лидара не найден",
-                    hint="подключи лидар или задай RC_LIDAR_PORT (список портов: "
-                         "ls /dev/ttyUSB* /dev/serial/by-id/; проверка: scripts/lidar_check.py)",
-                )
+                hint = ("подключи лидар или задай RC_LIDAR_PORT (список портов: "
+                        "ls /dev/ttyUSB* /dev/serial/by-id/; проверка: scripts/lidar_check.py)")
+                note = self._excluded_note()
+                if note:
+                    hint = hint + "; " + note
+                self._set_status("порт лидара не найден", hint=hint)
                 time.sleep(LIDAR_RESCAN_S)
                 continue
 
+            # Перебор всех портов: у лидара нет постоянного имени, поэтому
+            # каждая попытка явно попадает и в статус, и в журнал — иначе
+            # кажется, что приложение «обращается только к одному USB».
+            # Список портов печатаем, только когда он изменился: ротация
+            # каждые 2 с одного и того же набора портов — это не новость.
+            if tuple(sorted(ports)) != self._logged_ports:
+                self._logged_ports = tuple(sorted(ports))
+                log.info(
+                    "Лидар: перебираю %d порт(ов)%s: %s",
+                    len(ports),
+                    "" if wide else " (узкий список: RC_LIDAR_AUTOPROBE=0)",
+                    ", ".join(ports),
+                )
+            self.tried = []
             progressed = False
-            for port in ports:
+            for index, port in enumerate(ports, start=1):
                 if self._stop:
                     return
+                self._set_status(
+                    "перебираю порты: %d из %d — %s" % (index, len(ports), os.path.basename(port)),
+                    quiet=True,
+                )
                 if not self._acquire_port_lock(port):
                     # Порт читает второй процесс робота: пульт (8080) и бортовой
                     # экран (8090) поднимают этот менеджер одновременно, а порт
                     # открывается только один раз.
                     if self._peer_cycle():
                         progressed = True
+                        self._fallback_all = False
+                        self.tried.append({"port": port, "ok": True,
+                                           "note": "скан берётся у второго процесса робота"})
                         break
                     peer_reason = ("; сосед сообщает: " + self._peer_reason) if self._peer_reason else ""
                     self._set_status(
                         "порт %s занят другой программой" % port,
                         hint="его читает второй процесс пульта, rplidar_ros или Serial Monitor; "
                              "останови лишнее или задай RC_LIDAR_PORT" + peer_reason,
-                        warn=True,
+                        quiet=True,
                     )
+                    self.tried.append({"port": port, "ok": False, "note": "занят"})
                     continue
                 try:
-                    if self._read_port(serial, port):
-                        progressed = True
-                        break
+                    ok = self._read_port(serial, port)
                 finally:
                     self._release_port_lock()
+                self.tried.append({
+                    "port": port,
+                    "ok": ok,
+                    "note": "данные пошли" if ok else "нет данных",
+                })
+                if ok:
+                    progressed = True
+                    self._fallback_all = False
+                    break
+
             if not progressed:
+                # Ни один порт не ответил — говорим об этом прямо:
+                # видно, что перебор был по всем портам, а не по одному.
+                if self.tried and all(item["note"] == "занят" for item in self.tried):
+                    # Все кандидаты кем-то открыты: советы про кабель и скорость
+                    # здесь бесполезны, причина — чужая программа на порту.
+                    reason = ("лидар не найден: все %d порт(ов) заняты другой программой"
+                              % len(self.tried))
+                    hint = ("порты читает второй процесс пульта, rplidar_ros или Serial Monitor; "
+                            "останови лишнее или задай RC_LIDAR_PORT")
+                else:
+                    # Порты в сообщении — по имени, а не в порядке обхода:
+                    # иначе из-за ротации причина менялась бы каждый круг и
+                    # один и тот же итог сыпался бы в журнал каждые 2 с.
+                    items = sorted(self.tried, key=lambda item: os.path.basename(item["port"]))
+                    checked = ", ".join(
+                        "%s — %s" % (os.path.basename(item["port"]), item["note"])
+                        for item in items[:5]
+                    )
+                    if len(items) > 5:
+                        checked += " …"
+                    reason = "лидар не ответил ни на одном из %d портов (%s)" % (
+                        len(items), checked)
+                    hint = ("проверь питание и кабель лидара; скорость зависит от модели: "
+                            "115200 (A1/A2M8), 256000 (A2M7/A2M12/A3/S1), 460800 (C1), 230400 (LD06/LD19); "
+                            "полный разбор — .venv/bin/python scripts/lidar_check.py")
+                note = self._excluded_note()
+                if note:
+                    hint = hint + "; " + note
+                self._set_status(reason, hint=hint, warn=True)
+                if not self.autoprobe and not self._fallback_all:
+                    # RC_LIDAR_AUTOPROBE=0 — узкий список. Он только первым, а
+                    # не единственным: со следующего круга перебираем все USB.
+                    self._fallback_all = True
+                    log.info("Лидар: на закреплённых портах данных нет — "
+                             "следующий круг перебирает все USB-порты")
                 time.sleep(LIDAR_RESCAN_S)
 
     def _read_port(self, serial, port: str) -> bool:
         """Подбирает параметры и читает скан. True — данные шли (до обрыва)."""
-        self._set_status("подбираю параметры порта %s…" % port)
+        self._set_status("подбираю параметры порта %s…" % port, quiet=True)
         try:
             ser = open_serial(serial, port, RPLIDAR_BAUDS[0])
         except Exception as exc:  # noqa: BLE001 — порт занят/пропал/нет прав
@@ -985,7 +1107,7 @@ class LidarManager:
                 hint = "добавь пользователя в группу dialout: sudo usermod -aG dialout $USER (и перезайди)"
             elif getattr(serial, "SerialException", None) and isinstance(exc, serial.SerialException):
                 hint = "порт занят другой программой (второй пульт, rplidar_ros, Serial Monitor)"
-            self._set_status("порт %s не открылся" % port, hint=hint, warn=True)
+            self._set_status("порт %s не открылся" % port, hint=hint, quiet=True)
             return False
 
         try:
@@ -1002,7 +1124,7 @@ class LidarManager:
             )
         except Exception as exc:  # noqa: BLE001 — кабель выдернули на ходу
             self.last_error = "%s: %s" % (port, exc)
-            self._set_status("обрыв связи с портом %s" % port, hint=str(exc), warn=True)
+            self._set_status("обрыв связи с портом %s" % port, hint=str(exc), quiet=True)
             return False
         finally:
             try:
@@ -1016,7 +1138,7 @@ class LidarManager:
                 "лидар на %s не отвечает" % port,
                 hint="проверь скорость (A3/S1 — 256000, C1 — 460800, LD06/LD19 — 230400) "
                      "и переключатель на USB-адаптере; полный прогон: scripts/lidar_check.py",
-                warn=True,
+                quiet=True,
             )
             return False
 

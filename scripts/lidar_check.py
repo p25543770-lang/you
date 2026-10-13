@@ -20,6 +20,9 @@
     нужен другой уровень линии DTR/RTS (RC_LIDAR_MOTOR) или питание лидара;
   * «нет ответа» — скорость не та (A1/A2M8 — 115200, A2M7/A2M12/A3/S1 — 256000,
     C1 — 460800, LD06/LD19 — 230400) или лидар подключён не к тому порту.
+
+Проверяются ВСЕ USB-порты (и порт из RC_LIDAR_PORT первым): лидар легко
+переезжает на соседний /dev/ttyUSBx после переподключения.
 """
 
 from __future__ import annotations
@@ -56,11 +59,15 @@ def log(text: str = "") -> None:
 
 
 def collect_ports(port: str = "") -> list[str]:
-    """Порты-кандидаты: явно заданный, потом symlink'и, потом остальные tty."""
-    autoprobe = os.environ.get("RC_LIDAR_AUTOPROBE", "1").strip().lower() not in {"0", "false", "no", "off"}
+    """Порты-кандидаты: явно заданный, потом symlink'и, потом все остальные tty.
+
+    Проверка всегда перебирает все USB-порты: порт из ``RC_LIDAR_PORT`` — только
+    первый в очереди. Иначе скрипт повторял бы ошибку «лидар виден только на одном
+    USB» и не находил лидар, переехавший на соседний /dev/ttyUSBx.
+    """
     return discover_ports(
         configured=port or os.environ.get("RC_LIDAR_PORT"),
-        autoprobe=autoprobe,
+        autoprobe=True,
         excluded=excluded_ports(),
     )
 
@@ -80,6 +87,9 @@ def describe_ports(port: str = "") -> None:
         log("  • %s%s" % (path, note))
     if blocked:
         log("Исключены (мастер/модули шасси или RC_LIDAR_EXCLUDE): %s" % ", ".join(blocked))
+    if (os.environ.get("RC_LIDAR_AUTOPROBE") or "").strip().lower() in {"0", "false", "no", "off"}:
+        log("Примечание: RC_LIDAR_AUTOPROBE=0 в приложении — «сначала закреплённый порт», "
+            "а не «только он»; проверка всё равно проходит все порты выше.")
     log()
 
 

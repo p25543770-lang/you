@@ -11,23 +11,34 @@
 # и запускает сервер. После этого пульт доступен с других устройств в той же
 # сети по адресу http://<IP-этой-машины>:8080/
 #
+# Автозапуск при загрузке по умолчанию НЕ ставится: после установки пульт и
+# бортовой экран поднимаются вручную (./scripts/start.sh, ./scripts/kiosk.sh).
+# Нужен автозапуск — флаг --autostart (или позже: ./scripts/autostart.sh on).
+#
 # Флаги:
-#   --no-run     установить, но не запускать сервер
-#   --systemd    после установки поставить автозапуск через systemd
-#   --ap         поднять на этой машине точку доступа Wi-Fi (робот сам раздаёт сеть)
+#   --no-run         установить, но не запускать сервер
+#   --autostart      включить автозапуск: служба systemd robot-control (пульт),
+#                    автозапуск бортового экрана в сеансе; точка доступа Wi-Fi —
+#                    см. --ap-autostart
+#   --systemd        то же, что --autostart (устаревшее имя флага)
+#   --ap             поднять на этой машине точку доступа Wi-Fi (робот сам раздаёт сеть)
+#   --ap-autostart   поднимать точку доступа и при каждой загрузке
 #
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 RUN=1
-SYSTEMD=0
+AUTOSTART=0
 AP=0
+AP_AUTOSTART=0
 while [[ $# -gt 0 ]]; do
   case "$1" in
-    --no-run)  RUN=0; shift ;;
-    --systemd) SYSTEMD=1; shift ;;
-    --ap)      AP=1; shift ;;
-    -h|--help) sed -n '2,17p' "$0"; exit 0 ;;
+    --no-run)       RUN=0; shift ;;
+    --autostart)    AUTOSTART=1; shift ;;
+    --systemd)      AUTOSTART=1; shift ;;                 # старое имя флага
+    --ap)           AP=1; shift ;;
+    --ap-autostart) AP=1; AP_AUTOSTART=1; shift ;;
+    -h|--help)      sed -n '2,26p' "$0"; exit 0 ;;
     *) echo "неизвестный аргумент: $1" >&2; exit 1 ;;
   esac
 done
@@ -85,9 +96,11 @@ if command -v ufw >/dev/null 2>&1 && ufw status 2>/dev/null | grep -q "Status: a
   log "ufw: порт 8080 открыт"
 fi
 
-# --- 6. автозапуск (опция) ------------------------------------------------------ #
-if [[ $SYSTEMD -eq 1 ]]; then
-  log "ставлю systemd-юнит…"
+# --- 6. автозапуск (только по флагу) ----------------------------------------- #
+# По умолчанию не ставим ничего: робот после включения не поднимает приложение
+# само. Хочешь автозапуск — --autostart (или позже ./scripts/autostart.sh on).
+if [[ $AUTOSTART -eq 1 ]]; then
+  log "ставлю systemd-юнит и включаю автозапуск…"
   if command -v sudo >/dev/null 2>&1 && [[ $EUID -ne 0 ]]; then SUDO=sudo; else SUDO=; fi
   $SUDO cp scripts/robot-control.service /etc/systemd/system/
   $SUDO sed -i "s|/opt/robot-control|$PWD|g" /etc/systemd/system/robot-control.service
@@ -95,18 +108,30 @@ if [[ $SYSTEMD -eq 1 ]]; then
   $SUDO sed -i "s|User=robotctl|User=$USER|g; s|Group=robotctl|Group=$USER|g" /etc/systemd/system/robot-control.service
   $SUDO systemctl daemon-reload
   $SUDO systemctl enable --now robot-control
-  log "служба robot-control запущена"
+  log "служба robot-control запущена (автозапуск включён)"
+else
+  log "автозапуск не ставлю: пульт и экран запускаются вручную"
+  log "  включить: sudo ./scripts/install_ubuntu.sh --autostart (или ./scripts/autostart.sh on)"
 fi
 
 # --- 6b. точка доступа Wi-Fi (опция) ---------------------------------------- #
 if [[ $AP -eq 1 ]]; then
-  log "поднимаю точку доступа Wi-Fi…"
-  ./scripts/setup_ap.sh --autostart || log "точку доступа поднять не удалось — см. текст выше"
+  if [[ $AP_AUTOSTART -eq 1 ]]; then
+    log "поднимаю точку доступа Wi-Fi (и буду поднимать при загрузке)…"
+    ./scripts/setup_ap.sh --autostart || log "точку доступа поднять не удалось — см. текст выше"
+  else
+    log "поднимаю точку доступа Wi-Fi (без автоподъёма при загрузке)…"
+    ./scripts/setup_ap.sh || log "точку доступа поднять не удалось — см. текст выше"
+  fi
 fi
 
 # --- 7. ярлык на рабочем столе (если есть графика) --------------------------- #
 if [[ -n "${DISPLAY:-}" ]]; then
-  ./scripts/make_shortcut.sh || log "ярлык создать не удалось — не критично"
+  if [[ $AUTOSTART -eq 1 ]]; then
+    ./scripts/make_shortcut.sh --autostart || log "ярлык создать не удалось — не критично"
+  else
+    ./scripts/make_shortcut.sh || log "ярлык создать не удалось — не критично"
+  fi
 fi
 
 IP="$(hostname -I 2>/dev/null | awk '{print $1}')"
@@ -122,10 +147,21 @@ if [[ $AP -eq 1 ]]; then
   echo "    и откройте http://10.42.0.1:8080/"
 else
   echo "  Точка доступа Wi-Fi (если машина робота раздаёт сеть):"
-  echo "    sudo ./scripts/setup_ap.sh --autostart"
+  echo "    sudo ./scripts/setup_ap.sh            # поднять сейчас"
+  echo "    sudo ./scripts/setup_ap.sh --autostart  # + поднимать при загрузке"
+fi
+echo
+if [[ $AUTOSTART -eq 1 ]]; then
+  echo "  Автозапуск включён: после загрузки пульт поднимается сам."
+  echo "    выключить: ./scripts/autostart.sh off"
+else
+  echo "  Автозапуска нет — приложение запускается вручную:"
+  echo "    ./scripts/start.sh    пульт оператора (8080)"
+  echo "    ./scripts/kiosk.sh    бортовой экран робота (8090)"
+  echo "    ./scripts/autostart.sh status   # что вообще стартует само"
 fi
 
-if [[ $RUN -eq 1 && $SYSTEMD -eq 0 ]]; then
+if [[ $RUN -eq 1 && $AUTOSTART -eq 0 ]]; then
   echo
   log "запускаю сервер (Ctrl+C для остановки)…"
   exec .venv/bin/python run.py

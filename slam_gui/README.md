@@ -21,13 +21,16 @@
 ./scripts/serve.sh                         # операторский сервер на 8080
 ./run_kiosk.py --no-open                   # киоск на 8090 без запуска браузера
 RC_SLAM_SOURCE=master RC_SLAM_PORT=/dev/ttyACM0 ./run_kiosk.py --no-open
-sudo systemctl enable --now robot-control robot-kiosk  # штатный автозапуск (deploy/)
+sudo systemctl enable --now robot-control robot-kiosk  # автозапуск (по желанию)
+./scripts/autostart.sh off                             # выключить автозапуск целиком
 ```
 
 `RC_SLAM_SOURCE` задаёт `sim` (стенд), `serial` (UART-модули), `ros` (ROS 2) или
 `master` (один UART мастера и адресный поворот рулевых модулей). В режиме
 `master` после PIN разрешены только индивидуальные целевые углы рулевых шаговых
-моторов. Документация автозапуска: `deploy/README.md`.
+моторов. Автозапуск по умолчанию выключен: приложение запускается вручную
+(`./scripts/start.sh`, `./scripts/kiosk.sh`). Документация установки:
+`docs/DEPLOY_UBUNTU.md`.
 
 Файлы инженерного пульта: `index.html`, `styles.css`, `vision.js` (карта/камеры/лидар), `app.js` (симулятор),
 `console-core.js` (ядро сервисного пульта без DOM), `console.js` (вкладка «Сервис»:
