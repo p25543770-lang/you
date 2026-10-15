@@ -1288,6 +1288,36 @@ def test_real_pyserial_reads_lds01_from_tty(monkeypatch):
         os.close(master)
 
 
+@pytest.mark.skipif(not hasattr(os, "openpty"), reason="нужен POSIX-псевдотерминал")
+def test_command_to_a_stalled_port_does_not_hang_the_search():
+    """Вставший передатчик не останавливает поиск лидара навсегда.
+
+    ``write`` в pyserial без ``write_timeout`` ждёт готовности порта в ``select()``
+    без ограничения времени. На вставшем адаптере (в тесте это pty, сторону
+    «устройства» у которого никто не читает) команда SCAN не уходила, и поток
+    поиска лидара замирал навсегда — лидар переставал искать порт, а на экране
+    оставалась старая причина. Поэтому у порта есть ``write_timeout``.
+    """
+    serial = pytest.importorskip("serial")
+    pty = pytest.importorskip("pty")
+
+    master, slave = pty.openpty()
+    port = os.ttyname(slave)
+    try:
+        ser = lidar.open_serial(serial, port, 115200)
+        try:
+            started = time.monotonic()
+            with pytest.raises(serial.SerialTimeoutException):
+                for _ in range(400):                 # переполняем буфер передачи
+                    ser.write(b"\xa5\x20" * 64)      # команда SCAN, как у RPLIDAR
+            assert time.monotonic() - started < 5.0, "write ждал порт бесконечно"
+        finally:
+            ser.close()
+    finally:
+        os.close(slave)
+        os.close(master)
+
+
 # ---------------------------------------------------------------------------
 # Диагностический скрипт scripts/lidar_check.py
 # ---------------------------------------------------------------------------
