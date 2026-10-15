@@ -1,0 +1,10 @@
+# Сборка рабочего пространства: в git попадает только src/zapret_lidar
+build/
+install/
+log/
+# Пакеты драйверов, которые scripts/ros2_setup.sh клонирует из исходников
+# (ldlidar_stl_ros2, hls_lfcd_lds_driver, rplidar_ros, sllidar_ros2,
+# turtlebot3…): иначе «Обновить с GitHub» видит «изменения в рабочей копии» и
+# отказывается обновляться.
+src/*
+!src/zapret_lidar/

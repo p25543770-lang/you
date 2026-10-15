@@ -202,13 +202,18 @@ class FakeRplidar(FakeDevice):
 
 
 class FakeLd06(FakeDevice):
-    """Виртуальный LD06/LD19: поток пакетов без команд управления."""
+    """Виртуальный LD06/LD19: поток пакетов без команд управления.
+
+    По умолчанию поток длинный (100 витков), чтобы перебор на одной скорости
+    (lds01 230400 vs ld06 230400) не съедал весь запас первой неудачной попыткой.
+    Для бесконечного потока передай revolutions=None.
+    """
 
     def __init__(
         self,
         *,
         baud: int = 230400,
-        revolutions: int = 2,
+        revolutions: int | None = 100,
         packets_per_rev: int = 12,
         crc_ok: bool = True,
     ) -> None:
@@ -217,17 +222,26 @@ class FakeLd06(FakeDevice):
         self.packets_per_rev = packets_per_rev
         self.crc_ok = crc_ok
         self.sent = 0
+        self._started = time.monotonic()
+        self._emitted = 0
 
     def read(self, size: int, port: "FakeSerial") -> bytes:
         if port.baudrate != self.baud:
             return b""
-        while len(self.buffer) < size and self.sent < self.revolutions * self.packets_per_rev:
+        # Ограничиваем скорость реальным бодрейтом (как FakeNoise), но с
+        # начальным запасом, чтобы первый read не вернул пусто.
+        elapsed = time.monotonic() - self._started
+        allowed = int(max(1024, elapsed * self.baud / 10.0))
+        while len(self.buffer) < size and self._emitted < allowed and (
+            self.revolutions is None or self.sent < self.revolutions * self.packets_per_rev
+        ):
             step = 360.0 / self.packets_per_rev
             start_deg = (self.sent % self.packets_per_rev) * step
             self.buffer.extend(
                 encode_ld06_packet(start_deg, dist_m=1.0 + 0.01 * self.sent, crc_ok=self.crc_ok)
             )
             self.sent += 1
+            self._emitted += 47
         return super().read(size, port)
 
 
@@ -261,6 +275,8 @@ class FakeLds01(FakeDevice):
         self.sent = 0             # сколько пакетов уже выдано
         self.started = False      # приходила ли команда запуска
         self.stopped = False
+        self._baud_started = time.monotonic()
+        self._baud_emitted = 0
 
     @property
     def total_packets(self) -> int | None:
@@ -279,7 +295,11 @@ class FakeLds01(FakeDevice):
     def read(self, size: int, port: "FakeSerial") -> bytes:
         if (port.baudrate != self.baud and not self.ignore_baud) or not self.scanning:
             return b""
-        while len(self.buffer) < size and (self.total_packets is None or self.sent < self.total_packets):
+        elapsed = time.monotonic() - self._baud_started
+        allowed = int(max(1024, elapsed * self.baud / 10.0))
+        while len(self.buffer) < size and self._baud_emitted < allowed and (
+            self.total_packets is None or self.sent < self.total_packets
+        ):
             index = self.sent % 60
             self.buffer.extend(
                 encode_lds01_packet(
@@ -289,6 +309,7 @@ class FakeLds01(FakeDevice):
                 )
             )
             self.sent += 1
+            self._baud_emitted += 42
         return super().read(size, port)
 
 
@@ -676,10 +697,12 @@ def test_scan_accumulator_publishes_revolution_and_gap():
 
 
 def test_lidar_profiles_order_and_overrides():
-    assert lidar_profiles("auto")[0] == ("rplidar", 115200)
+    # LDS-01 (TurtleBot3 Burger) — основной лидар робота, поэтому он первый
+    assert lidar_profiles("auto")[0] == ("lds01", 230400)
     assert ("ld06", 230400) in lidar_profiles("auto")
+    assert ("rplidar", 115200) in lidar_profiles("auto")
     assert lidar_profiles("ld06") == [("ld06", 230400)]
-    assert lidar_profiles("auto", 230400)[0] == ("ld06", 230400)
+    assert lidar_profiles("auto", 230400)[0] == ("lds01", 230400)
     assert lidar_profiles("rplidar", 256000)[0] == ("rplidar", 256000)
 
 
@@ -774,10 +797,17 @@ def test_probe_port_keeps_trying_bauds_for_rplidar_a3(fake_serial, fake_port):
 
 
 def test_probe_port_finds_ld06(fake_serial, fake_port):
-    FakeSerial.devices[fake_port] = FakeLd06()
+    FakeSerial.devices[fake_port] = FakeLd06(revolutions=None)
     published = []
+    stop = {"flag": False}
+
+    def publish(points):
+        published.append(points)
+        stop["flag"] = True
+
     with FakeSerial(fake_port) as ser:
-        found = probe_port(ser, fake_port, timeout=0.05, publish=published.append)
+        found = probe_port(ser, fake_port, timeout=0.05, publish=publish,
+                           stop=lambda: stop["flag"])
     assert found is not None
     assert found["protocol"] == "ld06"
     assert found["baud"] == 230400
@@ -1368,7 +1398,7 @@ def test_lidar_check_cli_reports_dead_port(fake_serial, fake_port, capsys):
 
 
 def test_lidar_check_cli_json_for_scripts(fake_serial, fake_port, capsys):
-    FakeSerial.devices[fake_port] = FakeLd06()
+    FakeSerial.devices[fake_port] = FakeLd06(revolutions=None)
     module = load_lidar_check()
     assert module.main(["--port", fake_port, "--json", "--seconds", "0.2"]) == 0
     report = json.loads(capsys.readouterr().out)

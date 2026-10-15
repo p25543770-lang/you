@@ -20,5 +20,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
-./scripts/ensure_deps.sh
+if [[ "${RC_SKIP_DEPS:-0}" != "1" ]]; then
+  ./scripts/ensure_deps.sh
+fi
 exec .venv/bin/python run_kiosk.py "$@"

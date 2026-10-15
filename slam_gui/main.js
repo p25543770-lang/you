@@ -475,11 +475,23 @@
     return !!(st && st.demo === true);
   }
 
-  // Откуда реально идёт скан: порт, протокол и скорость из GET /api/lidar.
-  // На роботе по этой подписи видно, что читается именно USB-лидар.
+  // Откуда реально идёт скан: ROS 2 или USB-порт (порт, протокол и скорость из
+  // GET /api/lidar). На роботе по этой подписи видно, что читается именно лидар,
+  // а не демо, и каким драйвером.
   function lidarSourceText(d) {
     const st = d && d.lidarStatus;
-    const det = st && st.detected;
+    if (!st) return '';
+    const ros = st.ros;
+    if (ros && ros.connected) {
+      const parts = ['ROS 2', String(ros.topic || '/scan')];
+      const supervisor = ros.supervisor;
+      if (supervisor && supervisor.driver) {
+        parts.push(String(supervisor.driver_package || supervisor.driver));
+      }
+      if (ros.hz) parts.push(ros.hz + ' Гц');
+      return parts.join(' · ');
+    }
+    const det = st.detected;
     if (!det || !det.port) return '';
     const name = String(det.port).split('/').pop();
     const parts = [name];

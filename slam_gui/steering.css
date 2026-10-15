@@ -1,0 +1,107 @@
+.rc-steering-launch {
+  appearance: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 36px;
+  padding: 0 13px;
+  border: 1px solid #527a64;
+  border-radius: 9px;
+  background: #14271d;
+  color: #d9f2df;
+  font: inherit;
+  font-size: 12px;
+  font-weight: 800;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.rc-steering-launch:hover { border-color: #79bd8e; background: #1a3826; }
+.rc-steering-overlay {
+  position: fixed;
+  z-index: 12000;
+  inset: 0;
+  display: grid;
+  place-items: center;
+  padding: 18px;
+  background: rgba(0, 0, 0, .72);
+  backdrop-filter: blur(5px);
+}
+.rc-steering-overlay[hidden] { display: none; }
+.rc-steering-dialog {
+  width: min(1040px, 100%);
+  max-height: min(92vh, 900px);
+  overflow: auto;
+  padding: 20px;
+  border: 1px solid #2e3c34;
+  border-radius: 16px;
+  background: #101713;
+  color: #edf5ef;
+  box-shadow: 0 24px 90px rgba(0, 0, 0, .56);
+  font-family: Inter, system-ui, sans-serif;
+}
+.rc-steering-head, .rc-steering-toolbar, .rc-steering-card > header,
+.rc-steering-values { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.rc-steering-head { margin-bottom: 14px; }
+.rc-steering-head h2 { margin: 0; font-size: 20px; }
+.rc-steering-head p { margin: 5px 0 0; color: #98aaa0; font-size: 12px; }
+.rc-steering-close {
+  width: 36px; height: 36px; border: 1px solid #37443b; border-radius: 9px;
+  background: #18211b; color: #e7efe9; font-size: 24px; line-height: 1; cursor: pointer;
+}
+.rc-steering-safety {
+  margin: 0 0 12px; padding: 10px 12px; border: 1px solid #705a2e; border-radius: 9px;
+  background: #282213; color: #f4d992; font-size: 12px; line-height: 1.5;
+}
+.rc-steering-toolbar { flex-wrap: wrap; min-height: 40px; margin-bottom: 12px; color: #adbbb2; font-size: 12px; }
+.rc-steering-toolbar #rc-steering-source { flex: 1 1 280px; text-align: right; }
+.rc-steering-btn {
+  min-height: 34px; padding: 0 10px; border: 1px solid #35443a; border-radius: 8px;
+  background: #1a241d; color: #eaf3ec; font: inherit; font-weight: 700; cursor: pointer;
+}
+.rc-steering-btn:hover { border-color: #6da77c; }
+.rc-drive-panel { margin: 0 0 12px; padding: 13px; border: 1px solid #4b5733; border-radius: 12px; background: #192017; }
+.rc-drive-top { display: flex; align-items: start; justify-content: space-between; gap: 10px; }
+.rc-drive-top > div { display: grid; gap: 4px; }
+.rc-drive-top b { font-size: 14px; }
+.rc-drive-top small, .rc-drive-warning { color: #a9b4a9; font-size: 10px; line-height: 1.5; }
+#rc-drive-status { color: #c9d3ca; font-size: 11px; text-align: right; }
+#rc-drive-status[data-ready="true"] { color: #a9dda9; }
+.rc-drive-speed { display: flex; align-items: center; gap: 8px; margin: 10px 0; color: #adb9ae; font-size: 11px; }
+.rc-drive-speed b { color: #eff6f0; font-variant-numeric: tabular-nums; }
+.rc-drive-speed input { flex: 1; min-width: 100px; accent-color: #a7cf70; }
+.rc-drive-actions { display: grid; grid-template-columns: 1fr 1fr 100px; gap: 8px; }
+.rc-drive-actions button { min-height: 42px; border: 1px solid #596449; border-radius: 9px; background: #293322; color: #f0f4eb; font: inherit; font-size: 12px; font-weight: 800; cursor: pointer; touch-action: none; user-select: none; }
+.rc-drive-actions button:active:not(:disabled) { background: #39482f; transform: translateY(1px); }
+.rc-drive-actions button.stop { border-color: #9b4141; background: #542222; color: #ffe5e5; }
+.rc-drive-actions button:disabled { opacity: .4; cursor: not-allowed; }
+.rc-drive-warning { display: block; margin-top: 9px; color: #d6a3a3; }
+.rc-steering-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+.rc-steering-card { min-width: 0; padding: 13px; border: 1px solid #2d3830; border-radius: 12px; background: #151d17; }
+.rc-steering-card.error { border-color: #8f4545; }
+.rc-steering-card > header { margin-bottom: 9px; }
+.rc-steering-card > header b { font-size: 16px; }
+.rc-steering-card > header span, .rc-steering-card small { color: #9baaa0; font-size: 11px; }
+.rc-steering-values { margin-bottom: 8px; color: #9baaa0; font-size: 11px; }
+.rc-steering-values b { color: #f0f5f1; font-size: 14px; font-variant-numeric: tabular-nums; }
+.rc-steering-card input[type=range] { width: 100%; accent-color: #89d29b; }
+.rc-steering-actions { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 5px; margin-top: 7px; }
+.rc-steering-actions button {
+  min-height: 34px; padding: 4px 6px; border: 1px solid #344037; border-radius: 7px;
+  background: #1d2820; color: #e8f0ea; font: inherit; font-size: 11px; font-weight: 700; cursor: pointer;
+}
+.rc-steering-actions button[data-calib] { grid-column: span 2; color: #9fd6f5; border-color: #3f6f8c; }
+.rc-steering-actions button[data-origin] { grid-column: span 2; color: #f2d47d; border-color: #66572e; }
+.rc-steering-actions button[data-calib][hidden] + button[data-origin] { grid-column: 1 / -1; }
+.rc-steering-actions button.primary { border-color: #558663; background: #203d29; color: #dff5e4; }
+.rc-steering-actions button:disabled, .rc-steering-btn:disabled { opacity: .4; cursor: not-allowed; }
+.rc-steering-card small { display: block; min-height: 14px; margin-top: 7px; }
+@media (max-width: 700px) {
+  .rc-steering-overlay { padding: 8px; }
+  .rc-steering-dialog { max-height: 96vh; padding: 13px; }
+  .rc-steering-grid { grid-template-columns: 1fr; }
+  .rc-steering-toolbar #rc-steering-source { text-align: left; }
+  .rc-drive-top { display: grid; }
+  #rc-drive-status { text-align: left; }
+  .rc-drive-actions { grid-template-columns: 1fr 1fr; }
+  .rc-drive-actions button.stop { grid-column: 1 / -1; }
+}

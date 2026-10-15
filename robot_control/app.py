@@ -14,6 +14,7 @@ from __future__ import annotations
 import logging
 import os
 import secrets
+import subprocess
 import time
 from datetime import timedelta
 from functools import wraps
@@ -32,6 +33,7 @@ from flask import (
 from itsdangerous import BadSignature, URLSafeSerializer, URLSafeTimedSerializer
 from werkzeug.routing import BuildError
 
+from . import eventlog
 from .auth import (
     ROLE_OPERATOR,
     LoginThrottle,
@@ -39,8 +41,11 @@ from .auth import (
     authenticate,
     hash_password,
 )
-from .config import Config
+from .config import Config, PROJECT_ROOT
+from .lidar import LidarManager
+from .lidar_settings import apply_lidar_settings, settings_payload
 from .slam import build_state, create_blueprint, start_lidar
+from .updater import UpdateManager, schedule_restart
 
 log = logging.getLogger("robot_control")
 
@@ -48,6 +53,27 @@ SESSION_USER = "operator"
 SESSION_ROLE = "role"
 SESSION_LOGIN_AT = "login_at"
 ST_PARAM = "st"
+
+
+def _read_build_sha() -> str:
+    """Capture the source revision when this worker imports the application."""
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(PROJECT_ROOT), "rev-parse", "HEAD"],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=2,
+            check=False,
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+    except (OSError, subprocess.TimeoutExpired):
+        pass
+    return "unknown"
+
+
+APP_BUILD_SHA = _read_build_sha()
 
 
 def _safe_next(target: str | None) -> str | None:
@@ -66,6 +92,10 @@ def create_app(config: Config | None = None) -> Flask:
     """Фабрика приложения — так его удобно поднимать и в тестах, и в бою."""
     config = config or Config.from_env()
     app = Flask(__name__)
+
+    # Панель «Логи» на бортовом экране показывает настоящий журнал процесса:
+    # подключаем его до первого логирования, чтобы ничего не потерялось.
+    eventlog.install()
 
     app.config["SECRET_KEY"] = config.secret_key or secrets.token_urlsafe(48)
     if not config.secret_key:
@@ -122,6 +152,13 @@ def create_app(config: Config | None = None) -> Flask:
     app.extensions["rc_config"] = config
     app.extensions["rc_store"] = store
     app.extensions["rc_throttle"] = throttle
+    updater = UpdateManager(
+        PROJECT_ROOT,
+        remote=os.environ.get("RC_UPDATE_REMOTE", "origin"),
+        branch=os.environ.get("RC_UPDATE_BRANCH"),
+        on_restart=lambda: schedule_restart(PROJECT_ROOT),
+    )
+    app.extensions["rc_updater"] = updater
 
     # ----------------------- Резервная URL-сессия ------------------------ #
     def issue_url_session(username: str) -> str:
@@ -222,6 +259,15 @@ def create_app(config: Config | None = None) -> Flask:
         except BadSignature:
             return False
 
+    def csrf_header_ok() -> bool:
+        provided = request.headers.get("X-CSRF-Token", "")
+        if not provided:
+            return False
+        try:
+            return csrf_signer.loads(provided) == "csrf"
+        except BadSignature:
+            return False
+
     # --------------------------- Заголовки ------------------------------- #
     @app.after_request
     def security_headers(response):
@@ -247,6 +293,8 @@ def create_app(config: Config | None = None) -> Flask:
     # Он занимает "/" и "/console"; если подключить не удалось, "/" показывает
     # внятную ошибку вместо пустого 404.
     try:
+        # Пульт 8080 не открывает UART мастера: порт держит бортовой экран (8090),
+        # иначе два процесса читают его вперемешку. Здесь — только телеметрия.
         slam_state = build_state(
             mode=config.slam_source,
             ports=config.slam_ports,
@@ -254,6 +302,7 @@ def create_app(config: Config | None = None) -> Flask:
             pin=config.slam_pin,
             max_attempts=config.slam_max_attempts,
             lock_sec=config.slam_lock_seconds,
+            master_role="peer",
         )
         app.extensions["rc_slam"] = slam_state
         app.register_blueprint(create_blueprint(slam_state, guard=login_required))
@@ -298,6 +347,82 @@ def create_app(config: Config | None = None) -> Flask:
                 "source": getattr(getattr(slam_state, "source", None), "name", None),
             }
         )
+
+    @app.get("/api/update/check")
+    @login_required
+    def api_update_check():
+        result = updater.check()
+        result["csrfToken"] = csrf_signer.dumps("csrf")
+        return jsonify(result), 200 if result.get("ok") else 502
+
+    @app.get("/api/update/status")
+    @login_required
+    def api_update_status():
+        try:
+            since = int(request.args.get("since", "-1"))
+        except (TypeError, ValueError):
+            since = -1
+        state = updater.wait_status(since=since, timeout=20)
+        return jsonify({"ok": True, **state})
+
+    @app.post("/api/update/run")
+    @login_required
+    def api_update_run():
+        if not csrf_header_ok():
+            return jsonify({"ok": False, "error": "Недействительный CSRF-токен."}), 400
+        if not updater.start():
+            return jsonify({"ok": False, "error": "Обновление уже выполняется.", **updater.get_status()}), 409
+        return jsonify({"ok": True, "status": "busy"}), 202
+
+    @app.get("/api/update/version")
+    @login_required
+    def api_update_version():
+        try:
+            revision = updater.local_revision()
+            return jsonify({"ok": True, "sha": revision, "short": revision[:7],
+                            "buildSha": APP_BUILD_SHA})
+        except Exception as exc:  # noqa: BLE001 — диагностический endpoint
+            return jsonify({"ok": False, "error": str(exc)[:300],
+                            "buildSha": APP_BUILD_SHA}), 503
+
+    # ------------------------- Настройки лидара ------------------------- #
+    # Панель «Лидар» на экранах пульта: порт/протокол/скорость/линия мотора
+    # пишутся в .env и применяются сразу. Бортовой экран (8090) подхватит тот
+    # же .env сам (см. LidarManager._sync_settings_from_env_file), а скан —
+    # по peer-обмену, поэтому настраивать два приложения отдельно не нужно.
+    @app.get("/api/lidar/settings")
+    @login_required
+    def api_lidar_settings():
+        result = settings_payload(LidarManager.get_instance())
+        result["csrfToken"] = csrf_signer.dumps("csrf")
+        result["canEdit"] = True
+        result["requiresPin"] = False
+        return jsonify(result)
+
+    @app.post("/api/lidar/settings")
+    @login_required
+    def api_lidar_settings_save():
+        if not csrf_header_ok():
+            return jsonify({"ok": False, "error": "Недействительный CSRF-токен."}), 400
+        try:
+            result = apply_lidar_settings(request.get_json(silent=True) or {})
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        result["csrfToken"] = csrf_signer.dumps("csrf")
+        return jsonify(result)
+
+    @app.post("/api/lidar/rescan")
+    @login_required
+    def api_lidar_rescan():
+        if not csrf_header_ok():
+            return jsonify({"ok": False, "error": "Недействительный CSRF-токен."}), 400
+        manager = LidarManager.get_instance()
+        result = manager.restart_search()
+        return jsonify({"ok": True, "settings": manager.current_settings(),
+                        # При источнике ros «пересканировать» значит перезапустить
+                        # драйвер через супервизор: его ответ виден в панели.
+                        "ros_rescan": result.get("ros_rescan") if isinstance(result, dict) else None,
+                        "status": manager.get_status()})
 
     @app.route("/login", methods=["GET", "POST"], endpoint="auth.login")
     def login():

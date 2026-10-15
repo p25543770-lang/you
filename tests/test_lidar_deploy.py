@@ -62,8 +62,10 @@ def test_service_unit_has_serial_port_access(unit):
     """Без группы dialout служба получает Permission denied на /dev/ttyUSB*."""
     text = (SCRIPTS / unit).read_text(encoding="utf-8")
     assert "SupplementaryGroups=dialout" in text
-    # каталог data/ нужен на запись: там замок порта лидара
-    assert "ReadWritePaths=" in text and "data" in text
+    # Пульт обновляет код через Git, поэтому корень клона должен быть доступен
+    # на запись; в нём же лежат data/ и var/ с состоянием робота.
+    assert any(line.startswith("ReadWritePaths=") and "/opt/robot-control" in line
+               for line in text.splitlines())
 
 
 def test_install_ubuntu_points_service_at_venv_python():
@@ -185,7 +187,7 @@ def test_lidar_check_saves_settings_to_env(
     assert "# комментарий" in lines
     assert oct(env_file.stat().st_mode & 0o777) == "0o600"
     out = capsys.readouterr().out
-    assert "перезапусти веб-приложения" in out
+    assert "перезапусти приложение" in out
     assert "lidar_web_check.py" in out
 
 

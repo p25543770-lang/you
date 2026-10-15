@@ -10,6 +10,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from robot_control import eventlog, slam  # noqa: E402
 from robot_control.app import create_app  # noqa: E402
 from robot_control.auth import OperatorStore  # noqa: E402
 from robot_control.config import Config  # noqa: E402
@@ -17,6 +18,38 @@ from robot_control.config import Config  # noqa: E402
 OPERATOR = "operator"
 PASSWORD = "correct-horse-battery"
 FAST_ITERATIONS = 1_000  # тесты не должны тормозить на PBKDF2
+
+
+@pytest.fixture(autouse=True)
+def clean_event_journal():
+    """Журнал событий бортового экрана — состояние процесса, а не теста.
+
+    Без очистки записи предыдущих тестов («PIN не принят», «скана нет»)
+    переезжали бы в проверки следующего; поэтому каждый тест начинается с
+    пустого журнала и заканчивается тоже без него.
+    """
+    eventlog.reset()
+    slam.reset_journal_notes()
+    yield
+    eventlog.reset()
+    slam.reset_journal_notes()
+
+
+@pytest.fixture(autouse=True)
+def isolated_found_lidar(tmp_path_factory, monkeypatch):
+    """Состояние лидара — робота, а не теста: файл подсказки и peer-адреса.
+
+    ``data/lidar-found.json`` («лидар был тут») влияет на порядок перебора
+    портов, поэтому каждый тест пишет и читает свой файл во временной папке.
+    Peer-адреса по умолчанию (8080/8090) выключены: иначе тестовый менеджер
+    берёт скан у **настоящего** запущенного пульта и ждёт «лидар не найден»
+    вечно. Тестам peer-обмена адреса задаются явно.
+    """
+    monkeypatch.setenv(
+        "RC_LIDAR_FOUND_FILE",
+        str(tmp_path_factory.mktemp("lidar-found") / "lidar-found.json"),
+    )
+    monkeypatch.setenv("RC_LIDAR_PEER_URLS", "")
 
 
 @pytest.fixture

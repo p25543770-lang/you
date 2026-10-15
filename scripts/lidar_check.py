@@ -11,6 +11,13 @@
     .venv/bin/python scripts/lidar_check.py --port /dev/ttyUSB0 --baud 256000
     .venv/bin/python scripts/lidar_check.py --json       # для скриптов
     .venv/bin/python scripts/lidar_check.py --save-env   # записать найденное в .env
+    .venv/bin/python scripts/lidar_check.py --ros        # ROS 2: пакеты драйверов и топик
+
+Лидар робота читается из ROS 2 (``RC_LIDAR_SOURCE=ros``/``auto``): драйвер
+публикует ``sensor_msgs/LaserScan`` в ``/scan``, а приложение подписывается на
+топик. Режим ``--ros`` отвечает на вопросы этого пути: поставлен ли ROS 2 и
+виден ли он из ``.venv`` (``rclpy``), какие пакеты драйверов лидара установлены,
+что запускать (``./scripts/ros2_lidar.sh``) и почему скана нет.
 
 ``--save-env`` сохраняет найденные порт/протокол/скорость/мотор в ``.env``
 (RC_LIDAR_PORT, RC_LIDAR_PROTOCOL, RC_LIDAR_BAUD, RC_LIDAR_MOTOR), чтобы
@@ -47,6 +54,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from robot_control import ros_env  # noqa: E402
 from robot_control.lidar import (  # noqa: E402
     LIDAR_MIN_POINTS,
     LIDAR_PROBE_TIMEOUT_S,
@@ -239,6 +247,58 @@ def save_env(report: dict, path: Path = ENV_FILE) -> dict:
     return changes
 
 
+def ros_report(as_json: bool) -> int:
+    """Отчёт по пути «ROS 2 → /scan → приложение».
+
+    Ничего не запускает: показывает, что найдено в системе и что делать. Код
+    возврата 0, если ROS 2 и ``rclpy`` доступны (тогда ``ros2_lidar.sh`` имеет
+    шанс поднять драйвер), 1 — если ROS 2 нет или он не виден из этого
+    интерпретатора.
+    """
+    info = ros_env.describe()
+    source_mode = (os.environ.get("RC_LIDAR_SOURCE") or "auto").strip().lower()
+    topic = info["topic"]
+    drivers = {name: found for name, found in (info.get("drivers") or {}).items()}
+    installed = sorted(package for group in drivers.values() for package in group)
+    lines = [
+        "Источник скана (RC_LIDAR_SOURCE): %s" % source_mode,
+        "ROS 2: %s" % (info.get("prefix") or "не найден"),
+        "дистрибутив: %s" % (info.get("distro") or "—"),
+        "rclpy в этом интерпретаторе: %s" % ("есть" if info.get("available") else "НЕТ"),
+        "топик скана: %s" % topic,
+        "рабочее пространство проекта: %s" % (info.get("workspace") or "не собрано"),
+    ]
+    if installed:
+        lines.append("пакеты драйверов лидара: %s" % ", ".join(sorted(set(installed))))
+    else:
+        lines.append("пакеты драйверов лидара: не найдено ни одного")
+    for name, found in drivers.items():
+        if found:
+            lines.append("  • %s: %s" % (name, ", ".join(found)))
+    if info.get("hint"):
+        lines.append("подсказка: %s" % info["hint"])
+    lines.append("запустить драйвер: %s" % info.get("launch"))
+    lines.append("проверить частоту: ros2 topic hz %s" % topic)
+
+    if as_json:
+        log(json.dumps({
+            "ok": bool(info.get("available")),
+            "source": source_mode,
+            "ros": info,
+            "installed_drivers": sorted(set(installed)),
+        }, ensure_ascii=False, indent=2))
+    else:
+        log("Проверка ROS 2 для лидара (путь «ROS 2 → %s → приложение»):\n" % topic)
+        for line in lines:
+            log(line)
+        log()
+        if info.get("available"):
+            log("Итог: ROS 2 виден из приложения — запусти ./scripts/ros2_lidar.sh")
+        else:
+            log("Итог: ROS 2 не виден из этого интерпретатора — ./scripts/ros2_setup.sh (поставит и соберёт сам)")
+    return 0 if info.get("available") else 1
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         description="Проверка лидара: порт, скорость, протокол, точки (робот не трогаем)",
@@ -260,7 +320,16 @@ def main(argv=None) -> int:
                              "(после этого веб-приложения нужно перезапустить)")
     parser.add_argument("--env-file", default=str(ENV_FILE),
                         help="файл .env для --save-env (по умолчанию .env проекта)")
+    parser.add_argument("--ros", action="store_true",
+                        help="проверить ROS 2-путь лидара (дистрибутив, rclpy, пакеты "
+                             "драйверов, топик) вместо перебора USB-портов")
     args = parser.parse_args(argv)
+
+    if args.ros:
+        if argv is None:
+            # Как у приложений: rclpy нужен LD_LIBRARY_PATH с самого старта.
+            ros_env.reexec_with_ros_env()
+        return ros_report(args.json)
 
     if not args.json:
         log("Проверка лидара: пульт/киоск можно не останавливать —\n"
@@ -334,9 +403,8 @@ def main(argv=None) -> int:
                 if new is None:
                     continue
                 log("  %s=%s%s" % (key, new, "" if old in (None, new) else "  (было: %s)" % (old or "—")))
-            log("Теперь перезапусти веб-приложения, иначе они останутся со старыми настройками:")
-            log("  ./scripts/stop.sh && ./scripts/start.sh &   # пульт (8080)")
-            log("  ./scripts/kiosk.sh                        # бортовой экран (8090)")
+            log("Теперь перезапусти приложение, иначе оно останется со старыми настройками:")
+            log("  ./scripts/stop.sh && ./scripts/start_robot.sh  # оба экрана")
             log("Проверка, что скан дошёл до обоих экранов:")
             log("  .venv/bin/python scripts/lidar_web_check.py")
             return 0
@@ -353,6 +421,13 @@ def main(argv=None) -> int:
         return 0
 
     log("Итог: лидар не найден.")
+    info = ros_env.describe()
+    if info.get("available"):
+        log("• ROS 2 в системе есть: скан должен отдавать драйвер лидара, а не этот перебор —")
+        log("  запусти ./scripts/ros2_lidar.sh и проверь .venv/bin/python scripts/lidar_check.py --ros;")
+    else:
+        log("• ROS 2 не найден: лидар читается напрямую по USB (RC_LIDAR_SOURCE=auto/serial),")
+        log("  а чтобы отдать его драйверу ROS 2 — ./scripts/ros2_setup.sh (ставит ROS 2 сам);")
     log("• скорость зависит от модели: A1/A2M8 — 115200, A2M7/A2M12/A3/S1 — 256000,")
     log("  C1 — 460800, LD06/LD19 и LDS-01/LDS-02 (TurtleBot3) — 230400")
     log("  (у RPLIDAR A3 на адаптере есть переключатель 115200/256000);")

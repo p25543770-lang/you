@@ -50,7 +50,7 @@ class Config:
     pbkdf2_iterations: int = 200_000
     testing: bool = False
     # --- интерфейс RUS SLAM ---
-    slam_source: str = "auto"          # auto | sim | serial | ros | master
+    slam_source: str = "master"        # master | auto | sim | serial | ros
     slam_ports: tuple[str, ...] = ()   # UART-порты для serial
     slam_lock_file: Path = PROJECT_ROOT / "data" / "lock.json"
     slam_pin: str = ""                 # пусто → заводской PIN из backend.py
@@ -77,7 +77,7 @@ class Config:
             session_lifetime_minutes=int(os.environ.get("RC_SESSION_MINUTES", "60")),
             pbkdf2_iterations=int(os.environ.get("RC_PBKDF2_ITERATIONS", "200000")),
             testing=_env_bool("RC_TESTING", False),
-            slam_source=(os.environ.get("RC_SLAM_SOURCE") or "auto").strip().lower(),
+            slam_source=(os.environ.get("RC_SLAM_SOURCE") or "master").strip().lower(),
             slam_ports=tuple(
                 p.strip()
                 for p in (os.environ.get("RC_SLAM_PORTS") or "").split(",")

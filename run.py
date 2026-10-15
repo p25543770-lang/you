@@ -165,6 +165,13 @@ def run_dev(config: Config) -> int:
 def main() -> int:
     ensure_env_file()
     config = Config.from_env()
+    # ROS 2 (лидар через /scan): rclpy — C-расширение, его библиотеки ищутся по
+    # LD_LIBRARY_PATH, который читается только при старте процесса. Если ROS 2
+    # стоит, а мы запущены без его окружения — перезапускаемся с source
+    # setup.bash (один раз; дальше его унаследует и gunicorn).
+    from robot_control import ros_env
+
+    ros_env.reexec_with_ros_env([str(Path(__file__).resolve()), *sys.argv[1:]])
     ensure_operator(config)
     log_operators(config)
     if "--dev" in sys.argv:
