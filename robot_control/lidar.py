@@ -13,13 +13,24 @@
 Порт можно закрепить вручную: ``RC_LIDAR_PORT=/dev/ttyUSB1`` (можно список или
 glob). Остальные настройки: ``RC_LIDAR_BAUD``, ``RC_LIDAR_PROTOCOL``
 (auto | rplidar | ld06 | lds01), ``RC_LIDAR_MOTOR`` (auto | none | dtr-low |
-dtr-high | rts-low | rts-high), ``RC_LIDAR_AUTOPROBE``, ``RC_LIDAR_EXCLUDE``.
+dtr-high | rts-low | rts-high), ``RC_LIDAR_AUTOPROBE``, ``RC_LIDAR_EXCLUDE``,
+``RC_LIDAR_PRIORITY_S``.
 
 Почему столько осторожности: на роботе одновременно работают два процесса с этим
 менеджером (пульт оператора на 8080 и бортовой экран на 8090), а USB-порт лидара
 можно открыть только один раз. Поэтому порт защищён межпроцессным замком, а
 второй процесс берёт готовый скан у первого по HTTP — иначе половина экранов
 навсегда показывала бы «нет скана» без единой строчки в журнале.
+
+Замка мало: он говорит только «занят / свободен». Поэтому в ``data/`` рядом с
+замком лежат ещё два файла состояния (по одному на процесс) —
+``lidar-state-<pid>.json`` («ищу порт» / «читаю такой-то порт») и
+``chassis-ports-<pid>.json`` («на этих портах подтверждены модули шасси»). По ним
+источник данных шасси уступает порты лидару на время поиска
+(``RC_LIDAR_PRIORITY_S``, 20 с), а лидар не перебирает порты модулей: без этого
+на роботе с двумя адаптерами оба перебора сталкивались на каждом круге и в
+журнале появлялось «лидар не найден: все 2 порт(ов) заняты другой программой»,
+хотя порты держало это же приложение.
 
 Диагностика: ``python3 scripts/lidar_check.py`` печатает, что видно на портах;
 причина отсутствия скана лежит в ``GET /api/lidar`` (поле ``reason``) и на
@@ -54,6 +65,11 @@ LIDAR_DEFAULT_RANGE_M = 10.0
 
 #: Таймаут одного чтения порта, с: от него зависят отклик на stop() и переподключение.
 SERIAL_READ_TIMEOUT_S = 0.2
+#: Сколько ждём готовности порта к записи (команды SCAN и запуска LDS-01).
+#: Без него pyserial ждёт дескриптор в ``select()`` **без ограничения времени**:
+#: на вставшем передатчике (залипший USB-адаптер, забитый буфер) ``write(SCAN)``
+#: останавливал поток поиска навсегда — лидар молча переставал искать порт.
+SERIAL_WRITE_TIMEOUT_S = 0.5
 #: Сколько ждём реальные точки, прежде чем считать набор параметров неудачным.
 LIDAR_PROBE_TIMEOUT_S = 1.4
 #: Сколько ждём точки, прежде чем считать, что поток данных оборвался.
@@ -163,6 +179,26 @@ LDS01_WARMUP_PACKETS = 12
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
+#: Сколько секунд источник данных шасси уступает порты лидару, пока тот ищет свой
+#: (``RC_LIDAR_PRIORITY_S``). Окно конечно не случайно: если лидара на роботе нет
+#: вовсе, бесконечная уступка оставила бы оба экрана без телеметрии модулей.
+LIDAR_PRIORITY_S = 20.0
+#: Подкаталог ``data/`` с журналом портов (отдельно от замков ``data/lidar-*.lock``).
+#: Отдельный каталог нужен не для красоты: статус лидара читают оба экрана по
+#: нескольку раз в секунду, а в ``data/`` за месяцы работы накапливаются сотни
+#: файлов замков — сканировать такой каталог на каждый запрос нельзя.
+PORTS_STATE_SUBDIR = "ports"
+#: Сколько секунд держится кэш журнала портов. Файлы читают и запросы к
+#: ``/api/lidar``, и потоки чтения портов (модули спрашивают перед каждой
+#: проверкой), а ``data/`` на роботе лежит на SD-карте.
+PORTS_STATE_CACHE_S = 0.5
+#: Через сколько секунд файл состояния лидара считается мёртвым. Менеджер
+#: обновляет его каждый круг поиска (``LIDAR_RESCAN_S`` = 2 с), так что запас
+#: четырёхкратный: упавший или занятый процесс порты больше не держит.
+LIDAR_STATE_TTL_S = 8.0
+#: Сколько живёт отметка «на этом порту подтверждены модули шасси» без обновления.
+MODULE_TAG_TTL_S = 60.0
+
 
 def _env_bool(name: str, default: bool = False) -> bool:
     raw = os.environ.get(name)
@@ -180,6 +216,17 @@ def _env_int(name: str) -> Optional[int]:
     except ValueError:
         log.warning("Лидар: %s=%r — не число, игнорирую", name, raw)
         return None
+
+
+def _env_float(name: str, default: float) -> float:
+    raw = (os.environ.get(name) or "").strip().replace(",", ".")
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        log.warning("Лидар: %s=%r — не число, беру %s", name, raw, default)
+        return default
 
 
 def pyserial_version() -> Optional[str]:
@@ -889,6 +936,494 @@ def port_locked_by_other(port: str) -> bool:
     return False
 
 
+# ============================================================================
+# Общий журнал портов: кто их ищет и где подтвердились модули шасси
+# ============================================================================
+#
+# Замка порта (выше) мало: он говорит «занят / свободен» и не различает, кто
+# именно держит порт. Из-за этого на роботе с двумя адаптерами (модули шасси и
+# лидар) складывалась тупиковая картина: источник данных шасси брал порты на
+# свою двухсекундную проверку ровно в тот момент, когда лидар начинал перебор,
+# и лидар писал «лидар не найден: все 2 порт(ов) заняты другой программой», а
+# дальше в журнале было тихо (`_set_status` пишет причину только при её смене).
+# Читать это как «лидар сломан» нельзя, но и понять, что происходит, по журналу
+# тоже нельзя. Поэтому два процесса робота обмениваются ещё и состоянием:
+#
+#   * ``data/lidar-state-<pid>.json`` — что делает менеджер лидара: ищет порт
+#     (`searching`, пока действует приоритет ``RC_LIDAR_PRIORITY_S``), уже читает
+#     его (`found`, с именем порта) или живёт на скане второго процесса (`peer`);
+#   * ``data/chassis-ports-<pid>.json`` — какие порты источник данных шасси
+#     подтвердил кадрами телеметрии: лидар такие порты не перебирает, а модули,
+#     в свою очередь, не уступают их лидару.
+#
+# Файлов ровно по одному на процесс: чужие записи никто не переписывает, а
+# живость проверяется по pid (упавший процесс порты не держит) и по времени.
+
+
+def _same_port(first: str, second: str) -> bool:
+    """Один и тот же порт по устройству: ``/dev/ttyUSB1`` и symlink из by-id."""
+    if first == second:
+        return True
+    try:
+        return os.path.realpath(first) == os.path.realpath(second)
+    except OSError:  # pragma: no cover - realpath практически не падает
+        return False
+
+
+def _port_key(port: str) -> str:
+    """Ключ порта для журналов: имя устройства, а не путь к symlink'у."""
+    try:
+        return os.path.basename(os.path.realpath(port) or port)
+    except OSError:  # pragma: no cover
+        return os.path.basename(port)
+
+
+def _pid_alive(pid: int) -> bool:
+    """Жив ли процесс, записавший состояние (после падения файл — мусор)."""
+    if pid <= 0:
+        return True                     # pid неизвестен — решает только TTL
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except OSError:                     # нет прав спросить — считаем живым
+        return True
+    return True
+
+
+def _write_state_file(path: Path, payload: dict[str, Any]) -> None:
+    """Пишет JSON состояния атомарно: читатель не увидит половину файла."""
+    tmp = path.with_name(path.name + ".tmp")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp.write_text(json.dumps(payload, ensure_ascii=False), "utf-8")
+        os.replace(tmp, path)
+    except OSError as exc:
+        log.debug("Лидар: не записать %s: %s", path.name, exc)
+        try:
+            tmp.unlink()
+        except OSError:
+            pass
+
+
+def _read_state_file(path: Path, ttl: float) -> Optional[dict[str, Any]]:
+    """Читает файл состояния: None — файла нет, он битый, старый или мёртвый."""
+    try:
+        data = json.loads(path.read_text("utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    try:
+        at = float(data.get("at") or 0.0)
+        pid = int(data.get("pid") or 0)
+    except (TypeError, ValueError):
+        return None
+    if ttl > 0 and time.time() - at > ttl:
+        return None
+    if not _pid_alive(pid):
+        return None
+    return data
+
+
+def ports_state_dir() -> Path:
+    """Каталог журнала портов: ``data/ports`` (см. ``PORTS_STATE_SUBDIR``)."""
+    return DATA_DIR / PORTS_STATE_SUBDIR
+
+
+def lidar_state_file(pid: Optional[int] = None) -> Path:
+    """Файл состояния лидара этого процесса (что он делает с портами).
+
+    Записей в файле может быть несколько — по одной на сеанс поиска
+    (см. :func:`_new_searcher`): менеджеров в одном процессе бывает больше одного.
+    """
+    return ports_state_dir() / ("lidar-state-%d.json" % (os.getpid() if pid is None else pid))
+
+
+#: Ключ записи, когда состояние пишут напрямую (:func:`publish_lidar_state` без
+#: своего сеанса): так писали прежние версии робота, так пишут диагностика и тесты.
+_SEARCHER_DEFAULT = "default"
+
+#: Имена сеансов поиска: у каждого менеджера своя запись в файле состояния
+#: процесса. Пульт и бортовой экран могут жить в одном процессе (в тестах
+#: менеджеров и вовсе несколько), и одно поле ``since`` на процесс означало бы,
+#: что запись соседа, начавшего искать раньше, гасит окно приоритета живого
+#: поиска: порты достались бы модулям шасси прямо посреди перебора лидара.
+_searcher_lock = threading.Lock()
+_searcher_seq = 0
+#: Файл состояния принадлежит процессу, но пишут в него его же потоки: свой замок
+#: нужен, чтобы «прочитать — поправить свою запись — записать» не потеряло чужую.
+_state_file_lock = threading.Lock()
+
+
+def _new_searcher() -> str:
+    """Имя нового сеанса поиска (ключ записи в файле состояния процесса)."""
+    global _searcher_seq
+    with _searcher_lock:
+        _searcher_seq += 1
+        return "s%d" % _searcher_seq
+
+
+def _state_records(payload: Any) -> dict[str, dict[str, Any]]:
+    """Записи о лидаре в файле состояния: сеанс поиска → запись.
+
+    ``{'pid', 'state', 'port', 'at', 'since'}`` (одна запись) — формат прежних
+    версий и ручных записей; читается как запись сеанса ``default``.
+    """
+    if not isinstance(payload, dict):
+        return {}
+    records = payload.get("records")
+    if isinstance(records, dict):
+        return {str(name): item for name, item in records.items() if isinstance(item, dict)}
+    if isinstance(payload.get("state"), str):
+        return {_SEARCHER_DEFAULT: {key: value for key, value in payload.items()
+                                    if key != "records"}}
+    return {}
+
+
+def _state_records_from_file(path: Path) -> dict[str, dict[str, Any]]:
+    """Записи из файла состояния как есть (без отсева по TTL): для правки своих."""
+    try:
+        payload = json.loads(path.read_text("utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return _state_records(payload)
+
+
+def _prune_state_records(records: dict[str, dict[str, Any]], now: float) -> None:
+    """Убирает записи, которые уже никто не прочитает: они старше ``LIDAR_STATE_TTL_S``."""
+    for name, record in list(records.items()):
+        try:
+            at = float(record.get("at") or 0.0)
+        except (TypeError, ValueError):
+            at = 0.0
+        if now - at > LIDAR_STATE_TTL_S:
+            del records[name]
+
+
+def _read_lidar_records(path: Path, ttl: float) -> list[dict[str, Any]]:
+    """Живые записи о лидаре из файла состояния: по одной на каждый сеанс поиска.
+
+    Мёртвый процесс, битый файл и записи старше ``ttl`` не отдаются: иначе файл
+    давно выключенного робота держал бы порты (см. :func:`lidar_holds_port`).
+    """
+    try:
+        payload = json.loads(path.read_text("utf-8"))
+    except (OSError, ValueError):
+        return []
+    if not isinstance(payload, dict):
+        return []
+    try:
+        pid = int(payload.get("pid") or 0)
+    except (TypeError, ValueError):
+        return []
+    if not _pid_alive(pid):
+        return []
+    now = time.time()
+    #: Окно, в котором лидар вообще вправе просить порты (см. ``_publish_state``).
+    window = _env_float("RC_LIDAR_PRIORITY_S", LIDAR_PRIORITY_S)
+    alive: list[dict[str, Any]] = []
+    for searcher, record in _state_records(payload).items():
+        try:
+            at = float(record.get("at") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if record.get("state") == "searching":
+            # «Ищу порт» ограничено не свежестью записи, а окном приоритета,
+            # которое считается от ``since``: круг поиска по чужому (шумному)
+            # устройству идёт десятками секунд, и источник данных шасси не должен
+            # решать, что лидар сдался, посреди круга. Запись без ``since`` или
+            # с истёкшим окном ничего не держит.
+            try:
+                since = float(record.get("since") or 0.0)
+            except (TypeError, ValueError):
+                continue
+            if not since or window <= 0.0 or now - since > window:
+                continue
+        elif ttl > 0 and now - at > ttl:
+            continue
+        item = dict(record)
+        item["pid"] = pid
+        item["searcher"] = searcher
+        alive.append(item)
+    return alive
+
+
+def publish_lidar_state(state: str, port: Optional[str] = None, *,
+                        since: Optional[float] = None,
+                        searcher: str = _SEARCHER_DEFAULT) -> None:
+    """Записывает состояние лидара для источника данных шасси.
+
+    ``searching`` — порт ещё не найден: пока состояние свежо и с начала поиска
+    прошло меньше ``RC_LIDAR_PRIORITY_S``, модули шасси не занимают порты под
+    свою проверку. Без этого перебор лидара упирался в «занят» на порту, который
+    держало своё же приложение. ``found`` — порт найден и читается (``port``):
+    этот порт модули не трогают. ``peer`` — скан берётся у второго процесса:
+    собственного перебора нет, приоритет лидару не нужен.
+
+    ``since`` — начало текущей полосы поиска: окно приоритета считается от него,
+    поэтому обновление файла каждый круг поиска не продлевает окно до бесконечности.
+
+    ``searcher`` — сеанс поиска внутри процесса (:func:`_new_searcher`): у каждого
+    своя запись, поэтому второй менеджер не затирает состояние первого.
+    """
+    now = time.time()
+    if since is None:
+        since = now if state == "searching" else 0.0
+    path = lidar_state_file()
+    with _state_file_lock:
+        records = _state_records_from_file(path)
+        records[searcher] = {"state": state, "port": port or None,
+                             "at": now, "since": float(since)}
+        _prune_state_records(records, now)
+        _write_state_file(path, {"pid": os.getpid(), "at": now, "records": records})
+    _journal_changed()
+
+
+def clear_lidar_state(searcher: str = "") -> None:
+    """Убирает состояние лидара: процесс останавливается и порты больше не держит.
+
+    ``searcher`` — убрать запись только этого сеанса поиска (``stop()`` менеджера),
+    не трогая остальных: менеджеров в одном процессе бывает несколько.
+    """
+    path = lidar_state_file()
+    if not searcher:
+        try:
+            path.unlink()
+        except OSError:
+            pass
+        _journal_changed()
+        return
+    with _state_file_lock:
+        records = _state_records_from_file(path)
+        if searcher in records:
+            del records[searcher]
+            if records:
+                _write_state_file(path, {"pid": os.getpid(), "at": time.time(),
+                                         "records": records})
+            else:
+                try:
+                    path.unlink()
+                except OSError:
+                    pass
+    _journal_changed()
+
+
+_journal_lock = threading.Lock()
+#: Снимок журнала: {'at': время, 'states': [...], 'modules': {...}}. Журнал читают
+#: и запросы к /api/lidar, и потоки чтения портов, поэтому читаем его не чаще
+#: ``PORTS_STATE_CACHE_S``; свои записи сбрасывают кэш сразу (см. ``_journal_changed``).
+_journal: dict[str, Any] = {"at": 0.0, "states": [], "modules": set()}
+
+
+def _journal_changed() -> None:
+    """Своя запись: журнал перечитываем сразу, а не через кэш."""
+    with _journal_lock:
+        _journal["at"] = 0.0
+
+
+def _journal_snapshot() -> dict[str, Any]:
+    """Снимок журнала портов: состояния лидара и отметки портов модулей.
+
+    Возвращается общий кэш: наружу из него отдаются только копии (см.
+    :func:`_lidar_states` и :func:`chassis_module_ports`).
+    """
+    now = time.time()
+    with _journal_lock:
+        if _journal["at"] and now - _journal["at"] < PORTS_STATE_CACHE_S:
+            return _journal
+        states: list[dict[str, Any]] = []
+        for path in sorted(ports_state_dir().glob("lidar-state-*.json")):
+            states.extend(_read_lidar_records(path, LIDAR_STATE_TTL_S))
+        modules: set[str] = set()
+        for path in sorted(ports_state_dir().glob("chassis-ports-*.json")):
+            data = _read_state_file(path, MODULE_TAG_TTL_S)
+            if data is None:
+                continue
+            entries = data.get("ports")
+            if not isinstance(entries, dict):
+                continue
+            for entry in entries.values():
+                if not isinstance(entry, dict):
+                    continue
+                try:
+                    at = float(entry.get("at") or 0.0)
+                except (TypeError, ValueError):
+                    continue
+                if at and now - at > MODULE_TAG_TTL_S:
+                    continue
+                for key in ("port", "device"):
+                    value = entry.get(key)
+                    if isinstance(value, str) and value:
+                        modules.add(value)
+        _journal["at"] = now
+        _journal["states"] = states
+        _journal["modules"] = modules
+        return _journal
+
+
+def _lidar_states() -> list[dict[str, Any]]:
+    """Состояние всех живых процессов робота с лидаром (пульт 8080 и борт 8090)."""
+    return list(_journal_snapshot()["states"])
+
+
+def lidar_search_priority() -> float:
+    """Сколько секунд ещё действует приоритет лидара на порты (0 — не действует).
+
+    Приоритет — не «навсегда»: окно ``RC_LIDAR_PRIORITY_S`` (по умолчанию
+    ``LIDAR_PRIORITY_S``) от начала текущего поиска. Лидара на роботе может не
+    быть вовсе, и тогда бесконечная уступка портов оставила бы экраны без
+    телеметрии модулей. После окна модули проверяют порты как раньше, а лидар
+    получает окна между их проверками.
+    """
+    window = _env_float("RC_LIDAR_PRIORITY_S", LIDAR_PRIORITY_S)
+    if window <= 0.0:
+        return 0.0
+    now = time.time()
+    left = 0.0
+    for state in _lidar_states():
+        if state.get("state") != "searching":
+            continue
+        try:
+            since = float(state.get("since") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        left = max(left, window - (now - since))
+    return left if left > 0.0 else 0.0
+
+
+def lidar_active_port() -> Optional[str]:
+    """Порт, который лидар читает прямо сейчас (по состоянию всех процессов)."""
+    for state in _lidar_states():
+        if state.get("state") != "found":
+            continue
+        port = state.get("port")
+        if isinstance(port, str) and port and os.path.exists(port):
+            return port
+    return None
+
+
+def lidar_holds_port(port: str) -> bool:
+    """Не трогать этот порт: лидар его ищет (приоритет) или уже читает.
+
+    Источник данных шасси спрашивает это перед своей проверкой порта (см.
+    ``SerialSource(yield_to_lidar=…)``). Порт, который уже доказал, что на нём
+    модули шасси, не уступается никогда: иначе телеметрия пропадала бы с обоих
+    экранов на каждом круге поиска лидара.
+    """
+    if not port:
+        return False
+    if module_port_confirmed(port):
+        return False
+    active = lidar_active_port()
+    if active is not None and _same_port(active, port):
+        return True
+    return lidar_search_priority() > 0.0
+
+
+_module_ports_lock = threading.Lock()
+
+
+def module_ports_file(pid: Optional[int] = None) -> Path:
+    """Файл этого процесса со списком портов, на которых подтвердились модули."""
+    return ports_state_dir() / ("chassis-ports-%d.json" % (os.getpid() if pid is None else pid))
+
+
+def _own_module_ports() -> dict[str, Any]:
+    """Своя запись (вызывать под ``_module_ports_lock``): имя порта → отметка."""
+    data = _read_state_file(module_ports_file(), ttl=0.0)
+    ports = data.get("ports") if isinstance(data, dict) else None
+    if not isinstance(ports, dict):
+        return {}
+    return {str(key): value for key, value in ports.items() if isinstance(value, dict)}
+
+
+def tag_module_port(port: str) -> None:
+    """Отмечает порт как подтверждённый порт модулей шасси (его видит лидар).
+
+    Без этой отметки перебор лидара каждый круг упирался в порт, который держит
+    источник данных шасси, и на экране появлялось «занят другой программой» — хотя
+    порт занимало это же приложение. Отметка живёт, пока идут кадры телеметрии
+    (:func:`untag_module_port` снимает её, если порт замолчал).
+    """
+    if not port:
+        return
+    with _module_ports_lock:
+        entries = _own_module_ports()
+        entries[_port_key(port)] = {
+            "port": port,
+            "device": os.path.realpath(port) or port,
+            "at": time.time(),
+        }
+        _write_state_file(
+            module_ports_file(),
+            {"pid": os.getpid(), "at": time.time(), "ports": entries},
+        )
+    _journal_changed()
+
+
+def untag_module_port(port: str) -> None:
+    """Снимает отметку: окно проверки кончилось, а кадров телеметрии не было.
+
+    Устройство могли выдернуть или заменить лидаром на том же USB — держать за
+    портом чужую отметку нельзя, иначе лидар никогда его не откроет.
+    """
+    if not port:
+        return
+    removed = False
+    with _module_ports_lock:
+        entries = _own_module_ports()
+        if entries.pop(_port_key(port), None) is not None:
+            removed = True
+            if entries:
+                _write_state_file(
+                    module_ports_file(),
+                    {"pid": os.getpid(), "at": time.time(), "ports": entries},
+                )
+            else:
+                try:
+                    module_ports_file().unlink()
+                except OSError:
+                    pass
+    if removed:
+        _journal_changed()
+
+
+def chassis_module_ports() -> set[str]:
+    """Порты, на которых прямо сейчас подтверждены модули шасси (все процессы).
+
+    Возвращаются и имя, и устройство порта: лидар сравнивает по realpath, потому
+    что одно устройство может быть названо и ``/dev/ttyUSB0``, и symlink'ом из
+    ``/dev/serial/by-id``.
+    """
+    return set(_journal_snapshot()["modules"])
+
+
+def module_port_confirmed(port: str) -> bool:
+    """Отмечен ли порт как порт модулей шасси (сравнение по устройству)."""
+    if not port:
+        return False
+    marked = chassis_module_ports()
+    if not marked:
+        return False
+    if port in marked:
+        return True
+    return any(_same_port(known, port) for known in marked)
+
+
+def dedup_ports(ports: Iterable[str]) -> list[str]:
+    """Список портов без повторов одного устройства (для статуса и журналов)."""
+    seen: set[str] = set()
+    result: list[str] = []
+    for port in sorted({p for p in ports if p}, key=_natural_key):
+        real = os.path.realpath(port)
+        if real in seen:
+            continue
+        seen.add(real)
+        result.append(port)
+    return result
+
+
 def lidar_reserved_ports() -> set[str]:
     """Порты, которые отданы лидару настройками (их не должны занимать модули шасси).
 
@@ -1064,6 +1599,8 @@ def usb_diagnostics() -> dict[str, Any]:
     """
     blocked = excluded_ports()
     blocked_real = {os.path.realpath(p) for p in blocked}
+    modules = chassis_module_ports()
+    modules_real = {os.path.realpath(p) for p in modules}
     ports = []
     for path in discover_ports(configured=os.environ.get("RC_LIDAR_PORT")):
         ports.append({
@@ -1071,8 +1608,11 @@ def usb_diagnostics() -> dict[str, Any]:
             "device": os.path.realpath(path),
             "accessible": os.access(path, os.R_OK | os.W_OK),
             "excluded": os.path.realpath(path) in blocked_real,
+            # Порт, который источник данных шасси подтвердил телеметрией: лидар
+            # его не перебирает, и «занят» на нём — не поломка лидара.
+            "chassis_module": os.path.realpath(path) in modules_real,
         })
-    usable = [p for p in ports if not p["excluded"]]
+    usable = [p for p in ports if not p["excluded"] and not p["chassis_module"]]
     pyserial = pyserial_version()
     if pyserial is None:
         summary = ("pyserial не установлен в интерпретаторе %s — USB-лидар не "
@@ -1082,8 +1622,12 @@ def usb_diagnostics() -> dict[str, Any]:
         summary = ("USB/serial-порты не обнаружены: проверь питание, USB-кабель "
                    "с передачей данных и драйвер USB-переходника")
     elif not usable:
-        summary = ("Все обнаруженные порты исключены настройками мастера/шасси: "
-                   "проверь RC_SLAM_PORT, RC_SLAM_PORTS и RC_LIDAR_EXCLUDE")
+        if modules and not blocked:
+            summary = ("Все обнаруженные порты подтверждены как модули шасси "
+                       "(их читает источник данных шасси): лидар не трогает эти порты.")
+        else:
+            summary = ("Все обнаруженные порты исключены настройками мастера/шасси: "
+                       "проверь RC_SLAM_PORT, RC_SLAM_PORTS и RC_LIDAR_EXCLUDE")
     elif not any(p["accessible"] for p in usable):
         summary = ("Нет прав чтения/записи портов: добавь пользователя службы "
                    "в группу dialout и перезапусти его сеанс/службу")
@@ -1099,6 +1643,9 @@ def usb_diagnostics() -> dict[str, Any]:
         "pyserial": pyserial,
         "python": sys.executable,
         "config_conflict": conflict or None,
+        # Порты, подтверждённые модулями шасси (data/chassis-ports-<pid>.json):
+        # ровно то, что лидар пропускает в своём переборе.
+        "chassis_ports": dedup_ports(modules),
     }
 
 
@@ -1367,11 +1914,21 @@ def probe_port(
 
 
 def open_serial(serial_module, port: str, baud: int):
-    """Открывает порт лидара с нашим таймаутом (и эксклюзивно, если умеет pyserial)."""
+    """Открывает порт лидара с нашими таймаутами (и эксклюзивно, если умеет pyserial).
+
+    ``write_timeout`` ставим после открытия: без него запись команды в порт
+    (``SCAN`` у RPLIDAR, ``b`` у LDS-01) ждёт готовности дескриптора бесконечно,
+    и вставший передатчик навсегда останавливает поток поиска лидара.
+    """
     try:
-        return serial_module.Serial(port, baud, timeout=SERIAL_READ_TIMEOUT_S, exclusive=True)
+        ser = serial_module.Serial(port, baud, timeout=SERIAL_READ_TIMEOUT_S, exclusive=True)
     except TypeError:  # pyserial < 3.3 — параметра exclusive ещё нет
-        return serial_module.Serial(port, baud, timeout=SERIAL_READ_TIMEOUT_S)
+        ser = serial_module.Serial(port, baud, timeout=SERIAL_READ_TIMEOUT_S)
+    try:
+        ser.write_timeout = SERIAL_WRITE_TIMEOUT_S
+    except Exception:  # noqa: BLE001 — не pyserial (тесты, обёртки): там блокировок нет
+        pass
+    return ser
 
 
 # ============================================================================
@@ -1426,8 +1983,20 @@ class LidarManager:
         self._sticky: Optional[str] = None
         self.tried: list[dict[str, Any]] = []
         self._logged_ports: tuple[str, ...] = ()
+        self._logged_modules: tuple[str, ...] = ()
         self._logged_reason = ""
         self._logged_hint = ""
+        #: Начало текущей полосы поиска порта и время последней записи состояния
+        #: (``data/lidar-state-<pid>.json``): по нему источник данных шасси
+        #: понимает, что порты пока нужны лидару (см. :func:`lidar_holds_port`).
+        self._search_since = 0.0
+        self._state_written = 0.0
+        self._state_written_kind = ""
+        #: Порт, с которого сейчас идут витки (для обновления состояния).
+        self._active_port: Optional[str] = None
+        #: Сеанс поиска этого менеджера в файле состояния процесса: записи
+        #: нескольких менеджеров в одном процессе не затирают друг друга.
+        self._searcher = _new_searcher()
 
     # --------------------------- жизненный цикл --------------------------- #
 
@@ -1439,10 +2008,16 @@ class LidarManager:
         return cls._instance
 
     def start(self) -> None:
-        """Запускает фоновый опрос serial-лидара и ROS 2 (если доступно)."""
+        """Запускает фоновый опрос serial-лидара и ROS 2 (если доступно).
+
+        Состояние «ищу порт» пишется сразу: источник данных шасси поднимается тем
+        же приложением и должен успеть уступить порты, а не занять их своей
+        проверкой (см. :func:`lidar_holds_port`).
+        """
         if self._thread and self._thread.is_alive():
             return
         self._stop = False
+        self._publish_state("searching")
         self._try_start_ros()
         self._thread = threading.Thread(target=self._serial_worker, daemon=True)
         self._thread.start()
@@ -1450,6 +2025,9 @@ class LidarManager:
     def stop(self) -> None:
         self._stop = True
         self._release_port_lock()
+        # Состояние в общем журнале: без этого мёртвый процесс держал бы порты
+        # «в приоритете» лидара, пока не истечёт TTL файла.
+        self._clear_state()
 
     # ----------------------------- приём данных ---------------------------- #
 
@@ -1547,6 +2125,12 @@ class LidarManager:
             "hint": self.hint,
             "detected": dict(self.detected) if self.detected else None,
             "candidates": list(self.candidates),
+            # Порты, подтверждённые источником данных шасси: лидар их не трогает.
+            # Видно прямо в статусе — иначе «занят» на порту модулей выглядит как
+            # сломанный лидар, хотя порт держит это же приложение.
+            "chassis_ports": dedup_ports(chassis_module_ports()),
+            # Сколько секунд ещё модули шасси уступают порты лидару (0 — не уступают).
+            "priority_s": round(lidar_search_priority(), 1),
             # Результат последнего круга перебора: видно, что проверены все
             # порты, а не один (``ok`` — на нём пошли данные).
             "tried": [dict(item) for item in self.tried],
@@ -1555,7 +2139,8 @@ class LidarManager:
 
     # --------------------------- поиск и чтение --------------------------- #
 
-    def candidate_ports(self, *, wide: bool = True) -> list[str]:
+    def candidate_ports(self, *, wide: bool = True,
+                        module_ports: Iterable[str] = ()) -> list[str]:
         """Порты для очередного круга перебора, начиная со следующего за прошлым.
 
         Перебор идёт по кругу: если лидар стоял на одном порту, а потом его
@@ -1565,12 +2150,18 @@ class LidarManager:
         ``RC_LIDAR_PORT`` и именованные symlink'и; полный перебор в этом случае
         делает :meth:`_serial_worker` на следующем круге.
 
+        ``module_ports`` — порты, на которых источник данных шасси подтвердил
+        модули телеметрией (см. :func:`chassis_module_ports`). Он держит их
+        открытыми, поэтому перебирать их бессмысленно: без этого перебор каждый
+        круг упирался в «занят» на порту модулей и тянул на него секунды.
+
         Порт, на котором лидар уже отвечал (``self._sticky``), ставится первым:
         после короткого обрыва связи скан возвращается сразу, а не после обхода
         всех мёртвых портов.
         """
+        excluded = set(self.excluded) | {p for p in module_ports if p}
         ports = discover_ports(
-            configured=self.port, autoprobe=wide, excluded=self.excluded
+            configured=self.port, autoprobe=wide, excluded=excluded
         )
         if ports:
             known = self._sticky_port(ports)
@@ -1642,6 +2233,51 @@ class LidarManager:
             self.scan = list(points)
             self.scan_at = time.time()
             self.source_type = source_label
+        if self._active_port:
+            # Порт читается, витки идут — обновляем состояние (не чаще throttle в
+            # ``_publish_state``), чтобы источник данных шасси не трогал этот порт
+            # и видел, что лидар на связи: одна запись при находке протухла бы,
+            # если лидар читает поток непрерывно и новых находок не сообщает.
+            self._publish_state("found", self._active_port)
+
+    def _clear_state(self) -> None:
+        """Убирает состояние из общего журнала: порты лидару больше не нужны."""
+        clear_lidar_state(self._searcher)
+        self._state_written = 0.0
+        self._state_written_kind = ""
+        # Полоса поиска прервана: следующая начнёт окно приоритета заново.
+        self._search_since = 0.0
+
+    def _publish_state(self, state: str, port: Optional[str] = None) -> None:
+        """Пишет в общий журнал, что менеджер делает с портами.
+
+        Состояние читает источник данных шасси (:func:`lidar_holds_port`): пока
+        идёт поиск (``searching``), порты уступаются лидару — окно
+        ``RC_LIDAR_PRIORITY_S`` (20 с) от начала поиска. ``found`` с именем порта
+        — этот порт модули не трогают вовсе. ``peer`` — скан берётся у второго
+        процесса робота: собственного перебора нет, уступать нечего.
+
+        Файл обновляется не чаще, чем раз в половину TTL: он читается и в каждом
+        запросе к ``/api/lidar``, а круги поиска идут каждые 2 с.
+        """
+        now = time.time()
+        throttle = max(1.0, LIDAR_STATE_TTL_S / 2.0)
+        changed = state != self._state_written_kind
+        if state == "searching":
+            if not self._search_since:
+                # Полоса поиска началась: окно приоритета считается от неё, а не
+                # от каждой записи файла — иначе оно продлевалось бы бесконечно.
+                self._search_since = now
+            if not changed and (now - self._state_written) < throttle:
+                return
+            publish_lidar_state(state, since=self._search_since, searcher=self._searcher)
+        else:
+            self._search_since = 0.0
+            if not changed and (now - self._state_written) < throttle:
+                return
+            publish_lidar_state(state, port, searcher=self._searcher)
+        self._state_written = now
+        self._state_written_kind = state
 
     def _ros_owns_lidar(self) -> bool:
         """ROS 2 уже отдаёт /scan — не отбираем у него USB-порт."""
@@ -1654,6 +2290,9 @@ class LidarManager:
         try:
             import serial  # pyserial
         except ImportError:
+            # Порт искать нечем: состояние «ищу» снимаем, иначе модули шасси
+            # зря уступали бы порты лидару, которого в этом интерпретаторе нет.
+            self._clear_state()
             self._set_status(
                 "нет библиотеки pyserial — USB-лидар не читается",
                 hint="поставь пакет: .venv/bin/pip install pyserial (или ./scripts/ensure_deps.sh)",
@@ -1663,15 +2302,31 @@ class LidarManager:
 
         while not self._stop:
             if self._ros_owns_lidar():
+                # Скан даёт ROS 2: своих портов лидар не занимает, уступать нечего.
+                self._clear_state()
                 self._set_status("скан идёт из ROS 2 (/scan) — USB-порт не трогаю")
                 time.sleep(LIDAR_RESCAN_S)
                 continue
 
+            # Пока порт не найден — сообщаем об этом источник данных шасси: он
+            # уступает порты под нашу проверку (окно RC_LIDAR_PRIORITY_S). Здесь
+            # же видно, какие порты он подтвердил как модули: их не перебираем.
+            module_ports = dedup_ports(chassis_module_ports())
             wide = self.autoprobe or self._fallback_all
-            ports = self.candidate_ports(wide=wide)
+            ports = self.candidate_ports(wide=wide, module_ports=module_ports)
+            if tuple(sorted(ports)) != self._logged_ports and self._logged_ports:
+                # Набор портов изменился: адаптер вынули или воткнули. Лидару
+                # снова даётся окно приоритета — иначе горячее подключение
+                # лидара ждало бы перезапуска: окно уже истекло, а модули
+                # занимают порты своими проверками.
+                self._search_since = 0.0
+            self._publish_state("searching")
             if not ports:
                 hint = ("подключи лидар или задай RC_LIDAR_PORT (список портов: "
                         "ls /dev/ttyUSB* /dev/serial/by-id/; проверка: scripts/lidar_check.py)")
+                if module_ports:
+                    hint = (hint + "; все видимые порты заняты модулями шасси (%s) — "
+                            "лидар, похоже, не подключён" % ", ".join(module_ports))
                 note = self._excluded_note()
                 if note:
                     hint = hint + "; " + note
@@ -1684,15 +2339,26 @@ class LidarManager:
             # кажется, что приложение «обращается только к одному USB».
             # Список портов печатаем, только когда он изменился: ротация
             # каждые 2 с одного и того же набора портов — это не новость.
-            if tuple(sorted(ports)) != self._logged_ports:
+            if (tuple(sorted(ports)) != self._logged_ports
+                    or tuple(module_ports) != self._logged_modules):
                 self._logged_ports = tuple(sorted(ports))
+                self._logged_modules = tuple(module_ports)
+                suffix = ""
+                if module_ports:
+                    suffix = (". Пропускаю порты модулей шасси: %s — их подтвердил "
+                              "телеметрией источник данных шасси"
+                              % ", ".join(module_ports))
                 log.info(
-                    "Лидар: перебираю %d порт(ов)%s: %s",
+                    "Лидар: перебираю %d порт(ов)%s: %s%s",
                     len(ports),
                     "" if wide else " (узкий список: RC_LIDAR_AUTOPROBE=0)",
                     ", ".join(ports),
+                    suffix,
                 )
-            self.tried = []
+            # Пропущенные порты модулей — в ``tried``: по GET /api/lidar должно
+            # быть видно, почему порт не проверялся, а не только «занят».
+            self.tried = [{"port": port, "ok": False, "note": "модуль шасси"}
+                          for port in module_ports]
             progressed = False
             for index, port in enumerate(ports, start=1):
                 if self._stop:
@@ -1701,6 +2367,10 @@ class LidarManager:
                     "перебираю порты: %d из %d — %s" % (index, len(ports), os.path.basename(port)),
                     quiet=True,
                 )
+                # Запись «ищу порт» обновляем на каждом порту: круг по чужому
+                # устройству длится десятками секунд (у каждой модели своя
+                # скорость), а источник данных шасси смотрит на её свежесть.
+                self._publish_state("searching")
                 if not self._acquire_port_lock(port):
                     # Порт читает второй процесс робота: пульт (8080) и бортовой
                     # экран (8090) поднимают этот менеджер одновременно, а порт
@@ -1708,10 +2378,18 @@ class LidarManager:
                     if self._peer_cycle():
                         progressed = True
                         self._fallback_all = False
+                        # Скан идёт от соседа: свой перебор стоит, приоритет на
+                        # порты больше не нужен — модули могут читать свои.
+                        self._publish_state("peer")
                         self.tried.append({"port": port, "ok": True,
                                            "note": "скан берётся у второго процесса робота"})
                         break
                     peer_reason = ("; сосед сообщает: " + self._peer_reason) if self._peer_reason else ""
+                    if module_port_confirmed(port):
+                        # Порт модулей мог появиться уже после сборки списка:
+                        # не выдаём «занят чужой программой» за сломанный лидар.
+                        self.tried.append({"port": port, "ok": False, "note": "модуль шасси"})
+                        continue
                     self._set_status(
                         "порт %s занят другой программой" % port,
                         hint="обычно это источник данных шасси (RC_SLAM_SOURCE/RC_SLAM_PORTS): "
@@ -1735,21 +2413,36 @@ class LidarManager:
                     # Порт, на котором реально пошли точки, — первый в следующем
                     # круге: после обрыва связи лидар находится сразу.
                     self._sticky = port
+                    # И порт, который модули шасси больше не трогают (см.
+                    # lidar_holds_port): они знают, что тут читает лидар.
+                    self._publish_state("found", port)
                     break
 
             if not progressed:
                 # Ни один порт не ответил — говорим об этом прямо:
                 # видно, что перебор был по всем портам, а не по одному.
-                if self.tried and all(item["note"] == "занят" for item in self.tried):
-                    # Все кандидаты кем-то открыты: советы про кабель и скорость
-                    # здесь бесполезны, причина — чужая программа на порту.
-                    reason = ("лидар не найден: все %d порт(ов) заняты другой программой"
-                              % len(self.tried))
+                self._active_port = None          # витков нет: состояние не обновляем
+                notes = [item["note"] for item in self.tried]
+                busy = notes.count("занят")
+                modules = notes.count("модуль шасси")
+                if notes and all(note in ("занят", "модуль шасси") for note in notes):
+                    # Все кандидаты кем-то заняты: либо это порты модулей шасси
+                    # (их держит источник данных шасси), либо чужая программа.
+                    # Советы про кабель и скорость здесь бесполезны.
+                    total = len(notes)
+                    if busy and modules:
+                        reason = ("лидар не найден: из %d порт(ов) %d заняты другой программой, "
+                                  "%d — модули шасси" % (total, busy, modules))
+                    elif busy:
+                        reason = "лидар не найден: все %d порт(ов) заняты другой программой" % total
+                    else:
+                        reason = "лидар не найден: все %d порт(ов) — модули шасси" % total
                     hint = ("обычно их держит источник данных шасси "
                             "(RC_SLAM_SOURCE/RC_SLAM_PORTS): он берёт порт на время "
                             "проверки и отпускает его через пару секунд — перебор "
                             "повторится сам; если порты заняты постоянно, это "
-                            "rplidar_ros, Serial Monitor или второй процесс пульта")
+                            "rplidar_ros, Serial Monitor или второй процесс пульта"
+                            ) if busy else ""
                 else:
                     # Порты в сообщении — по имени, а не в порядке обхода:
                     # иначе из-за ротации причина менялась бы каждый круг и
@@ -1766,12 +2459,21 @@ class LidarManager:
                     # Часть портов могла быть занята своим же источником данных
                     # шасси: тогда «проверь кабель» уводит в сторону, и это видно
                     # в подсказке, а не только в списке «занят» в причине.
-                    busy_note = busy_ports_note([item["note"] for item in items])
+                    busy_note = busy_ports_note(notes)
                     hint = (busy_note + "; " if busy_note else "") + (
                         "проверь питание и кабель лидара; скорость зависит от модели: "
                         "115200 (A1/A2M8), 256000 (A2M7/A2M12/A3/S1), 460800 (C1), "
                         "230400 (LD06/LD19 и LDS-01/LDS-02 от TurtleBot3); "
                         "полный разбор — .venv/bin/python scripts/lidar_check.py")
+                if modules:
+                    # Часть портов — модули шасси: их держит своё же приложение,
+                    # поэтому «проверь кабель» уводит в сторону. Список таких
+                    # портов лежит в статусе (``chassis_ports``).
+                    module_note = ("порты модулей шасси (GET /api/lidar → chassis_ports) "
+                                   "лидар не трогает: если лидар подключён именно туда, "
+                                   "закрепи его порт (RC_LIDAR_PORT) или убери порт из "
+                                   "RC_SLAM_PORTS/RC_LIDAR_EXCLUDE")
+                    hint = hint + "; " + module_note
                 note = self._excluded_note()
                 if note:
                     hint = hint + "; " + note
@@ -1873,10 +2575,15 @@ class LidarManager:
             "motor": probe.get("motor"),
         }
         self.last_error = ""
+        self._active_port = port or None
         self._set_status(
             "лидар на связи: %s, %s бод, мотор %s"
             % (os.path.basename(port), probe.get("baud"), probe.get("motor"))
         )
+        # Порт найден: сообщаем это источнику данных шасси, чтобы он не занимал
+        # его своей проверкой (см. lidar_holds_port) — иначе лидар терял бы порт
+        # на пару секунд в каждом круге перебора модулей.
+        self._publish_state("found", port)
         log.info(
             "Лидар: найден на %s (%s %s бод, мотор: %s)",
             port, probe.get("protocol"), probe.get("baud"), probe.get("motor"),

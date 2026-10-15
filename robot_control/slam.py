@@ -32,11 +32,14 @@ from flask import Blueprint, Response, jsonify, request, send_from_directory, se
 from robot_control.camera import CameraManager
 from robot_control.lidar import (
     LidarManager,
+    lidar_holds_port,
     lidar_reserved_ports,
     set_self_port,
     startup_summary,
+    tag_module_port,
     try_lock_port,
     unlock_port,
+    untag_module_port,
 )
 
 log = logging.getLogger("robot_control.slam")
@@ -229,8 +232,28 @@ def chassis_source(mod, ports):
     вдвоём — «device reports readiness to read but returned no data (… multiple
     access on port?)» — и лидар не мог найти себя ни на одном порту, хотя порты
     держало это же приложение, а на экране появлялся совет «проверь кабель».
+
+    Замка мало: он говорит только «занят / свободен» и не различает, кто держит
+    порт. Поэтому здесь же два механизма из ``robot_control.lidar``:
+
+      * ``yield_to_lidar`` (:func:`lidar_holds_port`) — пока лидар ищет свой порт
+        (окно ``RC_LIDAR_PRIORITY_S``, 20 с) или уже читает этот порт, модули не
+        занимают его своей проверкой. Иначе на роботе с двумя адаптерами оба
+        перебора сталкивались, и лидар сообщал «все 2 порт(ов) заняты другой
+        программой» про порты, которые держало это же приложение;
+      * ``tag_module``/``untag_module`` (:func:`tag_module_port`) — отметка в
+        ``data/`` «на этом порту подтвердились модули». Её видит лидар и не
+        перебирает такой порт: он всё равно занят, а совет «проверь кабель»
+        уводит в сторону.
     """
-    return mod.SerialSource(ports, claim=try_lock_port, release=unlock_port)
+    return mod.SerialSource(
+        ports,
+        claim=try_lock_port,
+        release=unlock_port,
+        yield_to_lidar=lidar_holds_port,
+        tag_module=tag_module_port,
+        untag_module=untag_module_port,
+    )
 
 
 def make_source(mode: str = "auto", ports=None):

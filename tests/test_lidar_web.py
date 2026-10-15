@@ -25,6 +25,7 @@ import json
 import os
 import pty
 import struct
+import subprocess
 import sys
 import threading
 import time
@@ -741,3 +742,301 @@ def test_lds01_scan_reaches_both_screens_over_http(monkeypatch, client, operator
         thread.join(timeout=2.0)
         os.close(slave)
         os.close(master)
+
+
+# ---------------------------------------------------------------------------
+# 7. Порты лидара и порты модулей шасси: приоритет и отметки в data/
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def state_dir(tmp_path, monkeypatch):
+    """Общий журнал процессов робота (``data/ports``) — во временной папке.
+
+    Кэш журнала (доли секунды, чтобы не сканировать каталог на каждый запрос)
+    в тестах выключен: иначе проверка читала бы снимок соседнего теста.
+    """
+    path = tmp_path / "state"
+    path.mkdir()
+    monkeypatch.setattr(lidar, "DATA_DIR", path)
+    monkeypatch.setattr(lidar, "PORTS_STATE_CACHE_S", 0.0)
+    return path
+
+
+def silent_serial(monkeypatch):
+    """Подменяет pyserial: порт открывается и молчит, открытия записаны в список."""
+    opened: list = []
+
+    class FakeDevice:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def write(self, data):
+            return len(data)
+
+        def read(self, size):  # noqa: ARG002 — данных на порту нет
+            time.sleep(0.01)
+            return b""
+
+    fake = types.ModuleType("serial")
+    fake.Serial = lambda port, *args, **kwargs: (opened.append(port), FakeDevice())[1]
+    fake.SerialException = Exception
+    monkeypatch.setitem(sys.modules, "serial", fake)
+    return opened
+
+
+def test_lidar_prioritises_ports_while_it_searches(state_dir, tmp_path):
+    """Пока порт не найден — порты уступают лидару; после находки — только его порт.
+
+    Это ответ на робот с двумя адаптерами: источник данных шасси брал порты на свою
+    проверку ровно тогда, когда лидар начинал перебор, и лидар сообщал «все порты
+    заняты другой программой» про порты, которые держало это же приложение.
+    """
+    other = tmp_path / "ttyUSB0"
+    other.write_text("")
+    own = tmp_path / "ttyUSB1"
+    own.write_text("")
+    assert lidar.lidar_holds_port(str(other)) is False   # никто ничего не ищет
+
+    lidar.publish_lidar_state("searching", since=time.time())
+    assert lidar.lidar_search_priority() > 0.0
+    assert lidar.lidar_holds_port(str(other)) is True
+
+    lidar.publish_lidar_state("found", port=str(own))
+    assert lidar.lidar_search_priority() == 0.0
+    assert lidar.lidar_holds_port(str(own)) is True
+    assert lidar.lidar_holds_port(str(other)) is False
+
+    lidar.clear_lidar_state()
+    assert lidar.lidar_holds_port(str(own)) is False
+
+
+def test_search_priority_window_is_bounded(state_dir, monkeypatch):
+    """Окно приоритета кончается: если лидара на роботе нет, порты достаются модулям."""
+    monkeypatch.setenv("RC_LIDAR_PRIORITY_S", "5")
+    lidar.publish_lidar_state("searching", since=time.time() - 30)
+    assert lidar.lidar_search_priority() == 0.0
+    assert lidar.lidar_holds_port("/dev/ttyUSB0") is False
+
+    monkeypatch.setenv("RC_LIDAR_PRIORITY_S", "0")           # приоритет выключен
+    lidar.publish_lidar_state("searching", since=time.time())
+    assert lidar.lidar_holds_port("/dev/ttyUSB0") is False
+
+
+def test_state_of_a_dead_process_does_not_hold_ports(state_dir):
+    """Файл упавшего процесса порты не держит — иначе лидар ждал бы его вечно."""
+    process = subprocess.Popen([sys.executable, "-c", "pass"])
+    process.wait()
+    payload = {"pid": process.pid, "state": "searching", "port": None,
+               "at": time.time(), "since": time.time()}
+    path = lidar.lidar_state_file(process.pid)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps(payload))
+    assert lidar.lidar_search_priority() == 0.0
+    assert lidar.lidar_holds_port("/dev/ttyUSB0") is False
+
+
+def test_state_of_another_searcher_does_not_erase_the_live_search(state_dir):
+    """Запись второго сеанса поиска в том же процессе не гасит живой поиск.
+
+    Так лидар «не находился» на роботе: менеджеров в процессе бывает несколько
+    (пульт и бортовой экран в одном процессе, менеджеры в тестах), а поле ``since``
+    в файле состояния было одно на процесс. Запись соседа, который начал искать
+    раньше и уже исчерпал окно ``RC_LIDAR_PRIORITY_S``, затирала свежую — и модули
+    шасси занимали порты посреди перебора лидара.
+    """
+    expired = LidarManager()
+    expired._search_since = time.time() - 60.0             # окно приоритета кончилось
+    expired._publish_state("searching")
+    live = LidarManager()
+    live._publish_state("searching")                       # этот искать только начал
+    try:
+        records = json.loads(lidar.lidar_state_file().read_text("utf-8"))["records"]
+        assert len(records) == 2, "у каждого сеанса поиска своя запись"
+        assert lidar.lidar_search_priority() > 0.0, "живой поиск виден в журнале"
+        assert lidar.lidar_holds_port("/dev/ttyUSB0") is True
+    finally:
+        expired.stop()
+        live.stop()
+    assert lidar.lidar_search_priority() == 0.0, "остановленный поиск держит порты"
+
+
+def test_own_writes_are_visible_through_the_journal_cache(state_dir, monkeypatch):
+    """Своя запись видна сразу: кэш журнала сбрасывается, ожидать TTL не нужно.
+
+    Кэш нужен на роботе (статус читают оба экрана, каталог на SD-карте), но
+    решение «уступать ли порт» нельзя принимать по устаревшему снимку после
+    собственной записи — от этого зависит, достаётся ли порт лидару.
+    """
+    monkeypatch.setattr(lidar, "PORTS_STATE_CACHE_S", 5.0)
+    assert lidar.lidar_search_priority() == 0.0            # первый снимок журнала
+
+    lidar.publish_lidar_state("searching", since=time.time())
+    assert lidar.lidar_search_priority() > 0.0             # видно без ожидания кэша
+
+    port = state_dir.parent / "ttyUSB0"
+    port.write_text("")
+    lidar.tag_module_port(str(port))
+    assert lidar.module_port_confirmed(str(port)) is True
+    lidar.untag_module_port(str(port))
+    assert lidar.module_port_confirmed(str(port)) is False
+
+
+def test_serial_source_yields_ports_while_the_lidar_searches(state_dir, tmp_path,
+                                                             monkeypatch, backend):
+    """Источник шасси не занимает порты своей проверкой, пока лидар ищет свой.
+
+    Правка A из разбора на роботе: без неё лидару не доставалось ни секунды —
+    модули брали оба порта на двухсекундную проверку как раз в момент перебора.
+    """
+    port = tmp_path / "ttyUSB0"
+    port.write_text("")
+    other = tmp_path / "ttyUSB1"
+    other.write_text("")
+    opened: list = []
+
+    class BusySerial:
+        SerialException = Exception
+
+        @staticmethod
+        def Serial(name, *args, **kwargs):  # noqa: N802 — интерфейс pyserial
+            opened.append(name)
+            raise OSError(16, "Device or resource busy")
+
+    fake = types.ModuleType("serial")
+    fake.Serial = BusySerial.Serial
+    fake.SerialException = BusySerial.SerialException
+    monkeypatch.setitem(sys.modules, "serial", fake)
+    monkeypatch.setattr(backend.SerialSource, "YIELD_SLEEP_S", 0.05)
+
+    lidar.publish_lidar_state("searching", since=time.time())
+    source = backend.SerialSource([str(port), str(other)], yield_to_lidar=lidar.lidar_holds_port)
+    try:
+        time.sleep(0.4)
+        assert opened == [], "источник шасси занял порты, пока лидар искал свой"
+        lidar.publish_lidar_state("found", port=str(other))
+        assert wait_for(lambda: str(port) in opened, timeout=5.0), \
+            "после поиска лидара источник шасси не вернулся к своим портам"
+        time.sleep(0.2)
+        assert str(other) not in opened, "источник шасси полез на порт, который читает лидар"
+    finally:
+        source._stop = True
+
+
+@pytest.mark.skipif(not os.path.isdir("/proc/self/fd"), reason="нужен /proc")
+def test_chassis_source_tags_the_port_where_telemetry_was_confirmed(state_dir, monkeypatch, backend):
+    """Порт с кадрами телеметрии отмечается как порт модулей — и снимается при тишине.
+
+    Правка B: отметку видит лидар и не перебирает этот порт (он всё равно занят
+    источником данных шасси). Отметка снимается, как только порт замолчал: если
+    адаптеры поменяли местами, лидар должен получить этот порт.
+    """
+    pytest.importorskip("serial")
+    master, slave = pty.openpty()
+    port = os.ttyname(slave)
+    os.close(slave)
+    monkeypatch.setattr(backend.SerialSource, "PROBE_WINDOW_S", 1.0)
+    source = backend.SerialSource(
+        [port],
+        claim=lidar.try_lock_port,
+        release=lidar.unlock_port,
+        yield_to_lidar=lidar.lidar_holds_port,
+        tag_module=lidar.tag_module_port,
+        untag_module=lidar.untag_module_port,
+    )
+    try:
+        assert wait_for(lambda: open_fds_to(port) >= 1, timeout=5.0)
+        for _ in range(20):
+            os.write(master, encode_telemetry(backend))
+            time.sleep(0.02)
+        assert wait_for(lambda: lidar.module_port_confirmed(port), timeout=5.0), \
+            "источник шасси не отметил порт, на котором подтвердилась телеметрия"
+
+        # Порт модулей не уступается лидару даже во время его поиска.
+        lidar.publish_lidar_state("searching", since=time.time())
+        assert lidar.lidar_holds_port(port) is False
+        assert lidar.lidar_holds_port("/dev/ttyUSB7") is True
+
+        # Порт замолчал (адаптер выдернули / заменили лидаром) — отметка уходит.
+        assert wait_for(lambda: not lidar.module_port_confirmed(port), timeout=8.0), \
+            "отметка порта модулей осталась после тишины — лидар его больше не откроет"
+    finally:
+        source._stop = True
+        time.sleep(0.4)      # дочитываем до закрытия мастера: иначе порт шумит в логе
+        os.close(master)
+
+
+def test_lidar_does_not_probe_the_port_of_the_chassis_modules(state_dir, fake_usb_like,
+                                                              monkeypatch, manager):
+    """Лидар не открывает порт модулей шасси и видно, почему: ``tried`` и ``chassis_ports``."""
+    monkeypatch.setenv("RC_LIDAR_PEER_URLS", "")
+    monkeypatch.setattr(lidar, "LIDAR_RESCAN_S", 0.05)
+    monkeypatch.setattr(lidar, "LIDAR_PROBE_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(lidar, "LIDAR_ATTEMPT_MAX_S", 0.2)
+    module_port, *others = fake_usb_like
+    lidar.tag_module_port(module_port)
+    opened = silent_serial(monkeypatch)
+
+    worker = threading.Thread(target=manager._serial_worker, daemon=True)
+    worker.start()
+    try:
+        assert wait_for(lambda: any(port in opened for port in others), timeout=5.0), \
+            "лидар не попробовал ни один порт"
+        assert wait_for(
+            lambda: any(item["note"] == "модуль шасси" for item in manager.tried), timeout=5.0
+        ), "пропущенный порт модулей не виден в tried"
+        time.sleep(0.3)
+        assert module_port not in opened, "лидар открыл порт, который читает источник шасси"
+        status = manager.get_status()
+        assert module_port in status["chassis_ports"]
+        assert status["priority_s"] > 0.0, "состояние «ищу порт» не опубликовано"
+        modules = [p for p in status["usb_diagnostics"]["ports"] if p["chassis_module"]]
+        assert [p["port"] for p in modules] == [module_port]
+    finally:
+        manager._stop = True
+        worker.join(timeout=3.0)
+
+
+def test_all_ports_as_modules_is_reported_honestly(state_dir, fake_usb_like, monkeypatch, manager):
+    """Все порты заняты модулями шасси — так и написано, а не «проверь кабель лидара»."""
+    monkeypatch.setattr(lidar, "LIDAR_RESCAN_S", 0.05)
+    for port in fake_usb_like:
+        lidar.tag_module_port(port)
+
+    worker = threading.Thread(target=manager._serial_worker, daemon=True)
+    worker.start()
+    try:
+        assert wait_for(lambda: "не найден" in manager.reason, timeout=5.0)
+        status = manager.get_status()
+        assert status["candidates"] == []
+        assert "модулями шасси" in status["hint"]
+        assert sorted(status["chassis_ports"]) == sorted(fake_usb_like)
+    finally:
+        manager._stop = True
+        worker.join(timeout=3.0)
+
+
+def test_manager_publishes_the_port_it_found(state_dir, manager):
+    """Найденный порт публикуется: источник шасси его больше не занимает."""
+    port = state_dir.parent / "ttyUSB1"
+    port.write_text("")
+    manager._mark_found({"port": str(port), "protocol": "lds01", "baud": 230400, "motor": "none"})
+    assert lidar.lidar_active_port() == str(port)
+    assert lidar.lidar_holds_port(str(port)) is True
+    manager.stop()
+    assert lidar.lidar_active_port() is None
+
+
+def test_state_stays_fresh_while_the_scan_goes(state_dir, manager):
+    """Пока идут витки, состояние обновляется — иначе порт лидара «протухнет» для модулей."""
+    port = state_dir.parent / "ttyUSB1"
+    port.write_text("")
+    manager._mark_found({"port": str(port), "protocol": "rplidar", "baud": 115200, "motor": "dtr-low"})
+    manager._state_written = time.time() - 10          # как будто писали давно
+    manager._store_scan([{"a": 0.0, "r": 1.5}], "serial:ttyUSB1")
+    assert lidar.lidar_active_port() == str(port)
+    written = json.loads(lidar.lidar_state_file().read_text("utf-8"))
+    assert time.time() - written["at"] < lidar.LIDAR_STATE_TTL_S

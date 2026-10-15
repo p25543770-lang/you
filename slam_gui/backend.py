@@ -539,6 +539,25 @@ class SerialSource:
     обязаны показывать одни и те же модули. Для лидара такой порт — просто «нет
     данных»: он переберёт его вместе с остальными USB и отпустит, поделив эти
     секунды с экранами.
+
+    Из замка видно только «занят / свободен», а на роботе с двумя адаптерами
+    этого мало: пока лидар искал свой порт, модули успевали взять оба под свою
+    проверку, и лидар писал «все 2 порт(ов) заняты другой программой» — то есть
+    винил чужую программу там, где порты держало это же приложение. Поэтому есть
+    два необязательных механизма (приходят из ``robot_control.lidar`` через
+    ``robot_control/slam.py``; в отдельном запуске ``backend.py`` их нет и
+    поведение прежнее):
+
+      * ``yield_to_lidar(port)`` — «лидар ещё ищет порт (или читает этот), не
+        занимай его сейчас»: поток ждёт и не открывает порт, пока лидар не нашёл
+        свой. Порт, уже подтверждённый кадрами телеметрии, не уступается никогда:
+        иначе телеметрия пропадала бы с обоих экранов на каждом круге поиска
+        лидара (``PROBE_WINDOW_S``);
+      * ``tag_module(port)`` / ``untag_module(port)`` — отметка в ``data/``, что
+        на порту подтвердились модули шасси. Лидар такие порты не перебирает.
+        Отметка снимается, как только окно проверки кончилось без кадров: если
+        адаптер модулей выдернули и на его место воткнули лидар, порт не остаётся
+        «занятым» навсегда.
     """
 
     name = "serial"
@@ -548,8 +567,15 @@ class SerialSource:
     #: Пауза между попытками на «чужом» порту: растёт, чтобы не дёргать его.
     BACKOFF_START_S = 2.0
     BACKOFF_MAX_S = 30.0
+    #: Как часто обновляем отметку «здесь модули шасси», пока идут кадры: чаще
+    #: незачем (отметку читает лидар), реже — рискуем, что она протухнет.
+    TAG_REFRESH_S = 5.0
+    #: Пауза, пока лидар ищет свой порт: короткая, чтобы модули вернулись к
+    #: своим портам сразу, как только поиск кончился (или окно приоритета истекло).
+    YIELD_SLEEP_S = 0.5
 
-    def __init__(self, ports, baud=115200, claim=None, release=None):
+    def __init__(self, ports, baud=115200, claim=None, release=None,
+                 yield_to_lidar=None, tag_module=None, untag_module=None):
         self.ports = ports
         self.baud = baud
         #: Межпроцессный замок порта (см. docstring класса): ``claim(port)`` →
@@ -557,6 +583,11 @@ class SerialSource:
         #: замков нет (отдельный запуск ``slam_gui/backend.py`` без пульта).
         self.claim = claim
         self.release = release or (lambda token: None)
+        #: ``yield_to_lidar(port)`` → True, если порт сейчас нужен лидару.
+        self.yield_to_lidar = yield_to_lidar
+        #: Отметка порта, на котором подтвердилась телеметрия модулей.
+        self.tag_module = tag_module
+        self.untag_module = untag_module
         self.lock = threading.Lock()
         self.frames = {}                 # id модуля → последний кадр
         self.cargo = {"kg": 80, "closed": True}
@@ -574,10 +605,23 @@ class SerialSource:
         buf = b""
         backoff = self.BACKOFF_START_S
         reported_busy = False
+        reported_yield = False
         announced = False
+        tagged_at = 0.0
+        last_frame = 0.0                 # когда на этом порту видели кадр телеметрии
         while not self._stop:
             confirmed = False
             token = None
+            if self.yield_to_lidar is not None and self.yield_to_lidar(port):
+                # Лидар ещё ищет свой порт (см. docstring): подождём, не занимая
+                # порты своей проверкой. Иначе его перебор упирается в «занят», и
+                # он перестаёт видеть лидар, хотя порты держит это же приложение.
+                if not reported_yield:
+                    reported_yield = True
+                    print("· serial %s: лидар ищет свой порт — жду" % port)
+                time.sleep(self.YIELD_SLEEP_S)
+                continue
+            reported_yield = False
             if self.claim is not None:
                 token = self.claim(port)
                 if token is None:
@@ -613,7 +657,20 @@ class SerialSource:
                                 with self.lock:
                                     self.frames[mid] = frame
                                     self.seen = time.time()
+                                last_frame = time.time()
+                                if (self.tag_module is not None
+                                        and time.monotonic() - tagged_at >= self.TAG_REFRESH_S):
+                                    # Отметка «здесь модули шасси»: лидар такие порты
+                                    # не перебирает (см. docstring класса).
+                                    tagged_at = time.monotonic()
+                                    self.tag_module(port)
                         if confirmed:
+                            if time.time() - last_frame > self.PROBE_WINDOW_S:
+                                # Кадры кончились: держать порт открытым «на всякий
+                                # случай» нельзя — модули могли выдернуть, а на их
+                                # место встать лидар; отметка «здесь модули» уйдёт
+                                # вслед за окном проверки (см. ниже).
+                                break
                             # Модуль говорит протоколом шасси — порт наш, держим
                             # его открытым. Замок при этом снимаем: второй процесс
                             # робота должен читать модули как раньше (см. docstring).
@@ -641,6 +698,13 @@ class SerialSource:
                     # следующая попытка позже, а лидар успеет забрать его себе.
                     self.release(token)
                     token = None
+            if self.untag_module is not None and (
+                    not confirmed or time.time() - last_frame > self.PROBE_WINDOW_S):
+                # За целое окно проверки кадров не было: порт молчит или его
+                # забрал лидар. Снимаем отметку «здесь модули шасси», иначе лидар
+                # считал бы порт чужим и не открыл бы на нём лидара, если
+                # адаптеры поменяли местами (или модули просто выдернули).
+                self.untag_module(port)
             if self._stop:
                 return
             time.sleep(backoff)
