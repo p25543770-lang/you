@@ -327,6 +327,94 @@ def read_env_file(path: Optional[Path] = None) -> dict[str, str]:
     return values
 
 
+# ------------------- последний подтверждённый лидар -------------------- #
+
+#: Сколько кругов перебора подсказка «лидар был тут» ставит свой порт первым.
+#: Дальше работает обычный круговой перебор: устаревшая подсказка (лидар
+#: переехал на другой USB) не заставляет приложение вечно начинать с мёртвого
+#: порта.
+LIDAR_HINT_ROUNDS = 2
+
+
+def found_lidar_path() -> Path:
+    """Файл с последним подтверждённым лидаром (живёт между перезапусками).
+
+    ``RC_LIDAR_FOUND_FILE`` переносит файл (так тесты кладут его во временную
+    папку). По умолчанию — ``data/lidar-found.json`` рядом с ``.env``.
+    """
+    custom = os.environ.get("RC_LIDAR_FOUND_FILE")
+    if custom:
+        return Path(custom)
+    return DATA_DIR / "lidar-found.json"
+
+
+def load_found_lidar() -> Optional[dict[str, Any]]:
+    """Последний подтверждённый лидар из :func:`found_lidar_path` (или ``None``).
+
+    Это **подсказка для порядка перебора**, а не истина: её порт и профиль
+    проверяются первыми, но все остальные порты и скорости проверяются как
+    обычно — устаревшая подсказка не может «сломать» поиск.
+    """
+    try:
+        payload = json.loads(found_lidar_path().read_text("utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    port = payload.get("port")
+    if not isinstance(port, str) or not port.strip():
+        return None
+    try:
+        baud = int(payload.get("baud")) if payload.get("baud") else None
+    except (TypeError, ValueError):
+        baud = None
+    protocol = payload.get("protocol")
+    motor = payload.get("motor")
+    return {
+        "port": port.strip(),
+        "protocol": protocol if isinstance(protocol, str) else "",
+        "baud": baud,
+        "motor": motor if isinstance(motor, str) else "",
+    }
+
+
+def save_found_lidar(probe: Any) -> bool:
+    """Атомарно запоминает рабочие параметры подтверждённого лидара.
+
+    Вызывается при находке (:meth:`LidarManager._mark_found`): после
+    перезапуска приложение начинает с проверенного порта и профиля, а не с
+    начала полного перебора. Ошибка записи не мешает скану — подсказка лишь
+    ускоряет следующий поиск.
+    """
+    try:
+        port = str(probe.get("port") or "").strip()
+    except AttributeError:
+        return False
+    if not port:
+        return False
+    try:
+        baud = int(probe.get("baud")) if probe.get("baud") else None
+    except (TypeError, ValueError):
+        baud = None
+    payload = {
+        "port": port,
+        "protocol": str(probe.get("protocol") or ""),
+        "baud": baud,
+        "motor": str(probe.get("motor") or ""),
+        "at": round(time.time(), 1),
+    }
+    path = found_lidar_path()
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        os.replace(tmp, path)
+    except OSError as exc:
+        log.debug("Лидар: не удалось записать %s: %s", path, exc)
+        return False
+    return True
+
+
 def normalize_lidar_settings(raw: Any) -> dict[str, Any]:
     """Проверяет настройки лидара из веб-формы и приводит их к одному виду.
 
@@ -1862,12 +1950,17 @@ def startup_summary() -> list[str]:
     return lines
 
 
-def lidar_profiles(protocol: str = "auto", baud: Optional[int] = None) -> list[Tuple[str, int]]:
+def lidar_profiles(protocol: str = "auto", baud: Optional[int] = None,
+                   preferred: Optional[Tuple[str, int]] = None) -> list[Tuple[str, int]]:
     """Список (протокол, скорость) для подбора: от частых моделей к редким.
 
     На 230400 работают сразу два протокола — LD06/LD19 (кадры 0x54) и
     LDS-01/LDS-02 от TurtleBot3 (кадры 0xFA), поэтому при ``auto`` проверяются
     оба: сначала тот, у кого пакет защищён контрольной суммой.
+
+    ``preferred`` — профиль, который проверяется **первым** (последний
+    подтверждённый лидар из ``data/lidar-found.json``): остальные профили
+    проверяются как обычно, порядок лишь меняется.
     """
     proto = normalize_protocol(protocol)
     profiles = list(LIDAR_PROFILES)
@@ -1876,11 +1969,11 @@ def lidar_profiles(protocol: str = "auto", baud: Optional[int] = None) -> list[T
         profiles = [p for p in profiles if p[0] == proto] or [(proto, only_baud)]
     if baud:
         rate = int(baud)
-        preferred = [p for p in profiles if p[1] == rate]
+        preferred_rates = [p for p in profiles if p[1] == rate]
         rest = [p for p in profiles if p[1] != rate]
         names = (proto,) if proto != "auto" else ("rplidar", "ld06", "lds01")
         extra = [(name, rate) for name in names]
-        profiles = preferred + [p for p in extra if p[1] == rate] + rest
+        profiles = preferred_rates + [p for p in extra if p[1] == rate] + rest
 
     seen: set[Tuple[str, int]] = set()
     out: list[Tuple[str, int]] = []
@@ -1888,6 +1981,10 @@ def lidar_profiles(protocol: str = "auto", baud: Optional[int] = None) -> list[T
         if item not in seen:
             seen.add(item)
             out.append(item)
+    if preferred:
+        pair = (str(preferred[0]), int(preferred[1]))
+        if pair in out:
+            out = [pair] + [p for p in out if p != pair]
     return out
 
 
@@ -1992,14 +2089,20 @@ def probe_port(
     on_found: Optional[Callable[[dict[str, Any]], None]] = None,
     min_points: int = LIDAR_MIN_POINTS,
     attempt_max: Optional[float] = None,
+    preferred: Optional[Tuple[str, int]] = None,
+    preferred_motor: Optional[str] = None,
 ) -> Optional[dict[str, Any]]:
     """Подбирает параметры лидара на уже открытом порту.
 
-    Возвращает {"port", "protocol", "baud", "motor", "points"} или None.
+    Возвращает {\"port\", \"protocol\", \"baud\", \"motor\", \"points\"} или None.
     ``publish(точки)`` вызывается на каждом готовом витке; первый вызов означает,
     что данные реально пошли (``on_found`` срабатывает на нём же). Пока данные не
     пошли, витков не публикуем — иначе «скан» из случайных байт чужого протокола
     попадал бы на экран.
+
+    ``preferred`` (протокол, скорость) и ``preferred_motor`` (линия мотора) —
+    параметры прошлого подтверждённого лидара: проверяются первыми, но не
+    исключают остальные варианты.
     """
     stop = stop or (lambda: False)
     budget = LIDAR_ATTEMPT_MAX_S if attempt_max is None else float(attempt_max)
@@ -2020,15 +2123,25 @@ def probe_port(
                 state["noise"] += 1
                 return
             state["found"] = True
+            # Сколько точек в одном витке (360 у LDS-01, ~400 у RPLIDAR): это
+            # честнее, чем «всего принято за время подбора».
+            state["probe"]["points"] = len(points)
             if on_found is not None:
                 on_found(dict(state["probe"]))
         if publish is not None:
             publish(points)
 
-    for proto, rate in lidar_profiles(protocol, baud):
+    for proto, rate in lidar_profiles(protocol, baud, preferred=preferred):
         if stop() or state["found"]:
             break
         variants = motor_variants(motor) if proto == "rplidar" else ((None, None),)
+        if proto == "rplidar" and preferred_motor and len(variants) > 1:
+            # Линия мотора с прошлого запуска — первой, остальные как обычно.
+            head = [v for v in variants if motor_variant_name(v) == preferred_motor]
+            if head:
+                variants = tuple(head) + tuple(
+                    v for v in variants if motor_variant_name(v) != preferred_motor
+                )
         for variant in variants:
             if stop() or state["found"]:
                 break
@@ -2079,7 +2192,7 @@ def probe_port(
                 )
 
             if state["found"]:
-                state["probe"]["points"] = got
+                state["probe"].setdefault("points", got)
                 return state["probe"]
             if proto == "rplidar" and got:
                 log.info(
@@ -2181,6 +2294,11 @@ class LidarManager:
         #: него, а не «со следующего» — иначе после короткого обрыва связи
         #: перебор заново тратил по несколько секунд на каждый мёртвый порт.
         self._sticky: Optional[str] = None
+        #: Последний подтверждённый лидар с прошлого запуска
+        #: (``data/lidar-found.json``): его порт и профиль проверяются первыми,
+        #: пока поиск не нашёл «своё» (см. ``load_found_lidar``).
+        self._found_hint = load_found_lidar()
+        self._hint_budget = LIDAR_HINT_ROUNDS if self._found_hint else 0
         self.tried: list[dict[str, Any]] = []
         self._logged_ports: tuple[str, ...] = ()
         self._logged_modules: tuple[str, ...] = ()
@@ -2498,6 +2616,9 @@ class LidarManager:
             "reason": reason,
             "hint": self.hint,
             "detected": dict(self.detected) if self.detected else None,
+            # Лидар, подтверждённый на прошлом запуске (data/lidar-found.json):
+            # его порт и профиль проверяются первыми.
+            "remembered": dict(self._found_hint) if self._found_hint else None,
             "candidates": list(self.candidates),
             # Порты, подтверждённые источником данных шасси: лидар их не трогает.
             # Видно прямо в статусе — иначе «занят» на порту модулей выглядит как
@@ -2542,6 +2663,10 @@ class LidarManager:
             if known is not None:
                 ports = [known] + [p for p in ports if p != known]
                 self._rotate = 0
+                if not self._sticky and self._hint_budget > 0:
+                    # Поставлен порт из подсказки «лидар был тут»: кругов с ним
+                    # всего LIDAR_HINT_ROUNDS — дальше работает перебор по кругу.
+                    self._hint_budget -= 1
             else:
                 step = self._rotate % len(ports)
                 if step:
@@ -2552,14 +2677,17 @@ class LidarManager:
 
     def _sticky_port(self, ports: Sequence[str]) -> Optional[str]:
         """Порт из списка, совпадающий с уже найденным лидаром (по устройству)."""
-        if not self._sticky:
+        wanted_path = self._sticky
+        if not wanted_path and self._hint_budget > 0:
+            wanted_path = (self._found_hint or {}).get("port") or None
+        if not wanted_path:
             return None
         try:
-            wanted = os.path.realpath(self._sticky)
+            wanted = os.path.realpath(wanted_path)
         except OSError:
-            wanted = self._sticky
+            wanted = wanted_path
         for path in ports:
-            if path == self._sticky:
+            if path == wanted_path:
                 return path
             try:
                 if os.path.realpath(path) == wanted:
@@ -2567,6 +2695,30 @@ class LidarManager:
             except OSError:
                 continue
         return None
+
+    def _preferred_profile(self) -> Optional[Tuple[str, int]]:
+        """Профиль (протокол, скорость) прошлого подтверждённого лидара.
+
+        Используется только при автоподборе: закреплённые оператором
+        ``RC_LIDAR_PROTOCOL``/``RC_LIDAR_BAUD`` важнее любой подсказки.
+        """
+        if self.protocol != "auto":
+            return None
+        hint = self._found_hint or {}
+        proto = str(hint.get("protocol") or "")
+        try:
+            baud = int(hint.get("baud")) if hint.get("baud") else 0
+        except (TypeError, ValueError):
+            baud = 0
+        if proto and baud:
+            return (proto, baud)
+        return None
+
+    def _preferred_motor(self) -> Optional[str]:
+        """Линия мотора прошлого подтверждённого лидара (только при ``auto``)."""
+        if self.motor != "auto":
+            return None
+        return str((self._found_hint or {}).get("motor") or "") or None
 
     def _excluded_note(self) -> str:
         """Подсказка про порты, которые лидару запрещено трогать (мастер/шасси)."""
@@ -3002,6 +3154,8 @@ class LidarManager:
                 stop=stop_probe,
                 publish=publish_if_current,
                 on_found=mark_found_if_current,
+                preferred=self._preferred_profile(),
+                preferred_motor=self._preferred_motor(),
             )
             if self._settings_revision != settings_revision:
                 # Поток мог успеть подтвердить старый лидар до выхода по stop.
@@ -3046,6 +3200,12 @@ class LidarManager:
         }
         self.last_error = ""
         self._active_port = port or None
+        # Подтверждённый лидар переживает перезапуск: data/lidar-found.json,
+        # порт и профиль проверяются первыми в следующем поиске (см.
+        # load_found_lidar). Устаревшая запись поиску не мешает.
+        if save_found_lidar(self.detected):
+            self._found_hint = load_found_lidar()
+            self._hint_budget = 0  # лидар найден сейчас — подсказка больше не нужна
         self._set_status(
             "лидар на связи: %s, %s бод, мотор %s"
             % (os.path.basename(port), probe.get("baud"), probe.get("motor"))

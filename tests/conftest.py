@@ -35,6 +35,23 @@ def clean_event_journal():
     slam.reset_journal_notes()
 
 
+@pytest.fixture(autouse=True)
+def isolated_found_lidar(tmp_path_factory, monkeypatch):
+    """Состояние лидара — робота, а не теста: файл подсказки и peer-адреса.
+
+    ``data/lidar-found.json`` («лидар был тут») влияет на порядок перебора
+    портов, поэтому каждый тест пишет и читает свой файл во временной папке.
+    Peer-адреса по умолчанию (8080/8090) выключены: иначе тестовый менеджер
+    берёт скан у **настоящего** запущенного пульта и ждёт «лидар не найден»
+    вечно. Тестам peer-обмена адреса задаются явно.
+    """
+    monkeypatch.setenv(
+        "RC_LIDAR_FOUND_FILE",
+        str(tmp_path_factory.mktemp("lidar-found") / "lidar-found.json"),
+    )
+    monkeypatch.setenv("RC_LIDAR_PEER_URLS", "")
+
+
 @pytest.fixture
 def config(tmp_path: Path) -> Config:
     return Config(
