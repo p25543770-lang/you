@@ -307,6 +307,10 @@ class SimSource:
         try:
             from robot_control.lidar import generate_demo_scan
             payload["lidar"] = generate_demo_scan(t=time.time(), speed=speed)
+            # Пометка обязательна: экран обязан показывать такие точки как демо,
+            # а не как «в реальном времени» (и соседний процесс робота не должен
+            # принимать их за настоящий скан с USB-лидара).
+            payload["lidarDemo"] = True
         except Exception:
             pass
         return payload
@@ -509,9 +513,24 @@ class MasterSource:
 
 
 class SerialSource:
-    """Реальные модули: 4 UART, кадры телеметрии 16 Б (20 Гц)."""
+    """Реальные модули: 4 UART, кадры телеметрии 16 Б (20 Гц).
+
+    Порт открывается только на время проверки: если за ``PROBE_WINDOW_S`` от
+    него не пришло ни одного корректного кадра телеметрии, порт освобождается и
+    следующая попытка откладывается (2 → 4 → … → 30 с). Без этого источник
+    данных шасси в режиме ``auto`` находил все ``/dev/ttyUSB*`` и держал их
+    открытыми навсегда — включая порт USB-лидара, из которого он вычитывал
+    байты: лидар в веб-интерфейсе «не отвечал», хотя ``scripts/lidar_check.py``
+    (его запускают при остановленном пульте) работал.
+    """
 
     name = "serial"
+
+    #: Сколько секунд ждём кадр телеметрии, прежде чем освободить порт.
+    PROBE_WINDOW_S = 2.0
+    #: Пауза между попытками на «чужом» порту: растёт, чтобы не дёргать его.
+    BACKOFF_START_S = 2.0
+    BACKOFF_MAX_S = 30.0
 
     def __init__(self, ports, baud=115200):
         self.ports = ports
@@ -531,26 +550,53 @@ class SerialSource:
             print("! serial: pyserial не установлен (pip install pyserial) — модуль %s выключен" % port)
             return
         buf = b""
+        backoff = self.BACKOFF_START_S
+        reported_busy = False
         while not self._stop:
+            confirmed = False
             try:
                 with serial.Serial(port, self.baud, timeout=0.2) as dev:
                     print("· serial: %s открыт (модуль %d)" % (port, default_id))
+                    reported_busy = False
+                    deadline = time.monotonic() + self.PROBE_WINDOW_S
                     while not self._stop:
                         chunk = dev.read(64)
-                        if not chunk:
+                        if chunk:
+                            buf += chunk
+                            while True:
+                                frame, buf = pick_telemetry(buf)
+                                if not frame:
+                                    break
+                                confirmed = True
+                                mid = frame.get("moduleId") or default_id
+                                with self.lock:
+                                    self.frames[mid] = frame
+                                    self.seen = time.time()
+                        if confirmed:
+                            # Модуль говорит протоколом шасси — держим порт.
+                            backoff = self.BACKOFF_START_S
+                            deadline = time.monotonic() + self.PROBE_WINDOW_S
                             continue
-                        buf += chunk
-                        while True:
-                            frame, buf = pick_telemetry(buf)
-                            if not frame:
-                                break
-                            mid = frame.get("moduleId") or default_id
-                            with self.lock:
-                                self.frames[mid] = frame
-                                self.seen = time.time()
+                        if time.monotonic() >= deadline:
+                            break
             except Exception as exc:          # noqa: BLE001 — порт может пропасть
-                print("! serial %s: %s — повтор через 2 с" % (port, exc))
-                time.sleep(2.0)
+                text = str(exc).lower()
+                if "busy" in text or "resource" in text:
+                    # Порт занят: его читает лидар (TIOCEXCL) или второй процесс
+                    # робота. Молча ждём — не забиваем журнал повторами.
+                    if not reported_busy:
+                        reported_busy = True
+                        print("· serial %s: порт занят (лидар или второй процесс) — жду %d с"
+                              % (port, int(backoff)))
+                else:
+                    print("! serial %s: %s — повтор через %d с" % (port, exc, int(backoff)))
+            if self._stop:
+                return
+            # Порт не отвечает протоколом шасси (или занят) — он освобождён,
+            # следующая попытка позже: лидар успеет забрать его себе.
+            time.sleep(backoff)
+            if not confirmed:
+                backoff = min(backoff * 2, self.BACKOFF_MAX_S)
 
     def read(self):
         with self.lock:
@@ -898,6 +944,8 @@ class App:
             pass
         if mgr_scan is not None:
             out["lidar"] = mgr_scan
+            # Реальный скан (USB, ROS 2, HTTP) заменяет демо источника-симуляции.
+            out["lidarDemo"] = False
         return out
 
     def open_lock(self, pin):

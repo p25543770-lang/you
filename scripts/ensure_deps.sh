@@ -37,15 +37,51 @@ if [[ ! -x .venv/bin/pip ]]; then
 fi
 [[ -x .venv/bin/pip ]] || { echo "Не удалось поставить pip в .venv." >&2; exit 127; }
 
-REQ_HASH="$(sha256sum requirements.txt | awk '{print $1}')"
-CACHED="$(cat .venv/.req-hash 2>/dev/null || true)"
-if [[ "$REQ_HASH" != "$CACHED" ]]; then
+# Какие модули обязаны импортироваться в .venv: flask/gunicorn — веб-пульт,
+# serial (pyserial) — USB-лидар и UART-модули. Проверяем именно импорт, а не
+# только хэш requirements.txt: при прерванной установке хэш уже записан, а
+# pyserial нет — и тогда лидар «не работает» молча, хотя скрипт установки
+# отрапортовал об успехе.
+REQUIRED_MODULES=(flask gunicorn serial)
+
+missing_deps() {
+  local missing=() module
+  for module in "${REQUIRED_MODULES[@]}"; do
+    .venv/bin/python -c "import $module" >/dev/null 2>&1 || missing+=("$module")
+  done
+  printf '%s\n' "${missing[@]}"
+}
+
+install_deps() {
   log "ставлю зависимости…"
   if ! .venv/bin/pip install -q -r requirements.txt 2>/dev/null; then
     log "сети нет — ставлю из vendor (офлайн)…"
     .venv/bin/pip install -q --no-index --find-links vendor -r requirements.txt
   fi
-  echo "$REQ_HASH" > .venv/.req-hash
+}
+
+REQ_HASH="$(sha256sum requirements.txt | awk '{print $1}')"
+CACHED="$(cat .venv/.req-hash 2>/dev/null || true)"
+MISSING="$(missing_deps)"
+if [[ "$REQ_HASH" != "$CACHED" ]]; then
+  install_deps
+elif [[ -n "$MISSING" ]]; then
+  log "в .venv не хватает: $(echo "$MISSING" | tr '\n' ' ')— ставлю заново"
+  install_deps
 else
   log "зависимости уже установлены"
 fi
+
+MISSING="$(missing_deps)"
+if [[ -n "$MISSING" ]]; then
+  echo "Не удалось установить в .venv: $(echo "$MISSING" | tr '\n' ' ')" >&2
+  echo "Без pyserial USB-лидар не читается. Поставь вручную и повтори запуск:" >&2
+  echo "  .venv/bin/pip install --no-index --find-links vendor -r requirements.txt" >&2
+  exit 1
+fi
+if [[ "$REQ_HASH" != "$CACHED" ]]; then
+  echo "$REQ_HASH" > .venv/.req-hash
+fi
+log "проверка: $(.venv/bin/python -c 'import serial
+from importlib.metadata import version
+print("flask", version("flask"), "· pyserial", serial.VERSION)')"

@@ -30,6 +30,7 @@ from flask import (
     url_for,
 )
 from itsdangerous import BadSignature, URLSafeSerializer, URLSafeTimedSerializer
+from werkzeug.routing import BuildError
 
 from .auth import (
     ROLE_OPERATOR,
@@ -39,7 +40,7 @@ from .auth import (
     hash_password,
 )
 from .config import Config
-from .slam import build_state, create_blueprint
+from .slam import build_state, create_blueprint, start_lidar
 
 log = logging.getLogger("robot_control")
 
@@ -196,7 +197,14 @@ def create_app(config: Config | None = None) -> Flask:
         user, via_st = current_user()
 
         def u(endpoint: str, **kwargs) -> str:
-            return with_st(url_for(endpoint, **kwargs))
+            # Навигация в base.html общая для всех страниц, включая страницу
+            # ошибки. Если интерфейс робота не подключился, его эндпоинтов в
+            # url_map нет — без этой проверки вместо внятной 503 оператор
+            # получил бы BuildError (и ещё один 500 на странице ошибки).
+            try:
+                return with_st(url_for(endpoint, **kwargs))
+            except BuildError:
+                return "#"
 
         return {
             "csrf_token": csrf_signer.dumps("csrf"),
@@ -255,6 +263,9 @@ def create_app(config: Config | None = None) -> Flask:
         )
     except Exception as exc:  # noqa: BLE001 — пульт должен подняться в любом случае
         log.error("интерфейс RUS SLAM не подключён: %s", exc)
+        # Имя exc живёт только внутри except (Python удаляет его в конце блока),
+        # а страница рисуется позже — поэтому текст ошибки сохраняем сразу.
+        reason = str(exc)
 
         @app.get("/", endpoint="slam.broken")
         @login_required
@@ -263,10 +274,17 @@ def create_app(config: Config | None = None) -> Flask:
                 render_template(
                     "error.html",
                     code=503,
-                    message="Интерфейс робота не подключён: " + str(exc),
+                    message="Интерфейс робота не подключён: " + reason,
                 ),
                 503,
             )
+
+    # Лидар поднимается сразу после чтения .env (Config.from_env), а не по
+    # первому запросу браузера: так USB-порт читает один процесс, а второй
+    # (бортовой экран на 8090) берёт готовый скан по HTTP. Свой порт (8080)
+    # запоминаем, чтобы не ходить за сканом к себе же. Старт — вне try/except
+    # выше: карта лидара должна работать, даже если интерфейс робота не поднялся.
+    app.extensions["rc_lidar"] = start_lidar(testing=config.testing, port=config.port)
 
     # ------------------------------ Маршруты ----------------------------- #
     @app.get("/healthz")

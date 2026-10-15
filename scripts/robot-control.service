@@ -22,9 +22,15 @@ Wants=network-online.target
 Type=simple
 User=robotctl
 Group=robotctl
+# USB-лидар и UART-модули живут в /dev/ttyUSB*: без группы dialout служба
+# получает «Permission denied», и карта лидара остаётся пустой.
+SupplementaryGroups=dialout
 WorkingDirectory=/opt/robot-control
 EnvironmentFile=/opt/robot-control/.env
-ExecStart=/usr/bin/python3 /opt/robot-control/run.py
+# Строго python из .venv проекта: в нём Flask и pyserial (см. ensure_deps.sh).
+# Системный /usr/bin/python3 их не имеет — лидар не читался бы вовсе, хотя
+# scripts/lidar_check.py, запущенный из .venv, находил устройство.
+ExecStart=/opt/robot-control/.venv/bin/python /opt/robot-control/run.py
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=true

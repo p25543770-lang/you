@@ -28,6 +28,9 @@ Wants=network-online.target
 Type=simple
 User=robotctl
 Group=robotctl
+# USB-лидар и UART-модули живут в /dev/ttyUSB*: без группы dialout служба
+# получает «Permission denied», и бортовой экран остаётся без скана.
+SupplementaryGroups=dialout
 WorkingDirectory=/opt/robot-control
 EnvironmentFile=-/opt/robot-control/.env
 # Служба без графической сессии: браузер открывает рабочий стол робота.

@@ -34,6 +34,7 @@ import logging
 import math
 import os
 import re
+import sys
 import threading
 import time
 import urllib.error
@@ -179,6 +180,22 @@ def _env_int(name: str) -> Optional[int]:
     except ValueError:
         log.warning("Лидар: %s=%r — не число, игнорирую", name, raw)
         return None
+
+
+def pyserial_version() -> Optional[str]:
+    """Версия pyserial в ЭТОМ интерпретаторе или None, если библиотеки нет.
+
+    Веб-приложение и ``scripts/lidar_check.py`` могут запускаться разными
+    интерпретаторами (``/usr/bin/python3`` против ``.venv/bin/python``), и тогда
+    проверка лидара работает, а пульт — нет. Поэтому наличие pyserial видно и в
+    ``GET /api/lidar`` (``usb_diagnostics.pyserial``), и в журнале запуска.
+    """
+    try:
+        import serial  # pyserial
+    except Exception:  # noqa: BLE001 — нет библиотеки / подменён None в тестах
+        return None
+    version = getattr(serial, "VERSION", None) or getattr(serial, "__version__", None)
+    return str(version) if version else "unknown"
 
 
 def normalize_protocol(value: str) -> str:
@@ -801,6 +818,128 @@ def excluded_ports() -> set[str]:
     return ports
 
 
+def port_lock_file(port: str) -> Path:
+    """Файл межпроцессного замка порта лидара.
+
+    Замок один на **устройство**, а не на имя пути: ``/dev/ttyUSB1`` и
+    ``/dev/serial/by-id/usb-Silicon_Labs_CP2102…`` — это один и тот же порт, и
+    пульт с бортовым экраном могут назвать его по-разному (один берёт порт из
+    ``RC_LIDAR_PORT``, другой нашёл его перебором). Без приведения к realpath
+    второй процесс считал бы порт свободным, открывал его и перехватывал байты
+    у первого — скан не собирался ни у кого.
+    """
+    real = port
+    try:
+        resolved = os.path.realpath(port)
+    except OSError:
+        resolved = ""
+    if resolved:
+        real = resolved
+    name = re.sub(r"[^A-Za-z0-9_.-]", "_", real.strip("/").replace("/", "-")) or "port"
+    return DATA_DIR / ("lidar-%s.lock" % name)
+
+
+def try_lock_port(port: str) -> Optional[int]:
+    """Занять порт монопольно. Возвращает fd замка или None, если порт занят.
+
+    Тот же замок используют модули шасси (``slam_gui/backend.py``): порт, который
+    уже читает лидар, они не открывают, и наоборот.
+    """
+    if fcntl is None or not port:  # не-POSIX: замков нет, читаем как читали
+        return -1
+    try:
+        path = port_lock_file(port)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        fd = os.open(str(path), os.O_RDWR | os.O_CREAT, 0o644)
+    except OSError as exc:  # нет каталога data/ и т. п. — не мешаем чтению
+        log.debug("Лидар: замок порта %s недоступен: %s", port, exc)
+        return -1
+    try:
+        fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except OSError:
+        os.close(fd)
+        return None
+    return fd
+
+
+def unlock_port(fd: Optional[int]) -> None:
+    """Освободить замок порта (fd из :func:`try_lock_port`)."""
+    if fd is None or fd == -1:
+        return
+    try:
+        if fcntl is not None:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+    except OSError:
+        pass
+    try:
+        os.close(fd)
+    except OSError:
+        pass
+
+
+def port_locked_by_other(port: str) -> bool:
+    """Держит ли порт прямо сейчас другой процесс (лидар или модуль шасси)."""
+    fd = try_lock_port(port)
+    if fd is None:
+        return True
+    unlock_port(fd)
+    return False
+
+
+def lidar_reserved_ports() -> set[str]:
+    """Порты, которые отданы лидару настройками (их не должны занимать модули шасси).
+
+    Сюда входит порт из ``RC_LIDAR_PORT`` (вместе с realpath — на роботе это
+    обычно ``/dev/serial/by-id/…`` → ``/dev/ttyUSB1``) и именованные устройства
+    лидара (``/dev/rplidar*``, ``/dev/serial/by-id/*lidar*`` и т. п.). Полный
+    перебор USB сюда не входит: иначе ``RC_SLAM_SOURCE=auto`` оставил бы шасси
+    вовсе без портов.
+
+    Именно отсутствие этого списка и ломало лидар в веб-интерфейсе: источник
+    данных шасси в режиме ``auto`` сам находил все ``/dev/ttyUSB*`` и открывал
+    порт лидара, вычитывая из него байты. Скрипт ``scripts/lidar_check.py`` при
+    этом работал — он запускается, когда веб-приложения остановлены.
+    """
+    reserved: set[str] = set()
+    for path in discover_ports(
+        configured=os.environ.get("RC_LIDAR_PORT"),
+        autoprobe=False,
+        excluded=excluded_ports(),
+    ):
+        reserved.add(path)
+        try:
+            reserved.add(os.path.realpath(path))
+        except OSError:
+            continue
+    return {p for p in reserved if p}
+
+
+def config_conflict_note() -> str:
+    """Предупреждение, если порт лидара отдан настройками мастеру/шасси."""
+    configured = (os.environ.get("RC_LIDAR_PORT") or "").strip()
+    if not configured:
+        return ""
+    blocked = excluded_ports()
+    blocked_real = {os.path.realpath(p) for p in blocked if p}
+    conflict = []
+    for chunk in configured.replace(";", ",").split(","):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        for path in glob.glob(chunk) or [chunk]:
+            try:
+                real = os.path.realpath(path)
+            except OSError:
+                real = path
+            if path in blocked or real in blocked_real:
+                conflict.append(path)
+    if not conflict:
+        return ""
+    return ("порт лидара %s исключён настройками мастера/шасси (RC_SLAM_PORT, "
+            "RC_SLAM_PORTS или RC_LIDAR_EXCLUDE) — лидар его не откроет; убери "
+            "его оттуда или задай лидару другой порт" % ", ".join(sorted(set(conflict))))
+
+
 def discover_ports(
     *,
     configured: Optional[str] = None,
@@ -870,11 +1009,39 @@ def discover_ports(
     return found
 
 
+def stable_port_path(port: str) -> str:
+    """Постоянное имя порта: ``/dev/serial/by-id/…`` вместо ``/dev/ttyUSB1``.
+
+    Номер ``ttyUSBx`` зависит от порядка включения USB-устройств: после
+    перезагрузки или переподключения лидар может оказаться на другом номере, и
+    закреплённый в ``.env`` порт перестанет работать. Имя из ``/dev/serial/by-id``
+    привязано к самому переходнику, поэтому в настройках сохранять нужно его.
+    Если такого имени нет, возвращается исходный путь.
+    """
+    if not port:
+        return port
+    try:
+        real = os.path.realpath(port)
+    except OSError:
+        return port
+    for pattern in ("/dev/serial/by-id/*", "/dev/serial/by-path/*"):
+        for link in sorted(glob.glob(pattern), key=_natural_key):
+            try:
+                if os.path.realpath(link) == real:
+                    return link
+            except OSError:
+                continue
+    return port
+
+
 def usb_diagnostics() -> dict[str, Any]:
     """Read-only USB/serial inventory; never open ports owned by the robot.
 
     Include excluded ports so a chassis-port configuration mistake is visible.
     Access is checked as the running service user, not as an administrator.
+    Report the interpreter and pyserial too: the check script and the web app
+    must run in the same virtualenv, otherwise the lidar is "found" by the
+    script and never read by the console.
     """
     blocked = excluded_ports()
     blocked_real = {os.path.realpath(p) for p in blocked}
@@ -887,7 +1054,12 @@ def usb_diagnostics() -> dict[str, Any]:
             "excluded": os.path.realpath(path) in blocked_real,
         })
     usable = [p for p in ports if not p["excluded"]]
-    if not ports:
+    pyserial = pyserial_version()
+    if pyserial is None:
+        summary = ("pyserial не установлен в интерпретаторе %s — USB-лидар не "
+                   "читается: запусти ./scripts/ensure_deps.sh и перезапусти "
+                   "веб-приложения из .venv" % sys.executable)
+    elif not ports:
         summary = ("USB/serial-порты не обнаружены: проверь питание, USB-кабель "
                    "с передачей данных и драйвер USB-переходника")
     elif not usable:
@@ -899,7 +1071,52 @@ def usb_diagnostics() -> dict[str, Any]:
     else:
         summary = ("USB/serial-порты доступны; это ещё не подтверждает наличие лидара. "
                    "Программа автоматически подбирает протокол, скорость и управление мотором")
-    return {"ports": ports, "summary": summary}
+    conflict = config_conflict_note()
+    if conflict:
+        summary = conflict + "; " + summary
+    return {
+        "ports": ports,
+        "summary": summary,
+        "pyserial": pyserial,
+        "python": sys.executable,
+        "config_conflict": conflict or None,
+    }
+
+
+def startup_summary() -> list[str]:
+    """Строки журнала запуска: с чем лидар собирается читать порт.
+
+    На роботе это ответ на вопрос «сохранились ли настройки и перезапущено ли
+    приложение»: в журнале пульта (8080) и бортового экрана (8090) видно, каким
+    интерпретатором запущен процесс, есть ли в нём pyserial, какие ``RC_LIDAR_*``
+    реально прочитаны из ``.env`` и какие порты будут перебираться.
+    """
+    version = pyserial_version()
+    lines = [
+        "интерпретатор: %s · pyserial: %s" % (sys.executable, version or "НЕТ (лидар не читается)"),
+        "настройки: RC_LIDAR_PORT=%s · RC_LIDAR_PROTOCOL=%s · RC_LIDAR_BAUD=%s · "
+        "RC_LIDAR_MOTOR=%s · RC_LIDAR_AUTOPROBE=%s"
+        % (
+            os.environ.get("RC_LIDAR_PORT") or "(автопоиск)",
+            os.environ.get("RC_LIDAR_PROTOCOL") or "auto",
+            os.environ.get("RC_LIDAR_BAUD") or "(автоподбор)",
+            os.environ.get("RC_LIDAR_MOTOR") or "auto",
+            os.environ.get("RC_LIDAR_AUTOPROBE") or "1",
+        ),
+    ]
+    blocked = sorted(p for p in excluded_ports() if p)
+    lines.append("исключены (мастер/шасси): %s" % (", ".join(blocked) if blocked else "нет"))
+    ports = discover_ports(configured=os.environ.get("RC_LIDAR_PORT"))
+    lines.append("порты-кандидаты: %s" % (", ".join(ports) if ports else "не найдены"))
+    conflict = config_conflict_note()
+    if conflict:
+        lines.append("ВНИМАНИЕ: " + conflict)
+    if version is None:
+        lines.append(
+            "ВНИМАНИЕ: pyserial не установлен в этом интерпретаторе — запусти "
+            "./scripts/ensure_deps.sh и поднимай веб-приложения из .venv"
+        )
+    return lines
 
 
 def lidar_profiles(protocol: str = "auto", baud: Optional[int] = None) -> list[Tuple[str, int]]:
@@ -1182,6 +1399,12 @@ class LidarManager:
         # прошлом круге (видно в GET /api/lidar → tried).
         self._rotate = 0
         self._fallback_all = False
+        #: Итог последней попытки на порту (для ``tried`` в статусе).
+        self._port_note = "нет данных"
+        #: Порт, на котором лидар реально отвечал: следующий круг начинаем с
+        #: него, а не «со следующего» — иначе после короткого обрыва связи
+        #: перебор заново тратил по несколько секунд на каждый мёртвый порт.
+        self._sticky: Optional[str] = None
         self.tried: list[dict[str, Any]] = []
         self._logged_ports: tuple[str, ...] = ()
         self._logged_reason = ""
@@ -1287,11 +1510,19 @@ class LidarManager:
             "ok": True,
             "connected": is_fresh,
             "source": src if is_fresh else "no_signal",
+            # Демо-скан (стенд без железа) никогда не выдаётся за реальный:
+            # флаг ставит слой API, а соседний процесс по нему отказывается
+            # принимать выдуманные точки за скан с USB-лидара.
+            "demo": False,
             "points_count": len(scan) if is_fresh else 0,
             "scan_at": scan_at,
             "age_s": round(now - scan_at, 2) if scan_at > 0 else None,
             "nearest_m": near if is_fresh else None,
             "configured_port": self.port,
+            # В каком интерпретаторе работает веб-приложение и есть ли в нём
+            # pyserial: проверка лидара и пульт обязаны запускаться из одной .venv.
+            "python": sys.executable,
+            "pyserial": pyserial_version(),
             "usb_diagnostics": usb_diagnostics() if not is_fresh else None,
             "reason": reason,
             "hint": self.hint,
@@ -1314,17 +1545,44 @@ class LidarManager:
         ``wide=False`` (``RC_LIDAR_AUTOPROBE=0``) — узкий список: только порт из
         ``RC_LIDAR_PORT`` и именованные symlink'и; полный перебор в этом случае
         делает :meth:`_serial_worker` на следующем круге.
+
+        Порт, на котором лидар уже отвечал (``self._sticky``), ставится первым:
+        после короткого обрыва связи скан возвращается сразу, а не после обхода
+        всех мёртвых портов.
         """
         ports = discover_ports(
             configured=self.port, autoprobe=wide, excluded=self.excluded
         )
         if ports:
-            step = self._rotate % len(ports)
-            if step:
-                ports = ports[step:] + ports[:step]
-            self._rotate = step + 1
+            known = self._sticky_port(ports)
+            if known is not None:
+                ports = [known] + [p for p in ports if p != known]
+                self._rotate = 0
+            else:
+                step = self._rotate % len(ports)
+                if step:
+                    ports = ports[step:] + ports[:step]
+                self._rotate = step + 1
         self.candidates = ports
         return ports
+
+    def _sticky_port(self, ports: Sequence[str]) -> Optional[str]:
+        """Порт из списка, совпадающий с уже найденным лидаром (по устройству)."""
+        if not self._sticky:
+            return None
+        try:
+            wanted = os.path.realpath(self._sticky)
+        except OSError:
+            wanted = self._sticky
+        for path in ports:
+            if path == self._sticky:
+                return path
+            try:
+                if os.path.realpath(path) == wanted:
+                    return path
+            except OSError:
+                continue
+        return None
 
     def _excluded_note(self) -> str:
         """Подсказка про порты, которые лидару запрещено трогать (мастер/шасси)."""
@@ -1445,16 +1703,16 @@ class LidarManager:
                     continue
                 try:
                     ok = self._read_port(serial, port)
+                    note = self._port_note
                 finally:
                     self._release_port_lock()
-                self.tried.append({
-                    "port": port,
-                    "ok": ok,
-                    "note": "данные пошли" if ok else "нет данных",
-                })
+                self.tried.append({"port": port, "ok": ok, "note": note})
                 if ok:
                     progressed = True
                     self._fallback_all = False
+                    # Порт, на котором реально пошли точки, — первый в следующем
+                    # круге: после обрыва связи лидар находится сразу.
+                    self._sticky = port
                     break
 
             if not progressed:
@@ -1497,17 +1755,37 @@ class LidarManager:
                 time.sleep(LIDAR_RESCAN_S)
 
     def _read_port(self, serial, port: str) -> bool:
-        """Подбирает параметры и читает скан. True — данные шли (до обрыва)."""
+        """Подбирает параметры и читает скан. True — данные шли (до обрыва).
+
+        Короткий итог попытки пишется в ``self._port_note`` и попадает в
+        ``GET /api/lidar`` → ``tried``: на экране различимы «нет данных»,
+        «занят» и «нет доступа», а не одно «нет данных» на все случаи.
+        """
+        self._port_note = "нет данных"
         self._set_status("подбираю параметры порта %s…" % port, quiet=True)
         try:
             ser = open_serial(serial, port, RPLIDAR_BAUDS[0])
         except Exception as exc:  # noqa: BLE001 — порт занят/пропал/нет прав
             self.last_error = "%s: %s" % (port, exc)
+            text = str(exc).lower()
             hint = ""
-            if isinstance(exc, PermissionError) or "permission" in str(exc).lower():
+            if isinstance(exc, PermissionError) or "permission" in text:
                 hint = "добавь пользователя в группу dialout: sudo usermod -aG dialout $USER (и перезайди)"
+                self._port_note = "нет доступа"
+            elif "busy" in text or "resource" in text or "in use" in text:
+                # Порт уже открыт кем-то другим: источник данных шасси
+                # (RC_SLAM_SOURCE=auto/serial), второй процесс пульта,
+                # rplidar_ros или Serial Monitor. Это не «лидар не отвечает» —
+                # причина другая, и на экране она должна быть другой.
+                hint = ("порт открыт другой программой: источник данных шасси "
+                        "(RC_SLAM_SOURCE/RC_SLAM_PORTS), второй процесс пульта, "
+                        "rplidar_ros или Serial Monitor")
+                self._port_note = "занят"
             elif getattr(serial, "SerialException", None) and isinstance(exc, serial.SerialException):
                 hint = "порт занят другой программой (второй пульт, rplidar_ros, Serial Monitor)"
+                self._port_note = "не открылся"
+            else:
+                self._port_note = "не открылся"
             self._set_status("порт %s не открылся" % port, hint=hint, quiet=True)
             return False
 
@@ -1525,6 +1803,7 @@ class LidarManager:
             )
         except Exception as exc:  # noqa: BLE001 — кабель выдернули на ходу
             self.last_error = "%s: %s" % (port, exc)
+            self._port_note = "обрыв"
             self._set_status("обрыв связи с портом %s" % port, hint=str(exc), quiet=True)
             return False
         finally:
@@ -1571,24 +1850,13 @@ class LidarManager:
     # ------------------ межпроцессный замок и обмен сканом ------------------ #
 
     def _lock_path(self, port: str) -> Path:
-        name = re.sub(r"[^A-Za-z0-9_.-]", "_", port.strip("/").replace("/", "-")) or "port"
-        return DATA_DIR / ("lidar-%s.lock" % name)
+        """Файл замка порта (общий с модулями шасси — см. :func:`port_lock_file`)."""
+        return port_lock_file(port)
 
     def _acquire_port_lock(self, port: str) -> bool:
         """Пытается занять порт. False — его уже читает другой процесс робота."""
-        if fcntl is None or not port:  # не-POSIX: замки недоступны, читаем как читали
-            return True
-        try:
-            path = self._lock_path(port)
-            path.parent.mkdir(parents=True, exist_ok=True)
-            fd = os.open(str(path), os.O_RDWR | os.O_CREAT, 0o644)
-        except OSError as exc:  # нет каталога data/ и т.п. — не мешаем чтению
-            log.debug("Лидар: замок порта %s недоступен: %s", port, exc)
-            return True
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            os.close(fd)
+        fd = try_lock_port(port)
+        if fd is None:
             return False
         self._release_port_lock()
         self._lock_fd = fd
@@ -1596,25 +1864,23 @@ class LidarManager:
 
     def _release_port_lock(self) -> None:
         fd, self._lock_fd = self._lock_fd, None
-        if fd is None:
-            return
-        try:
-            if fcntl is not None:
-                fcntl.flock(fd, fcntl.LOCK_UN)
-        except OSError:
-            pass
-        try:
-            os.close(fd)
-        except OSError:
-            pass
+        unlock_port(fd)
 
     def _peer_cycle(self) -> bool:
-        """Берёт готовый скан у второго процесса робота (у него занят порт)."""
-        for url in self.peer_urls:
+        """Берёт готовый скан у второго процесса робота (у него занят порт).
+
+        Демо-скан соседа за реальный не принимается: иначе стенд без лидара
+        (``RC_SLAM_SOURCE=sim``) «заражал» второй процесс выдуманными точками,
+        и оба экрана показывали бы демо под видом работающего лидара.
+        """
+        for url in self._peer_targets():
             data = _fetch_json(url)
             if not isinstance(data, dict):
                 continue
             scan = data.get("scan")
+            if data.get("demo"):
+                self._peer_reason = "у соседа демо-скан (реального лидара там нет)"
+                continue
             if isinstance(scan, list) and scan:
                 count = self.feed_points(scan, source_label="peer")
                 detected = data.get("detected")
@@ -1638,6 +1904,10 @@ class LidarManager:
         self._peer_misses += 1
         time.sleep(0.4)
         return False
+
+    def _peer_targets(self) -> list[str]:
+        """Адреса соседей без собственного: у себя скан брать бессмысленно."""
+        return [url for url in (self.peer_urls or peer_urls()) if not is_self_url(url)]
 
     # ----------------------- ROS 2 интеграция ----------------------- #
 
@@ -1688,6 +1958,34 @@ class LidarManager:
                 log.debug("ROS лидар spin завершён: %s", exc)
 
         threading.Thread(target=spin, daemon=True).start()
+
+
+#: HTTP-порты, которые слушает ЭТОТ процесс (пульт 8080 или бортовой экран 8090).
+#: У себя самого скан брать не нужно: это лишний запрос и «сосед сообщает: …»
+#: из собственного статуса в подсказке.
+_SELF_PORTS: set[int] = set()
+
+
+def set_self_port(port: Any) -> None:
+    """Запоминает порт HTTP этого процесса, чтобы не ходить к себе за сканом."""
+    try:
+        number = int(port)
+    except (TypeError, ValueError):
+        return
+    if number > 0:
+        _SELF_PORTS.add(number)
+
+
+def url_port(url: str) -> Optional[int]:
+    """Порт из адреса вида ``http://127.0.0.1:8090/api/lidar`` (None, если нет)."""
+    match = re.search(r"://[^/]*?:(\d+)", url or "")
+    return int(match.group(1)) if match else None
+
+
+def is_self_url(url: str) -> bool:
+    """Ведёт ли адрес на этот же процесс."""
+    port = url_port(url)
+    return port is not None and port in _SELF_PORTS
 
 
 def peer_urls() -> list[str]:

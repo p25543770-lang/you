@@ -52,7 +52,7 @@ from werkzeug.serving import make_server
 
 from robot_control.camera import CameraManager
 from robot_control.config import PROJECT_ROOT, Config
-from robot_control.lidar import LidarManager
+from robot_control.lidar import LidarManager, set_self_port
 from robot_control.slam import (
     GUI_DIR,
     KIOSK_PAGE,
@@ -62,7 +62,10 @@ from robot_control.slam import (
     build_state,
     dispatch_steering_command,
     grant_steering_access,
+    lidar_for_screen,
+    lidar_status_payload,
     revoke_steering_access,
+    start_lidar,
     steering_access_valid,
     steering_control_info,
 )
@@ -452,6 +455,12 @@ def create_kiosk_app(config: Config | None = None) -> Flask:
         state = None
     app.extensions["rc_slam"] = state
 
+    # Лидар стартует сразу, а не по первому запросу экрана: .env уже прочитан,
+    # а USB-порт должен занять именно этот процесс (пульт возьмёт скан по HTTP).
+    app.extensions["rc_lidar"] = start_lidar(
+        testing=config.testing, port=kiosk_port(),
+    )
+
     def _send(name: str):
         from flask import send_from_directory
         response = send_from_directory(GUI_DIR, name)
@@ -477,18 +486,20 @@ def create_kiosk_app(config: Config | None = None) -> Flask:
     def api_state():
         if state is None:
             return jsonify({"ok": False, "error": "no source"}), 503
-        lidar = LidarManager.get_instance()
-        mgr_scan = lidar.get_scan()
+        manager = LidarManager.get_instance()
         snap = state.snapshot()
-        lidar_data = mgr_scan if mgr_scan is not None else snap.get("lidar")
+        points, demo = lidar_for_screen(manager, snap)
         # Телеметрия и признак поддержки публичны; команды модулю — только после PIN.
         return jsonify({"ok": True, "data": {
             "battery": snap.get("battery"),
             "motors": snap.get("motors"),
-            "lidar": lidar_data,
+            "lidar": points,
+            # Демо (стенд без железа) помечено отдельно: экран пишет «демо»,
+            # а не «в реальном времени».
+            "lidarDemo": demo,
             # Причина, если скана нет: экран пишет её прямо под картой,
             # а не молчит (порт не найден, скорость не та, порт занят и т. д.).
-            "lidarStatus": lidar.get_status(),
+            "lidarStatus": lidar_status_payload(manager, points, demo),
             "speedMps": snap.get("speedMps"),
             "powerKw": snap.get("powerKw"),
             "mode": snap.get("mode"),
@@ -501,18 +512,22 @@ def create_kiosk_app(config: Config | None = None) -> Flask:
     @app.get("/api/lidar")
     @app.get("/api/scan")
     def api_kiosk_lidar_get():
+        """Скан и статус лидара бортового экрана.
+
+        По этому адресу пульт (8080) берёт скан, когда порт лидара держит
+        бортовой экран, — поэтому демо-скан отдаётся только с флагом ``demo``.
+        """
         mgr = LidarManager.get_instance()
         scan = mgr.get_scan()
+        demo = False
         if scan is None and state and hasattr(state, "source"):
             try:
                 src_data = getattr(state.source, "read", lambda: {})()
                 scan = src_data.get("lidar")
-            except Exception:
-                pass
-        status = mgr.get_status()
-        status["scan"] = scan
-        status["count"] = len(scan) if scan else 0
-        return jsonify(status)
+                demo = bool(scan)
+            except Exception:  # noqa: BLE001 — источник может не уметь read()
+                scan = None
+        return jsonify(lidar_status_payload(mgr, scan, demo))
 
     @app.post("/api/lidar")
     @app.post("/api/scan")
@@ -949,6 +964,9 @@ def main(argv: Sequence[str] | None = None) -> int:
 
     host = args.host or cfg.bind_host
     port = args.port or kiosk_port()
+    # Свой HTTP-порт запоминаем до старта менеджера лидара: у себя же скан
+    # брать не нужно (иначе в подсказку попадает собственный статус).
+    set_self_port(port)
     url = kiosk_url(port)
     base_url = f"http://127.0.0.1:{port}"
 

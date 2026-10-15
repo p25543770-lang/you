@@ -337,3 +337,27 @@ def test_unknown_page_returns_404(client):
     api = client.get("/api/robot/state")
     assert api.status_code == 404
     assert api.get_json() == {"error": "not_found"}
+
+
+def test_broken_slam_source_shows_readable_503(config, operator, monkeypatch):
+    """Источник данных не поднялся: «/» показывает причину, а не падает сам.
+
+    Текст ошибки нужен после выхода из ``except``, а имя ``exc`` Python в конце
+    блока удаляет — сообщение сохраняется для страницы заранее, иначе вместо 503
+    оператор получал NameError.
+    """
+    import robot_control.app as app_module
+
+    def boom(**kwargs):
+        raise RuntimeError("нет источника данных")
+
+    monkeypatch.setattr(app_module, "build_state", boom)
+    application = app_module.create_app(config)
+    broken_client = application.test_client()
+    assert login(broken_client).status_code == 302
+
+    response = broken_client.get("/")
+    assert response.status_code == 503
+    text = response.get_data(as_text=True)
+    assert "Интерфейс робота не подключён" in text
+    assert "нет источника данных" in text

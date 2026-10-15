@@ -30,7 +30,12 @@ from pathlib import Path
 from flask import Blueprint, Response, jsonify, request, send_from_directory, session
 
 from robot_control.camera import CameraManager
-from robot_control.lidar import LidarManager
+from robot_control.lidar import (
+    LidarManager,
+    lidar_reserved_ports,
+    set_self_port,
+    startup_summary,
+)
 
 log = logging.getLogger("robot_control.slam")
 
@@ -169,13 +174,44 @@ def _present_ports(ports):
     return [p for p in ports if os.path.exists(p)]
 
 
+def chassis_ports(ports):
+    """Порты модулей шасси без тех, что отданы лидару.
+
+    USB-порт можно читать одному: если источник данных шасси в режиме ``auto``
+    сам найдёт все ``/dev/ttyUSB*`` и откроет порт лидара, лидар останется без
+    данных — именно так «скана нет» в веб-интерфейсе при живом железе (скрипт
+    ``scripts/lidar_check.py`` при этом работает: его запускают, когда пульт
+    остановлен). Порт из ``RC_LIDAR_PORT`` сравнивается по realpath, потому что
+    на роботе это обычно ``/dev/serial/by-id/…`` → ``/dev/ttyUSB1``.
+    """
+    reserved = lidar_reserved_ports()
+    if not reserved:
+        return list(ports)
+    kept, skipped = [], []
+    for port in ports:
+        try:
+            real = os.path.realpath(port)
+        except OSError:
+            real = port
+        if port in reserved or real in reserved:
+            skipped.append(port)
+        else:
+            kept.append(port)
+    if skipped:
+        log.info(
+            "шасси: порт(ы) %s отданы лидару (RC_LIDAR_PORT) — модули их не открывают",
+            ", ".join(skipped),
+        )
+    return kept
+
+
 def _autodetect_ports():
-    """Реально существующие UART-адаптеры робота."""
-    found = _present_ports(DEFAULT_PORTS)
+    """Реально существующие UART-адаптеры робота (кроме порта лидара)."""
+    found = chassis_ports(_present_ports(DEFAULT_PORTS))
     if found:
         return found
     for pattern in ("/dev/ttyACM*", "/dev/ttyUSB*"):
-        found = sorted(glob.glob(pattern))
+        found = chassis_ports(sorted(glob.glob(pattern)))
         if found:
             return found
     return []
@@ -194,7 +230,13 @@ def make_source(mode: str = "auto", ports=None):
     if mode == "sim":
         return mod.SimSource()
     if mode == "serial":
-        return mod.SerialSource(list(ports or DEFAULT_PORTS))
+        # Явно заданные RC_SLAM_PORTS — воля оператора: их лидар и так не
+        # трогает (они попадают в excluded_ports()). Если список пуст, ищем
+        # сами — но порт лидара не занимаем (см. chassis_ports).
+        chosen = list(ports) if ports else (_autodetect_ports() or chassis_ports(DEFAULT_PORTS))
+        if not chosen:
+            log.info("шасси: живых UART-портов нет (порт лидара не в счёт) — значений не будет")
+        return mod.SerialSource(chosen)
     if mode == "ros":
         return mod.RosSource()
     if mode == "master":
@@ -241,6 +283,68 @@ def _send(name: str):
     return response
 
 
+def lidar_for_screen(manager, snap):
+    """Точки лидара для экрана и признак, что это демо.
+
+    Реальные точки приходят только из менеджера лидара: USB-порт (RPLIDAR,
+    LD06/LD19, LDS-01/LDS-02), ROS 2 ``/scan``, HTTP ``POST /api/lidar`` или
+    соседний процесс робота. Всё, что лежит в ``snap["lidar"]`` сверх этого, —
+    данные источника-симуляции (``RC_SLAM_SOURCE=sim``): без пометки они
+    выглядели бы на экране как «в реальном времени · 180 точек», то есть демо
+    выдавалось бы за работающий лидар.
+    """
+    scan = manager.get_scan()
+    if scan:
+        return scan, False
+    fallback = snap.get("lidar") if isinstance(snap, dict) else None
+    if isinstance(fallback, list) and fallback:
+        return fallback, True
+    return None, False
+
+
+def lidar_status_payload(manager, points, demo):
+    """Единый статус лидара для ``/api/lidar``, ``/api/state`` и киоска.
+
+    Одинаковый во всех ответах: соседний процесс робота берёт по нему скан, а
+    экран — причину «скана нет». Флаг ``demo`` не даёт выдуманному скану
+    разъехаться по обоим экранам как реальному.
+    """
+    status = manager.get_status()
+    status["demo"] = bool(demo)
+    if demo and not status["connected"]:
+        status["reason"] = "демо-скан источника данных (реального лидара нет): " + status["reason"]
+    status["scan"] = points
+    status["count"] = len(points) if points else 0
+    return status
+
+
+def start_lidar(*, testing: bool = False, port: int | None = None, force: bool = False):
+    """Запускает чтение лидара при старте веб-приложения.
+
+    Без этого менеджер создавался только по первому запросу к API: до открытия
+    страницы USB-порт мог занять источник данных шасси, а пульт и бортовой
+    экран начинали читать лидар в разное время. ``.env`` к этому моменту уже
+    прочитан (``Config.from_env``), поэтому настройки лидара берутся из него,
+    а в журнал пишется, каким интерпретатором запущен процесс и что он видит.
+
+    В тестах не запускается (``PYTEST_CURRENT_TEST``/``testing``): поток
+    перебора портов там не нужен. ``RC_LIDAR_AUTOSTART=0`` отключает ранний
+    старт и на роботе.
+    """
+    if (os.environ.get("RC_LIDAR_AUTOSTART") or "1").strip().lower() in {
+        "0", "false", "no", "off", "нет",
+    }:
+        return None
+    if not force and (testing or os.environ.get("PYTEST_CURRENT_TEST")):
+        return None
+    if port is not None:
+        set_self_port(port)
+    manager = LidarManager.get_instance()
+    for line in startup_summary():
+        log.info("Лидар: %s", line)
+    return manager
+
+
 def create_blueprint(state, guard=None) -> Blueprint:
     """Маршруты интерфейса RUS SLAM.
 
@@ -280,13 +384,19 @@ def create_blueprint(state, guard=None) -> Blueprint:
     @bp.get("/api/kiosk_state")
     def api_kiosk_state():
         """Публичная телеметрия и признак, поддерживает ли источник адресный поворот."""
-        mgr_scan = LidarManager.get_instance().get_scan()
+        manager = LidarManager.get_instance()
         snap = state.snapshot()
-        lidar_data = mgr_scan if mgr_scan is not None else snap.get("lidar")
+        points, demo = lidar_for_screen(manager, snap)
         public = {
             "battery": snap.get("battery"),
             "motors": snap.get("motors"),
-            "lidar": lidar_data,
+            "lidar": points,
+            # Демо (стенд без железа) помечено: экран пишет «демо», а не
+            # «в реальном времени».
+            "lidarDemo": demo,
+            # Причина «скана нет» нужна и на этом экране: robot.js берёт её
+            # отсюда, а раньше в ответе её не было вовсе.
+            "lidarStatus": lidar_status_payload(manager, points, demo),
             "speedMps": snap.get("speedMps"),
             "powerKw": snap.get("powerKw"),
             "mode": snap.get("mode"),
@@ -345,12 +455,13 @@ def create_blueprint(state, guard=None) -> Blueprint:
     @guard
     def api_state():
         snap = state.snapshot()
-        lidar = LidarManager.get_instance()
-        if snap.get("lidar") is None:
-            snap["lidar"] = lidar.get_scan()
+        manager = LidarManager.get_instance()
+        points, demo = lidar_for_screen(manager, snap)
+        snap["lidar"] = points
+        snap["lidarDemo"] = demo
         # Причина, если скана нет: экран пишет её под картой (порт лидара не
         # найден, не та скорость, порт занят вторым процессом робота и т. д.).
-        snap["lidarStatus"] = lidar.get_status()
+        snap["lidarStatus"] = lidar_status_payload(manager, points, demo)
         snap["cameras"] = CameraManager.get_instance().list_cameras()
         return jsonify({"ok": True, "data": snap})
 
@@ -358,18 +469,24 @@ def create_blueprint(state, guard=None) -> Blueprint:
     @bp.get("/api/lidar")
     @bp.get("/api/scan")
     def api_lidar_get():
+        """Скан и статус лидара.
+
+        Ответ открыт без авторизации намеренно: по нему второй процесс робота
+        (пульт 8080 ↔ бортовой экран 8090) берёт скан, когда USB-порт занят
+        соседом. Точки источника-симуляции отдаются только с флагом ``demo`` —
+        сосед их не принимает, а экран показывает как демо.
+        """
         mgr = LidarManager.get_instance()
         scan = mgr.get_scan()
+        demo = False
         if scan is None and hasattr(state, "source"):
             try:
                 src_data = getattr(state.source, "read", lambda: {})()
                 scan = src_data.get("lidar")
-            except Exception:
-                pass
-        status = mgr.get_status()
-        status["scan"] = scan
-        status["count"] = len(scan) if scan else 0
-        return jsonify(status)
+                demo = bool(scan)
+            except Exception:  # noqa: BLE001 — источник может не уметь read()
+                scan = None
+        return jsonify(lidar_status_payload(mgr, scan, demo))
 
     @bp.post("/api/lidar")
     @bp.post("/api/scan")
