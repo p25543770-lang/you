@@ -493,7 +493,12 @@
     if (!st || typeof st !== 'object') return '';
     const reason = st.reason ? String(st.reason) : '';
     const hint = st.hint ? String(st.hint) : '';
-    return hint ? reason + ' — ' + hint : reason;
+    const usb = st.usb_diagnostics;
+    const ports = usb && Array.isArray(usb.ports) ? usb.ports.map((p) =>
+      p.port + (p.excluded ? ' (исключён)' : p.accessible ? ' (доступен)' : ' (нет доступа)')
+    ).join(', ') : '';
+    const diagnosis = usb ? [usb.summary, ports].filter(Boolean).join(': ') : '';
+    return [reason, hint, diagnosis].filter(Boolean).join(' — ');
   }
 
   function renderLidar(view, d) {
