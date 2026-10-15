@@ -1342,3 +1342,26 @@ def test_lidar_check_cli_json_for_scripts(fake_serial, fake_port, capsys):
     assert report["ok"] is True
     assert report["reports"][0]["protocol"] == "ld06"
     assert report["reports"][0]["baud"] == 230400
+
+
+def test_usb_diagnostics_no_ports(monkeypatch):
+    monkeypatch.setattr(lidar, "discover_ports", lambda **kw: [])
+    monkeypatch.setattr(lidar, "excluded_ports", lambda: set())
+    result = lidar.usb_diagnostics()
+    assert result["ports"] == []
+    assert "не обнаружены" in result["summary"]
+
+
+@pytest.mark.parametrize("accessible,excluded,expected", [
+    (False, False, "Нет прав"),
+    (True, False, "доступны"),
+    (True, True, "исключены"),
+])
+def test_usb_diagnostics_access_and_exclusion(monkeypatch, accessible, excluded, expected):
+    monkeypatch.setattr(lidar, "discover_ports", lambda **kw: ["/dev/ttyUSB0"])
+    monkeypatch.setattr(lidar, "excluded_ports", lambda: {"/dev/ttyUSB0"} if excluded else set())
+    monkeypatch.setattr(lidar.os, "access", lambda *args: accessible)
+    result = lidar.usb_diagnostics()
+    assert expected in result["summary"]
+    assert result["ports"][0]["accessible"] is accessible
+    assert result["ports"][0]["excluded"] is excluded

@@ -870,6 +870,38 @@ def discover_ports(
     return found
 
 
+def usb_diagnostics() -> dict[str, Any]:
+    """Read-only USB/serial inventory; never open ports owned by the robot.
+
+    Include excluded ports so a chassis-port configuration mistake is visible.
+    Access is checked as the running service user, not as an administrator.
+    """
+    blocked = excluded_ports()
+    blocked_real = {os.path.realpath(p) for p in blocked}
+    ports = []
+    for path in discover_ports(configured=os.environ.get("RC_LIDAR_PORT")):
+        ports.append({
+            "port": path,
+            "device": os.path.realpath(path),
+            "accessible": os.access(path, os.R_OK | os.W_OK),
+            "excluded": os.path.realpath(path) in blocked_real,
+        })
+    usable = [p for p in ports if not p["excluded"]]
+    if not ports:
+        summary = ("USB/serial-порты не обнаружены: проверь питание, USB-кабель "
+                   "с передачей данных и драйвер USB-переходника")
+    elif not usable:
+        summary = ("Все обнаруженные порты исключены настройками мастера/шасси: "
+                   "проверь RC_SLAM_PORT, RC_SLAM_PORTS и RC_LIDAR_EXCLUDE")
+    elif not any(p["accessible"] for p in usable):
+        summary = ("Нет прав чтения/записи портов: добавь пользователя службы "
+                   "в группу dialout и перезапусти его сеанс/службу")
+    else:
+        summary = ("USB/serial-порты доступны; это ещё не подтверждает наличие лидара. "
+                   "Программа автоматически подбирает протокол, скорость и управление мотором")
+    return {"ports": ports, "summary": summary}
+
+
 def lidar_profiles(protocol: str = "auto", baud: Optional[int] = None) -> list[Tuple[str, int]]:
     """Список (протокол, скорость) для подбора: от частых моделей к редким.
 
@@ -1260,6 +1292,7 @@ class LidarManager:
             "age_s": round(now - scan_at, 2) if scan_at > 0 else None,
             "nearest_m": near if is_fresh else None,
             "configured_port": self.port,
+            "usb_diagnostics": usb_diagnostics() if not is_fresh else None,
             "reason": reason,
             "hint": self.hint,
             "detected": dict(self.detected) if self.detected else None,
