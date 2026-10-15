@@ -522,6 +522,23 @@ class SerialSource:
     открытыми навсегда — включая порт USB-лидара, из которого он вычитывал
     байты: лидар в веб-интерфейсе «не отвечал», хотя ``scripts/lidar_check.py``
     (его запускают при остановленном пульте) работал.
+
+    Замок порта (``claim``/``release``): пока порт не доказал, что он — модуль
+    шасси, его читает только один процесс робота. ``claim(port)`` возвращает
+    признак владения или ``None``, если порт занят лидаром (тот берёт порт
+    монопольно, ``exclusive`` в pyserial) либо вторым процессом робота;
+    ``release`` снимает замок. Без этого пульт (8080) и бортовой экран (8090)
+    читали один и тот же USB-порт вдвоём: байты доставались тому, кто успел, а
+    второй получал от pyserial «device reports readiness to read but returned no
+    data (… multiple access on port?)». Лидару же порт не доставался вовсе: его
+    перебор упирался в «занят», хотя порт держало это же приложение, — и на
+    экране появлялся совет «проверь питание и кабель лидара».
+
+    Как только на порту подтвердилась телеметрия, замок снимается, а порт
+    читается дальше как раньше — в том числе вторым процессом робота: оба экрана
+    обязаны показывать одни и те же модули. Для лидара такой порт — просто «нет
+    данных»: он переберёт его вместе с остальными USB и отпустит, поделив эти
+    секунды с экранами.
     """
 
     name = "serial"
@@ -532,9 +549,14 @@ class SerialSource:
     BACKOFF_START_S = 2.0
     BACKOFF_MAX_S = 30.0
 
-    def __init__(self, ports, baud=115200):
+    def __init__(self, ports, baud=115200, claim=None, release=None):
         self.ports = ports
         self.baud = baud
+        #: Межпроцессный замок порта (см. docstring класса): ``claim(port)`` →
+        #: владение или ``None``, ``release(владение)`` — снять. ``None`` —
+        #: замков нет (отдельный запуск ``slam_gui/backend.py`` без пульта).
+        self.claim = claim
+        self.release = release or (lambda token: None)
         self.lock = threading.Lock()
         self.frames = {}                 # id модуля → последний кадр
         self.cargo = {"kg": 80, "closed": True}
@@ -552,11 +574,30 @@ class SerialSource:
         buf = b""
         backoff = self.BACKOFF_START_S
         reported_busy = False
+        announced = False
         while not self._stop:
             confirmed = False
+            token = None
+            if self.claim is not None:
+                token = self.claim(port)
+                if token is None:
+                    # Порт занят: его держит лидар (в том числе пока ищет свой
+                    # порт) или второй процесс робота. Ждём молча — не забиваем
+                    # журнал повторами и не отбираем у лидара байты.
+                    if not reported_busy:
+                        reported_busy = True
+                        self._note_busy(port, backoff)
+                    time.sleep(backoff)
+                    backoff = min(backoff * 2, self.BACKOFF_MAX_S)
+                    continue
             try:
                 with serial.Serial(port, self.baud, timeout=0.2) as dev:
-                    print("· serial: %s открыт (модуль %d)" % (port, default_id))
+                    if not announced:
+                        # «открыт» печатаем один раз на порт, а не на каждом круге
+                        # перебора: иначе журнал пульта целиком состоит из этих
+                        # строк и по нему не видно, что вообще происходит.
+                        announced = True
+                        print("· serial: %s открыт (модуль %d)" % (port, default_id))
                     reported_busy = False
                     deadline = time.monotonic() + self.PROBE_WINDOW_S
                     while not self._stop:
@@ -573,7 +614,12 @@ class SerialSource:
                                     self.frames[mid] = frame
                                     self.seen = time.time()
                         if confirmed:
-                            # Модуль говорит протоколом шасси — держим порт.
+                            # Модуль говорит протоколом шасси — порт наш, держим
+                            # его открытым. Замок при этом снимаем: второй процесс
+                            # робота должен читать модули как раньше (см. docstring).
+                            if token is not None:
+                                self.release(token)
+                                token = None
                             backoff = self.BACKOFF_START_S
                             deadline = time.monotonic() + self.PROBE_WINDOW_S
                             continue
@@ -582,21 +628,29 @@ class SerialSource:
             except Exception as exc:          # noqa: BLE001 — порт может пропасть
                 text = str(exc).lower()
                 if "busy" in text or "resource" in text:
-                    # Порт занят: его читает лидар (TIOCEXCL) или второй процесс
-                    # робота. Молча ждём — не забиваем журнал повторами.
+                    # Порт занят: его читает лидар (``exclusive``) или второй
+                    # процесс робота. Молча ждём — не забиваем журнал повторами.
                     if not reported_busy:
                         reported_busy = True
-                        print("· serial %s: порт занят (лидар или второй процесс) — жду %d с"
-                              % (port, int(backoff)))
+                        self._note_busy(port, backoff)
                 else:
                     print("! serial %s: %s — повтор через %d с" % (port, exc, int(backoff)))
+            finally:
+                if token is not None:
+                    # Порт не подтвердился как модуль шасси — отпускаем его:
+                    # следующая попытка позже, а лидар успеет забрать его себе.
+                    self.release(token)
+                    token = None
             if self._stop:
                 return
-            # Порт не отвечает протоколом шасси (или занят) — он освобождён,
-            # следующая попытка позже: лидар успеет забрать его себе.
             time.sleep(backoff)
             if not confirmed:
                 backoff = min(backoff * 2, self.BACKOFF_MAX_S)
+
+    @staticmethod
+    def _note_busy(port, backoff):
+        print("· serial %s: порт занят (лидар или второй процесс) — жду %d с"
+              % (port, int(backoff)))
 
     def read(self):
         with self.lock:
