@@ -219,6 +219,158 @@ def test_serial_source_keeps_port_with_real_chassis_telemetry(backend, monkeypat
         os.close(master)     # «отваливается» на середине чтения и шумит в логе
 
 
+def fake_serial_module(monkeypatch, opened: list):
+    """Подменяет ``serial``: открытие порта только записывается, порт «занят».
+
+    Так проверяется, что источник данных шасси вообще не берётся за порт —
+    без железа и без гонки с ним.
+    """
+
+    class FakeSerial:
+        SerialException = Exception
+
+        @staticmethod
+        def Serial(port, *args, **kwargs):  # noqa: N802 — интерфейс pyserial
+            opened.append(port)
+            raise OSError(16, "Device or resource busy")
+
+    fake = types.ModuleType("serial")
+    fake.Serial = FakeSerial.Serial
+    fake.SerialException = FakeSerial.SerialException
+    monkeypatch.setitem(sys.modules, "serial", fake)
+    return fake
+
+
+def test_chassis_does_not_touch_the_port_the_lidar_holds(tmp_path, monkeypatch, backend):
+    """Пока лидар держит порт, источник шасси его не открывает вовсе.
+
+    Пульт (8080) и бортовой экран (8090) поднимали источник данных шасси в двух
+    процессах, и один USB-порт читался двумя процессами сразу — pyserial отвечал
+    «device reports readiness to read but returned no data (… multiple access on
+    port?)». Лидару же порт не доставался ни на секунду: его перебор всё время
+    упирался в «занят», а на экране появлялся совет «проверь питание и кабель».
+    Теперь порт берётся под общий замок, и лидар всегда получает его свободным.
+    """
+    monkeypatch.setattr(lidar, "DATA_DIR", tmp_path / "locks")
+    port = tmp_path / "ttyUSB0"
+    port.write_text("")
+    opened: list = []
+    fake_serial_module(monkeypatch, opened)
+
+    monkeypatch.setattr(backend.SerialSource, "PROBE_WINDOW_S", 0.1)
+    monkeypatch.setattr(backend.SerialSource, "BACKOFF_START_S", 0.05)
+
+    token = lidar.try_lock_port(str(port))
+    assert token is not None, "замок порта не взялся"
+    source = backend.SerialSource([str(port)], claim=lidar.try_lock_port,
+                                  release=lidar.unlock_port)
+    try:
+        time.sleep(0.4)
+        assert opened == [], "источник шасси открыл порт, который держит лидар"
+        lidar.unlock_port(token)
+        token = None
+        assert wait_for(lambda: bool(opened), timeout=5.0), \
+            "после освобождения порта источник шасси не попробовал его открыть"
+    finally:
+        source._stop = True
+        lidar.unlock_port(token)
+
+
+def test_chassis_gives_the_port_back_when_there_is_no_telemetry(tmp_path, monkeypatch, backend):
+    """Порт без кадров телеметрии шасси отпускает — замок не остаётся навсегда."""
+    monkeypatch.setattr(lidar, "DATA_DIR", tmp_path / "locks")
+    port = tmp_path / "ttyUSB0"
+    port.write_text("")
+
+    class FakeDevice:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc):
+            return False
+
+        def read(self, size):  # noqa: ARG002 — пустой поток: телеметрии нет
+            time.sleep(0.01)
+            return b""
+
+    fake = types.ModuleType("serial")
+    fake.Serial = lambda *args, **kwargs: FakeDevice()  # noqa: E731 — интерфейс pyserial
+    fake.SerialException = Exception
+    monkeypatch.setitem(sys.modules, "serial", fake)
+    monkeypatch.setattr(backend.SerialSource, "PROBE_WINDOW_S", 0.1)
+    monkeypatch.setattr(backend.SerialSource, "BACKOFF_START_S", 0.05)
+
+    releases: list = []
+
+    def release(token):
+        releases.append(token)
+        lidar.unlock_port(token)
+
+    source = backend.SerialSource([str(port)], claim=lidar.try_lock_port, release=release)
+    try:
+        assert wait_for(lambda: bool(releases), timeout=5.0), \
+            "источник шасси не отпустил порт после неудачной проверки"
+    finally:
+        source._stop = True
+    assert wait_for(lambda: not lidar.port_locked_by_other(str(port)), timeout=3.0), \
+        "источник шасси оставил порт под замком — лидар его больше не получит"
+
+
+@pytest.mark.skipif(not os.path.isdir("/proc/self/fd"), reason="нужен /proc")
+def test_confirmed_module_port_is_still_read_beside_the_lidar(tmp_path, monkeypatch, backend):
+    """Живая телеметрия: замок снят и порт читается дальше — модули видит и второй процесс.
+
+    Замок нужен только на время выяснения, чей это порт. Как только телеметрия
+    подтвердилась, пульт и бортовой экран читают модули как раньше: порт с
+    модулями терять нельзя, иначе бортовой экран останется без телеметрии.
+    """
+    pytest.importorskip("serial")
+    monkeypatch.setattr(lidar, "DATA_DIR", tmp_path / "locks")
+    master, slave = pty.openpty()
+    port = os.ttyname(slave)
+    os.close(slave)
+    monkeypatch.setattr(backend.SerialSource, "PROBE_WINDOW_S", 3.0)
+    source = backend.SerialSource([port], claim=lidar.try_lock_port,
+                                  release=lidar.unlock_port)
+    try:
+        assert wait_for(lambda: open_fds_to(port) >= 1, timeout=5.0)
+        deadline = time.monotonic() + 1.5
+        while time.monotonic() < deadline:
+            os.write(master, encode_telemetry(backend))
+            time.sleep(0.05)
+        data = source.read()
+        assert [m for m in data["motors"] if m.get("online")], "телеметрия не дошла"
+        assert open_fds_to(port) >= 1, "порт с живой телеметрией был отпущен"
+        assert wait_for(lambda: not lidar.port_locked_by_other(port), timeout=3.0), \
+            "замок порта остался у шасси: второй процесс робота не прочитает модули"
+    finally:
+        source._stop = True
+        time.sleep(0.4)      # дочитываем до закрытия мастера: без этого порт
+        os.close(master)     # «отваливается» на середине чтения и шумит в логе
+
+
+def test_app_source_takes_the_same_lock_as_the_lidar(tmp_path, monkeypatch, backend):
+    """Источник шасси из приложения (RC_SLAM_SOURCE=auto) берёт общий замок порта."""
+    monkeypatch.setattr(lidar, "DATA_DIR", tmp_path / "locks")
+    port = tmp_path / "ttyUSB0"
+    port.write_text("")
+    monkeypatch.setattr(slam, "DEFAULT_PORTS", [str(port)])
+    monkeypatch.setenv("RC_LIDAR_PORT", str(tmp_path / "нет-такого-порта"))
+    opened: list = []
+    fake_serial_module(monkeypatch, opened)
+
+    token = lidar.try_lock_port(str(port))
+    assert token is not None, "замок порта не взялся"
+    source = slam.make_source("auto")
+    try:
+        assert isinstance(source, backend.SerialSource) and source.ports == [str(port)]
+        time.sleep(0.3)
+        assert opened == [], "источник шасси приложения не проверил замок порта"
+    finally:
+        source._stop = True
+        lidar.unlock_port(token)
+
+
 # ---------------------------------------------------------------------------
 # 2. Один замок на устройство, а не на имя пути
 # ---------------------------------------------------------------------------

@@ -35,6 +35,8 @@ from robot_control.lidar import (
     lidar_reserved_ports,
     set_self_port,
     startup_summary,
+    try_lock_port,
+    unlock_port,
 )
 
 log = logging.getLogger("robot_control.slam")
@@ -217,6 +219,20 @@ def _autodetect_ports():
     return []
 
 
+def chassis_source(mod, ports):
+    """Источник данных шасси на этих портах — под тем же замком, что у лидара.
+
+    Замок порта (``try_lock_port``/``unlock_port``) общий на всё приложение:
+    пока порт не доказал, что он — модуль шасси, его читает только один процесс
+    робота, а лидар (он берёт порт монопольно, ``exclusive`` в pyserial) всегда
+    получает его свободным. Без этого пульт и бортовой экран читали один USB-порт
+    вдвоём — «device reports readiness to read but returned no data (… multiple
+    access on port?)» — и лидар не мог найти себя ни на одном порту, хотя порты
+    держало это же приложение, а на экране появлялся совет «проверь кабель».
+    """
+    return mod.SerialSource(ports, claim=try_lock_port, release=unlock_port)
+
+
 def make_source(mode: str = "auto", ports=None):
     """Источник данных робота.
 
@@ -236,7 +252,7 @@ def make_source(mode: str = "auto", ports=None):
         chosen = list(ports) if ports else (_autodetect_ports() or chassis_ports(DEFAULT_PORTS))
         if not chosen:
             log.info("шасси: живых UART-портов нет (порт лидара не в счёт) — значений не будет")
-        return mod.SerialSource(chosen)
+        return chassis_source(mod, chosen)
     if mode == "ros":
         return mod.RosSource()
     if mode == "master":
@@ -253,7 +269,7 @@ def make_source(mode: str = "auto", ports=None):
     live = _present_ports(list(ports or [])) or _autodetect_ports()
     if _have("serial") and live:
         log.info("источник данных: UART-модули %s", ", ".join(live))
-        return mod.SerialSource(live)
+        return chassis_source(mod, live)
 
     log.info("источник данных: робот не подключён — значения пустые (симуляция только по RC_SLAM_SOURCE=sim)")
     return mod.NoSource()
