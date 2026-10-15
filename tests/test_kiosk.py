@@ -109,7 +109,7 @@ def test_telemetry_api_returns_only_public_values(kiosk_client):
         assert body["ok"] is True
         assert set(body["data"]) == {
             "battery", "motors", "lidar", "speedMps", "powerKw", "mode", "linkOk", "ts",
-            "source", "steeringControl", "lidarStatus",
+            "source", "steeringControl", "lidarStatus", "lidarDemo",
         }
         # причина «нет скана» видна на экране, а не только в журнале
         status = body["data"]["lidarStatus"]

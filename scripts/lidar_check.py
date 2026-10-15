@@ -10,6 +10,15 @@
     .venv/bin/python scripts/lidar_check.py --port /dev/ttyUSB0
     .venv/bin/python scripts/lidar_check.py --port /dev/ttyUSB0 --baud 256000
     .venv/bin/python scripts/lidar_check.py --json       # для скриптов
+    .venv/bin/python scripts/lidar_check.py --save-env   # записать найденное в .env
+
+``--save-env`` сохраняет найденные порт/протокол/скорость/мотор в ``.env``
+(RC_LIDAR_PORT, RC_LIDAR_PROTOCOL, RC_LIDAR_BAUD, RC_LIDAR_MOTOR), чтобы
+веб-приложения не тратили время на перебор. Порт пишется постоянным именем
+``/dev/serial/by-id/…``, если оно есть: номер ``/dev/ttyUSBx`` после
+перезагрузки может измениться. После записи веб-приложения нужно перезапустить
+(``./scripts/stop.sh && ./scripts/start.sh``), а проверить, что скан дошёл до
+обоих экранов, — ``scripts/lidar_web_check.py``.
 
 Коды возврата: 0 — лидар найден и отдаёт точки, 1 — не найден (в выводе причина).
 
@@ -49,6 +58,7 @@ from robot_control.lidar import (  # noqa: E402
     motor_variants,
     open_serial,
     probe_port,
+    stable_port_path,
 )
 
 PROTOCOL_TITLES = {
@@ -56,6 +66,10 @@ PROTOCOL_TITLES = {
     "ld06": "LD06/LD19 (D500 и клоны)",
     "lds01": "LDS-01/LDS-02 — лидар TurtleBot3 Burger (HLS-LFCD2)",
 }
+
+ENV_FILE = Path(__file__).resolve().parent.parent / ".env"
+#: Какие ключи .env правит --save-env (остальные строки файла не трогаем).
+LIDAR_ENV_KEYS = ("RC_LIDAR_PORT", "RC_LIDAR_PROTOCOL", "RC_LIDAR_BAUD", "RC_LIDAR_MOTOR")
 
 
 def log(text: str = "") -> None:
@@ -168,6 +182,63 @@ def probe(port: str, *, baud=None, motor="auto", protocol="auto", timeout=LIDAR_
     return report
 
 
+def env_settings(report: dict) -> dict:
+    """Настройки .env по найденному лидару (порт — постоянным именем)."""
+    return {
+        "RC_LIDAR_PORT": stable_port_path(report.get("port") or ""),
+        "RC_LIDAR_PROTOCOL": report.get("protocol") or "auto",
+        "RC_LIDAR_BAUD": str(report.get("baud") or ""),
+        "RC_LIDAR_MOTOR": report.get("motor") or "none",
+    }
+
+
+def save_env(report: dict, path: Path = ENV_FILE) -> dict:
+    """Пишет найденные настройки лидара в ``.env``, не трогая остальные строки.
+
+    Возвращает {ключ: (было, стало)} — видно, что именно изменилось. Файл
+    перезаписывается атомарно, права 600 сохраняются (в .env лежит
+    RC_SECRET_KEY).
+    """
+    values = env_settings(report)
+    lines: list[str] = []
+    if path.is_file():
+        lines = path.read_text(encoding="utf-8").splitlines()
+
+    changes: dict = {}
+    seen: set = set()
+    out: list[str] = []
+    for raw in lines:
+        key = raw.split("=", 1)[0].strip() if "=" in raw else ""
+        if key in values and not raw.lstrip().startswith("#"):
+            old = raw.split("=", 1)[1].strip()
+            changes[key] = (old, values[key])
+            seen.add(key)
+            out.append("%s=%s" % (key, values[key]))
+        else:
+            out.append(raw)
+    for key in LIDAR_ENV_KEYS:
+        if key in values and key not in seen and values[key]:
+            changes[key] = (None, values[key])
+            out.append("%s=%s" % (key, values[key]))
+
+    if not any(line.startswith("RC_SECRET_KEY=") for line in out):
+        # Иначе run.py увидит существующий .env и не создаст ключ: сессии и
+        # CSRF-токены сбрасывались бы при каждом перезапуске пульта.
+        import secrets
+        out.insert(0, "RC_SECRET_KEY=%s" % secrets.token_urlsafe(48))
+        changes["RC_SECRET_KEY"] = (None, "(создан)")
+
+    text = "\n".join(out).rstrip("\n") + "\n"
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    tmp.write_text(text, encoding="utf-8")
+    try:
+        os.chmod(tmp, 0o600)
+    except OSError:
+        pass
+    os.replace(tmp, path)
+    return changes
+
+
 def main(argv=None) -> int:
     parser = argparse.ArgumentParser(
         description="Проверка лидара: порт, скорость, протокол, точки (робот не трогаем)",
@@ -184,6 +255,11 @@ def main(argv=None) -> int:
     parser.add_argument("--points", type=int, default=LIDAR_MIN_POINTS,
                         help="сколько точек считать признаком живого лидара (по умолчанию %d)" % LIDAR_MIN_POINTS)
     parser.add_argument("--json", action="store_true", help="вывод в JSON (для скриптов)")
+    parser.add_argument("--save-env", action="store_true",
+                        help="записать найденные порт/протокол/скорость/мотор в .env "
+                             "(после этого веб-приложения нужно перезапустить)")
+    parser.add_argument("--env-file", default=str(ENV_FILE),
+                        help="файл .env для --save-env (по умолчанию .env проекта)")
     args = parser.parse_args(argv)
 
     if not args.json:
@@ -214,7 +290,18 @@ def main(argv=None) -> int:
     found = next((r for r in reports if r["ok"]), None)
 
     if args.json:
-        log(json.dumps({"ok": bool(found), "reports": reports}, ensure_ascii=False, indent=2))
+        payload = {"ok": bool(found), "reports": reports}
+        if found:
+            payload["settings"] = env_settings(found)
+            if args.save_env:
+                try:
+                    payload["env_saved"] = {
+                        key: {"was": old, "now": new}
+                        for key, (old, new) in save_env(found, Path(args.env_file)).items()
+                    }
+                except OSError as exc:
+                    payload["env_saved"] = {"error": str(exc)}
+        log(json.dumps(payload, ensure_ascii=False, indent=2))
         return 0 if found else 1
 
     for report in reports:
@@ -234,9 +321,33 @@ def main(argv=None) -> int:
     if found:
         log("Итог: лидар на %s (%s, %s бод, мотор %s)." %
             (found["port"], found["protocol"], found["baud"], found["motor"]))
-        log("Чтобы не тратить время на перебор, можно закрепить в .env:")
-        log("  RC_LIDAR_PORT=%s" % found["port"])
-        log("  RC_LIDAR_BAUD=%s" % found["baud"])
+        settings = env_settings(found)
+        if args.save_env:
+            try:
+                changes = save_env(found, Path(args.env_file))
+            except OSError as exc:
+                log("✘ не удалось записать %s: %s" % (args.env_file, exc))
+                return 1
+            log("Записано в %s:" % args.env_file)
+            for key in LIDAR_ENV_KEYS:
+                old, new = changes.get(key, (None, settings.get(key)))
+                if new is None:
+                    continue
+                log("  %s=%s%s" % (key, new, "" if old in (None, new) else "  (было: %s)" % (old or "—")))
+            log("Теперь перезапусти веб-приложения, иначе они останутся со старыми настройками:")
+            log("  ./scripts/stop.sh && ./scripts/start.sh &   # пульт (8080)")
+            log("  ./scripts/kiosk.sh                        # бортовой экран (8090)")
+            log("Проверка, что скан дошёл до обоих экранов:")
+            log("  .venv/bin/python scripts/lidar_web_check.py")
+            return 0
+        log("Чтобы не тратить время на перебор, можно закрепить в .env "
+            "(или сразу: --save-env):")
+        log("  RC_LIDAR_PORT=%s" % settings["RC_LIDAR_PORT"])
+        if settings["RC_LIDAR_PORT"] != found["port"]:
+            log("  (это постоянное имя того же порта %s: номер ttyUSBx может "
+                "измениться после перезагрузки)" % found["port"])
+        log("  RC_LIDAR_PROTOCOL=%s" % settings["RC_LIDAR_PROTOCOL"])
+        log("  RC_LIDAR_BAUD=%s" % settings["RC_LIDAR_BAUD"])
         if found["motor"] and found["motor"] != "none":
             log("  RC_LIDAR_MOTOR=%s" % found["motor"])
         return 0

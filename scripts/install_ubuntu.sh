@@ -104,8 +104,13 @@ if [[ $AUTOSTART -eq 1 ]]; then
   if command -v sudo >/dev/null 2>&1 && [[ $EUID -ne 0 ]]; then SUDO=sudo; else SUDO=; fi
   $SUDO cp scripts/robot-control.service /etc/systemd/system/
   $SUDO sed -i "s|/opt/robot-control|$PWD|g" /etc/systemd/system/robot-control.service
-  $SUDO sed -i "s|/usr/bin/python3|$PWD/.venv/bin/python|g" /etc/systemd/system/robot-control.service
   $SUDO sed -i "s|User=robotctl|User=$USER|g; s|Group=robotctl|Group=$USER|g" /etc/systemd/system/robot-control.service
+  # Служба обязана стартовать python'ом из .venv (там Flask и pyserial):
+  # с системным python3 пульт поднялся бы без лидара вообще.
+  if ! grep -q "$PWD/.venv/bin/python" /etc/systemd/system/robot-control.service; then
+    $SUDO sed -i "s|^ExecStart=.*|ExecStart=$PWD/.venv/bin/python $PWD/run.py|" \
+      /etc/systemd/system/robot-control.service
+  fi
   $SUDO systemctl daemon-reload
   $SUDO systemctl enable --now robot-control
   log "служба robot-control запущена (автозапуск включён)"

@@ -16,8 +16,20 @@ sudo useradd --system --home /opt/robot-control --shell /usr/sbin/nologin robotc
 sudo mkdir -p /opt/robot-control
 sudo cp -r . /opt/robot-control
 cd /opt/robot-control
-sudo python3 -m venv .venv
-sudo .venv/bin/pip install -r requirements.txt
+sudo ./scripts/ensure_deps.sh          # в каталоге, принадлежащем root
+```
+
+В своей домашней копии (без `sudo`) скрипт запускается просто как
+`./scripts/ensure_deps.sh` — `sudo` он зовёт сам, и только если понадобится
+`apt install python3-venv`.
+
+`ensure_deps.sh` сам создаёт `.venv`, ставит пакеты (при отсутствии сети — из
+`vendor/`, где уже лежит pyserial) и **проверяет** результат: если в готовом
+окружении нет `flask` или `serial`, ставит заново, а не рапортует «всё
+установлено». Вручную `pip install pyserial` делать не нужно. Проверить себя:
+
+```bash
+.venv/bin/python -c "import flask, serial; print(flask.__version__, serial.VERSION)"
 ```
 
 ## 3. Настройки и учётка оператора
@@ -75,9 +87,30 @@ journalctl -u robot-control -f
 Ничего запускать вручную не нужно, но пользователю сервиса нужен доступ к порту:
 
 ```bash
-sudo usermod -aG dialout robotctl         # если сервис работает не от root
-sudo .venv/bin/python scripts/lidar_check.py   # что видно на портах
+sudo usermod -aG dialout robotctl              # если сервис работает не от root
+.venv/bin/python scripts/lidar_check.py        # что видно на портах
+.venv/bin/python scripts/lidar_check.py --save-env   # записать найденное в .env
+.venv/bin/python scripts/lidar_web_check.py    # скан дошёл до пульта и борта?
 ```
+
+`--save-env` пишет найденные `RC_LIDAR_PORT` (постоянный путь
+`/dev/serial/by-id/…`, если он есть), `RC_LIDAR_PROTOCOL`, `RC_LIDAR_BAUD` и
+`RC_LIDAR_MOTOR`, не трогая остальные строки `.env`, и создаёт `RC_SECRET_KEY`,
+если файла ещё не было. После этого приложения перезапускают
+(`./scripts/stop.sh && ./scripts/start.sh`, `./scripts/kiosk.sh` или
+`sudo systemctl restart robot-control robot-kiosk`).
+
+`lidar_web_check.py` — последняя проверка пути «порт → API → экран»: оба
+приложения запущены, запущены интерпретатором с pyserial, и их `GET /api/lidar`
+отдаёт свежий настоящий скан (не демо). Код возврата `0` — лидар виден на обоих
+экранах, `1` — приложения работают, но скана нет (причина печатается), `2` —
+приложение не запущено. Флаги: `--wait 20`, `--only console|kiosk`, `--json`.
+
+Службы в `scripts/robot-control.service` и `scripts/robot-kiosk.service`
+стартуют python'ом из `.venv` проекта (`/opt/robot-control/.venv/bin/python`) и
+входят в группу `dialout`: в системном python3 нет ни Flask, ни pyserial, а без
+`dialout` порт не открывается. `scripts/install_ubuntu.sh` подставляет в юниты
+фактический путь к `.venv`.
 
 Скорость зависит от модели: A1/A2M8 — 115200, A2M7/A2M12/A3/S1 — 256000,
 C1 — 460800, LD06/LD19 — 230400. Лидар TurtleBot3 Burger (LDS-01 / LDS-02, он же
@@ -132,6 +165,15 @@ journalctl -u robot-kiosk -f
 ./scripts/kiosk.sh
 ```
 
+USB-порт лидара один, а приложений два, поэтому второй процесс порт **не
+отбирает**: пульт (8080) держит лидар, а бортовой экран берёт готовый виток у
+него по HTTP (`RC_LIDAR_PEER_URLS`, свой адрес из списка исключается) — и
+наоборот, если первым поднялся экран. На карте это подписано как
+`скан от пульта`, в `GET /api/lidar` — `source: peer`; это штатный режим, а не
+ошибка. Если реального скана нет, экран показывает демо-скан источника данных с
+подписью `демо · N точек (не лидар)` и причиной под картой — за работающий
+лидар он не выдаётся.
+
 Проверка: `curl http://127.0.0.1:8090/healthz` → `{"mode":"kiosk","ok":true,…}`.
 Остановить всё запущенное — `./scripts/stop.sh` (пульт, экран, службы, окно
 киоска). Выключить ещё и автозапуск, чтобы робот больше не поднимал приложение
@@ -176,6 +218,18 @@ curl -i -o /dev/null -s -w '%{http_code} -> %{redirect_url}\n' http://127.0.0.1:
 
 Ожидается `200` с `{"status":"ok", ...}` и `302 -> .../login?next=/`.
 
+Лидар на обоих экранах (приложения должны работать):
+
+```bash
+.venv/bin/python scripts/lidar_web_check.py --wait 20
+```
+
+Ожидается `✔ реальный скан: N точек` по каждому приложению и итог
+`реальный лидар виден на обоих экранах (источники: peer, serial:0)`; код
+возврата `0`. Если скана нет, команда печатает причину из API, интерпретатор
+(должен быть из `.venv`), наличие pyserial и диагностику USB-портов
+(права, исключения портов шасси).
+
 ## 8. HTTPS (необязательно)
 
 Кошелёк самоподписанного сертификата и запуск через HTTPS:
@@ -203,3 +257,8 @@ sudo apt install -y python3-certbot-apache   # или сгенерировать
 | Приложение запускается само, а не нужно | `./scripts/autostart.sh status`, затем `./scripts/autostart.sh off` |
 | Лидар отвечает, но точек нет | мотор: перебрать `RC_LIDAR_MOTOR` (`dtr-low`, `rts-low`, …) или проверить питание лидара |
 | Лидар TurtleBot3 (LDS-01) не найден | проверьте `scripts/lidar_check.py --protocol lds01`; если лидар подключён через OpenCR, напрямую он недоступен (см. раздел 4b) |
+| Карта лидара пустая, хотя `lidar_check.py` лидар находит | веб-приложение запущено не из `.venv` (нет pyserial) или `.env` не перечитан: `./scripts/ensure_deps.sh`, `.venv/bin/python scripts/lidar_check.py --save-env`, перезапуск; проверка — `.venv/bin/python scripts/lidar_web_check.py` |
+| Экран показывает `демо · N точек (не лидар)` | реального скана нет: причина написана под картой, подробности — `GET /api/lidar` (поля `reason`, `usb_diagnostics`) |
+| Бортовой экран без скана, пульт со сканом | второй процесс берёт скан у первого по HTTP: `source: peer` — норма. Если `peer` не работает, проверьте `RC_LIDAR_PEER_URLS` и что оба приложения на одной машине |
+| `Permission denied` на `/dev/ttyUSB*` у службы | `sudo usermod -aG dialout robotctl` и перезапуск службы; в юнитах `SupplementaryGroups=dialout` уже есть (см. раздел 4b) |
+| После обновления кода пропал pyserial | `./scripts/ensure_deps.sh` — скрипт проверяет импорты в `.venv` и доустанавливает недостающее |

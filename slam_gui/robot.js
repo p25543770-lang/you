@@ -155,6 +155,26 @@
     return d.lidar.filter((p) => p && Number.isFinite(p.a) && Number.isFinite(p.r) && p.r >= 0);
   }
 
+  // Сервер помечает выдуманный скан (RC_SLAM_SOURCE=sim, ?demo=1, авто-скан
+  // стенда): такие точки показываются как демо, а не как реальный лидар.
+  function lidarIsDemo(d) {
+    if (d && d.lidarDemo === true) return true;
+    const st = d && d.lidarStatus;
+    return !!(st && st.demo === true);
+  }
+
+  // Порт, протокол и скорость, с которых реально читается скан (GET /api/lidar).
+  function lidarSourceText(d) {
+    const st = d && d.lidarStatus;
+    const det = st && st.detected;
+    if (!det || !det.port) return '';
+    const parts = [String(det.port).split('/').pop()];
+    if (det.protocol) parts.push(String(det.protocol));
+    if (det.baud) parts.push(det.baud + ' бод');
+    if (st.source === 'peer') parts.push('скан от пульта');
+    return parts.join(' · ');
+  }
+
   function drawLidar(canvas, pts) {
     if (!canvas) return;
     const ctx = canvas.getContext && canvas.getContext('2d');
@@ -255,17 +275,26 @@
     const reason = st.reason ? String(st.reason) : '';
     const hint = st.hint ? String(st.hint) : '';
     const usb = st.usb_diagnostics;
-    const ports = usb && Array.isArray(usb.ports) ? usb.ports.map((p) =>
-      p.port + (p.excluded ? ' (исключён)' : p.accessible ? ' (доступен)' : ' (нет доступа)')
-    ).join(', ') : '';
+    const ports = usb && Array.isArray(usb.ports) ? usb.ports.map(portNote).join(', ') : '';
     const diagnosis = usb ? [usb.summary, ports].filter(Boolean).join(': ') : '';
     return [reason, hint, diagnosis].filter(Boolean).join(' — ');
+  }
+
+  // Порт может быть одновременно недоступен (нет группы dialout) и исключён
+  // настройками мастера/шасси. Показываем обе причины: иначе оператор чинит
+  // права, а порт всё равно не пробуют открыть из-за исключения.
+  function portNote(p) {
+    const notes = [];
+    if (!p.accessible) notes.push('нет доступа — нужна группа dialout');
+    if (p.excluded) notes.push('исключён настройками');
+    if (!notes.length) notes.push('доступен');
+    return p.port + ' (' + notes.join(', ') + ')';
   }
 
   function renderLidar(d) {
     const canvas = $('lidar-canvas');
     let pts = lidarPoints(d);
-    let isDemo = false;
+    let isDemo = lidarIsDemo(d);
     const demoReq = new URLSearchParams(window.location.search).get('demo') === '1' || localStorage.getItem('kiosk_demo') === '1';
     if (!pts.length && (demoReq || (typeof autoScanOn !== 'undefined' && autoScanOn))) {
       pts = demoLidar();
@@ -274,45 +303,78 @@
     const has = pts.length > 0;
     const near = has ? Math.min.apply(null, pts.map((p) => p.r)) : null;
 
-    const reason = has ? '' : lidarReason(d);
-    setText($('lidar-meta'), has ? (isDemo ? 'демо · ' + pts.length + ' точек' : 'в реальном времени · ' + pts.length + ' точек') : 'нет скана');
+    // Причина «нет скана» показывается и при демо: оператор на борту должен
+    // видеть, что реального лидара нет, а не принимать демо за работающий.
+    const reason = has && !isDemo ? '' : lidarReason(d);
+    const source = has && !isDemo ? lidarSourceText(d) : '';
+    setText($('lidar-meta'), has
+      ? (isDemo
+        ? 'демо · ' + pts.length + ' точек (не лидар)'
+        : 'в реальном времени · ' + pts.length + ' точек' + (source ? ' · ' + source : ''))
+      : 'нет скана');
     setText($('lidar-count'), has ? String(pts.length) : '—');
     setText($('lidar-near'), near == null ? '—' : fmt(near, 2) + ' м');
     const empty = $('lidar-empty');
     if (empty) {
-      empty.hidden = has;
-      if (!has) setText(empty, reason ? 'скана лидара нет · ' + reason : 'скана лидара нет');
+      empty.hidden = has && !isDemo;
+      if (!(has && !isDemo)) {
+        setText(empty, reason ? 'скана лидара нет · ' + reason : 'скана лидара нет');
+      }
       empty.title = reason;
     }
     drawLidar(canvas, pts);
   }
 
-  function render() {
-    setText($('clock'), clockText(new Date()));
-    const d = lastData || {};
-    const dataChip = $('data-chip');
-    if (!live) {
-      dataChip.textContent = 'НЕТ СВЯЗИ С СЕРВЕРОМ';
-      dataChip.className = 'chip err';
-    } else if (d.linkOk === false) {
-      dataChip.textContent = 'нет данных от робота';
-      dataChip.className = 'chip warn';
-    } else {
-      dataChip.textContent = 'в реальном времени';
-      dataChip.className = 'chip ok';
-    }
-    document.body.classList.toggle('is-stale', !live);
+  // Экран рисуется по блокам, и сбой одного не гасит остальные. Раньше любое
+  // исключение в render() обрывало и loop() (он без try/catch), и бортовой
+  // экран замирал целиком: ни часов, ни карты лидара — при живом сервере.
+  const failedSteps = {};
 
-    renderMode(d);
-    renderBattery(d);
-    renderChassis(d);
-    renderLidar(d);
-    renderSteeringControls(d);
+  function step(name, draw) {
+    try {
+      draw();
+    } catch (err) {
+      if (!failedSteps[name]) {
+        failedSteps[name] = true;
+        console.warn('Бортовой экран: блок ' + name + ' не нарисован:', err && err.message ? err.message : err);
+      }
+    }
+  }
+
+  function render() {
+    const d = lastData || {};
+    step('clock', () => setText($('clock'), clockText(new Date())));
+    step('link', () => {
+      const dataChip = $('data-chip');
+      if (!dataChip) return;
+      if (!live) {
+        dataChip.textContent = 'НЕТ СВЯЗИ С СЕРВЕРОМ';
+        dataChip.className = 'chip err';
+      } else if (d.linkOk === false) {
+        dataChip.textContent = 'нет данных от робота';
+        dataChip.className = 'chip warn';
+      } else {
+        dataChip.textContent = 'в реальном времени';
+        dataChip.className = 'chip ok';
+      }
+    });
+    step('stale', () => document.body.classList.toggle('is-stale', !live));
+
+    step('mode', () => renderMode(d));
+    step('battery', () => renderBattery(d));
+    step('chassis', () => renderChassis(d));
+    step('lidar', () => renderLidar(d));
+    step('steering', () => renderSteeringControls(d));
   }
 
   function loop() {
-    render();
-    requestAnimationFrame(() => setTimeout(loop, 250));
+    try {
+      render();
+    } catch (err) {
+      console.warn('Бортовой экран: сбой отрисовки:', err && err.message ? err.message : err);
+    } finally {
+      requestAnimationFrame(() => setTimeout(loop, 250));
+    }
   }
 
   function boot() {

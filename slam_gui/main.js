@@ -350,7 +350,10 @@
     setTone(box, 'alerts', top === 'warn' ? 'warn' : '');
     setText($('alerts-text'), list.slice(0, 3).map((a) => a.text).join(' · '));
     setText($('alerts-more'), list.length > 3 ? '+' + (list.length - 3) : '');
-    setTone(badge, 'nav-badge', top === 'warn' ? 'warn' : '');
+    // Элемента может не быть (в этом макете счётчика тревог в меню нет):
+    // раньше здесь стояла необъявленная переменная badge, и при любой тревоге
+    // render() падал целиком — экран оставался без карты лидара.
+    setTone($('nav-badge'), 'nav-badge', top === 'warn' ? 'warn' : '');
   }
 
   function renderKpis(d, b) {
@@ -464,6 +467,28 @@
     return d.lidar.filter((p) => p && Number.isFinite(p.a) && Number.isFinite(p.r) && p.r >= 0);
   }
 
+  // Сервер помечает выдуманный скан (стенд без железа, RC_SLAM_SOURCE=sim):
+  // такие точки обязаны показываться как демо, а не «в реальном времени».
+  function lidarIsDemo(d) {
+    if (d && d.lidarDemo === true) return true;
+    const st = d && d.lidarStatus;
+    return !!(st && st.demo === true);
+  }
+
+  // Откуда реально идёт скан: порт, протокол и скорость из GET /api/lidar.
+  // На роботе по этой подписи видно, что читается именно USB-лидар.
+  function lidarSourceText(d) {
+    const st = d && d.lidarStatus;
+    const det = st && st.detected;
+    if (!det || !det.port) return '';
+    const name = String(det.port).split('/').pop();
+    const parts = [name];
+    if (det.protocol) parts.push(String(det.protocol));
+    if (det.baud) parts.push(det.baud + ' бод');
+    if (st.source === 'peer') parts.push('скан от второго процесса');
+    return parts.join(' · ');
+  }
+
   function demoLidar() {
     const pts = [];
     const t = Date.now() / 1000;
@@ -494,33 +519,51 @@
     const reason = st.reason ? String(st.reason) : '';
     const hint = st.hint ? String(st.hint) : '';
     const usb = st.usb_diagnostics;
-    const ports = usb && Array.isArray(usb.ports) ? usb.ports.map((p) =>
-      p.port + (p.excluded ? ' (исключён)' : p.accessible ? ' (доступен)' : ' (нет доступа)')
-    ).join(', ') : '';
+    const ports = usb && Array.isArray(usb.ports) ? usb.ports.map(portNote).join(', ') : '';
     const diagnosis = usb ? [usb.summary, ports].filter(Boolean).join(': ') : '';
     return [reason, hint, diagnosis].filter(Boolean).join(' — ');
+  }
+
+  // Порт может быть одновременно недоступен (нет группы dialout) и исключён
+  // настройками мастера/шасси. Показываем обе причины: иначе оператор чинит
+  // права, а порт всё равно не пробуют открыть из-за исключения.
+  function portNote(p) {
+    const notes = [];
+    if (!p.accessible) notes.push('нет доступа — нужна группа dialout');
+    if (p.excluded) notes.push('исключён настройками');
+    if (!notes.length) notes.push('доступен');
+    return p.port + ' (' + notes.join(', ') + ')';
   }
 
   function renderLidar(view, d) {
     const canvas = $('lidar-canvas');
     if (!canvas) return;
     let pts = lidarPoints(d);
-    let isDemo = false;
+    let isDemo = lidarIsDemo(d);
     if (!pts.length && DEMO) {
       pts = demoLidar();
       isDemo = true;
     }
     const has = pts.length > 0;
     const near = has ? Math.min(...pts.map((p) => p.r)) : null;
-    const reason = has ? '' : lidarReason(d);
+    const reason = has && !isDemo ? '' : lidarReason(d);
+    const source = has && !isDemo ? lidarSourceText(d) : '';
 
-    setText($('lidar-meta'), has ? (isDemo ? 'демо · ' + pts.length + ' точек' : 'в реальном времени · ' + pts.length + ' точек') : (reason ? 'лидар: нет данных' : 'нет скана'));
+    setText($('lidar-meta'), has
+      ? (isDemo
+        ? 'демо · ' + pts.length + ' точек (не лидар)'
+        : 'в реальном времени · ' + pts.length + ' точек' + (source ? ' · ' + source : ''))
+      : (reason ? 'лидар: нет данных' : 'нет скана'));
     setText($('lidar-count'), has ? String(pts.length) : '—');
     setText($('lidar-near'), near === null ? '—' : fmt(near, 2) + ' м');
     const empty = $('lidar-empty');
     if (empty) {
-      empty.hidden = has;
-      if (!has) setText(empty, reason ? 'скана лидара нет · ' + reason : 'скана лидара нет');
+      // Демо-скан не скрывает причину: на стенде без железа оператор должен
+      // видеть, что реального лидара нет, а не думать, что он работает.
+      empty.hidden = has && !isDemo;
+      if (!(has && !isDemo)) {
+        setText(empty, reason ? 'скана лидара нет · ' + reason : 'скана лидара нет');
+      }
       empty.title = reason;
     }
     drawLidar(canvas, pts);
@@ -851,25 +894,41 @@
     ctx.stroke();
   }
 
+  // Экран рисуется по блокам, и сбой одного не гасит остальные: раньше любое
+  // исключение в render() (например, в тревогах) обрывало отрисовку целиком, и
+  // карта лидара не обновлялась, хотя данные с сервера приходили исправно.
+  const failedSteps = {};
+
+  function step(name, draw) {
+    try {
+      draw();
+    } catch (err) {
+      if (!failedSteps[name]) {
+        failedSteps[name] = true;
+        console.warn('RUS SLAM main: блок ' + name + ' не нарисован:', err && err.message ? err.message : err);
+      }
+    }
+  }
+
   function render() {
     const view = currentView(Date.now());
-    trackEvents(view);
+    step('events-track', () => trackEvents(view));
 
     const d = view.data || {};
     const b = d.battery || {};
     const motors = Array.isArray(d.motors) ? d.motors : [];
 
-    setText($('clock'), clockText(new Date()));
-    renderHeader(view, d);
-    renderAlerts(view);
-    renderKpis(d, b);
-    renderChassis(view, d, motors);
-    applyDriveToWheels();
-    renderCamera(view, d);
-    renderLidar(view, d);
-    renderRoute(d);
-    renderEvents();
-    document.body.classList.toggle('is-stale', !view.live);
+    step('clock', () => setText($('clock'), clockText(new Date())));
+    step('header', () => renderHeader(view, d));
+    step('alerts', () => renderAlerts(view));
+    step('kpis', () => renderKpis(d, b));
+    step('chassis', () => renderChassis(view, d, motors));
+    step('wheels', () => applyDriveToWheels());
+    step('camera', () => renderCamera(view, d));
+    step('lidar', () => renderLidar(view, d));
+    step('route', () => renderRoute(d));
+    step('journal', () => renderEvents());
+    step('stale', () => document.body.classList.toggle('is-stale', !view.live));
   }
 
   /* ------------------------------------------------------------ запуск */
