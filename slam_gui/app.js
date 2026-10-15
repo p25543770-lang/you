@@ -1522,4 +1522,3 @@ window.addEventListener("beforeunload", () => {
   if (window.RSConsole && window.RSConsole.stats) window.RSConsole.stats.flush();
 });
 requestAnimationFrame(loop);
-

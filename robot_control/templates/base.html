@@ -6,6 +6,8 @@
   <meta name="robots" content="noindex, nofollow">
   <title>{% block title %}Робот — пульт оператора{% endblock %}</title>
   <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+  <link rel="stylesheet" href="{{ u('slam.steering_css') }}">
+  <link rel="stylesheet" href="{{ u('slam.update_css') }}">
 </head>
 <body>
   <div class="layout">
@@ -149,5 +151,7 @@
   })();
   </script>
   {% block scripts %}{% endblock %}
+  <script src="{{ u('slam.steering_js') }}"></script>
+  <script src="{{ u('slam.update_js') }}"></script>
 </body>
 </html>

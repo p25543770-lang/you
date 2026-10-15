@@ -82,6 +82,8 @@ MODULE_TITLES = {
     "RL": "задний левый", "RR": "задний правый",
 }
 WHEEL_R_M = 0.127            # радиус колеса Xiaomi M365 Pro, м
+MAX_DRIVE_PERCENT = 20       # ограничение открытого низкоскоростного прототипа
+DRIVE_ANGLE_ALIGNMENT_DEG = 2.5
 
 # --- АКБ 12S3P LiFePO4 (совпадает с gui/console-core.js) --------------------
 PACK = {
@@ -331,10 +333,25 @@ class NoSource:
                    "thresholds": {"lowV": PACK["lowV"], "criticalV": PACK["criticalV"]}}
         return {"motors": motors, "battery": battery, "cargo": {},
                 "mode": None, "route": None, "speedMps": None, "powerKw": None,
+                "drive": {"available": False, "canDrive": False, "reason": "source_unavailable",
+                          "maxPercent": MAX_DRIVE_PERCENT, "commandedPercent": 0,
+                          "active": False, "reportedPercent": {}},
                 "linkOk": False}
 
 
 TLM_PREFIX = "@TLM "
+
+
+#: Откуда у модуля ноль (поле home= прошивки v2): датчик D18, вручную или нет.
+HOME_SOURCES = ("opto", "manual", "none")
+#: Коды ошибок калибровки прошивки (поле err=) → текст для экрана и журнала.
+CALIB_ERRORS = {
+    1: "датчик не сработал: вправо 100° и влево 200° пусто",
+    2: "датчик не освобождается (залип или флажок шире 30°)",
+    3: "кромка не найдена при медленном подходе",
+    4: "калибровка прервана командой стоп",
+    5: "калибровка не уложилась по времени",
+}
 
 
 def parse_master_line(line):
@@ -354,53 +371,147 @@ def parse_master_line(line):
         module = fields["mod"].upper()
         angle = float(fields["deg"])
         target = float(fields.get("tgt", "0"))
-        if module not in MODULE_TITLES or not math.isfinite(angle) or not math.isfinite(target):
+        rpm = float(fields["rpm"]) if "rpm" in fields else None
+        drive_percent = int(fields["drive"]) if "drive" in fields else None
+        firmware = int(fields["fw"]) if "fw" in fields else None
+        calib_error = int(fields["err"]) if "err" in fields else None
+        home = fields.get("home")
+        if (module not in MODULE_TITLES or not math.isfinite(angle) or
+                not math.isfinite(target) or (rpm is not None and (not math.isfinite(rpm) or rpm < 0)) or
+                (drive_percent is not None and abs(drive_percent) > MAX_DRIVE_PERCENT) or
+                (calib_error is not None and not 0 <= calib_error <= 15) or
+                (home is not None and home not in HOME_SOURCES)):
             return None
+        zeroed = fields.get("cal") == "1"
+        if home is None:
+            # Прошивка без поля home= знала только ручной программный ноль.
+            home = "manual" if zeroed else "none"
         return {
             "mod": module,
             "deg": angle,
             "tgt": target,
             "moving": fields.get("moving") == "1",
-            "cal": fields.get("cal") == "1",
+            # cal — у модуля есть ноль: по оптодатчику D18 (k / «Калибровка»)
+            # или вручную («Задать 0°»). После перезапуска платы ноля нет.
+            "cal": zeroed,
+            "home": home if zeroed else "none",
+            "manualZero": zeroed and home == "manual",
+            "rpm": rpm,
+            "drivePercent": drive_percent,
             "cycle": fields.get("cycle") == "1",
             "calib": fields.get("calib") == "1",
             "opto": fields.get("opto") == "1",
+            "calibError": calib_error,
+            "firmware": firmware,
         }
     except (KeyError, ValueError):
         return None
 
 
 class MasterSource:
-    """Мастер-Arduino по одному UART: телеметрия и поворот выбранного модуля.
+    """Мастер-Arduino по одному UART: руление и низкоскоростная тяга.
 
-    Веб-пульт может отправить только целевой угол одного рулевого модуля.
-    Команда ставится в очередь того же UART, который читает телеметрию; тяга
-    и скорость колёс этим источником не управляются.
+    Ноль руля — калибровка по оптодатчику D18 (``w FL calib`` / ``k`` для всех)
+    или ручной ``w FL zero``. Тяга — только удерживаемая команда ±20% (``t N``),
+    разрешённая при свежей телеметрии, заданном нуле всех четырёх модулей и
+    одинаковом направлении колёс. Плата сама отключает PWM и включает тормоз
+    через 650 мс без heartbeat.
     """
 
     name = "master"
     supports_individual_steer = True
+    supports_drive = True
+    supports_calibration = True
     STALE_S = 1.0
+    DRIVE_STALE_S = 0.75
     MAX_STEER_DEG = 32.0
+    MAX_DRIVE_PERCENT = 20
+    MESSAGE_LIMIT = 40
 
-    def __init__(self, port, baud=115200):
+    def __init__(self, port, baud=115200, on_message=None):
         self.port = port
         self.baud = baud
         self.lock = threading.Lock()
         self.frames = {}                 # модуль → (последний кадр, время)
+        self.drive_percent = 0
+        self.drive_last_command = 0.0
         self.commands = queue.Queue(maxsize=16)
         self.serial_ready = threading.Event()
+        self.messages = []               # строки «# FL: …» прошивки: (время, текст)
+        self.on_message = on_message     # их же — в журнал экрана
         self._stop = False
         threading.Thread(target=self._reader, daemon=True).start()
 
     def feed(self, line, now=None):
-        """Принимает строку монитора; True, если это телеметрия."""
+        """Принимает строку монитора; True, если это телеметрия.
+
+        Строки «# FL: …» — сообщения прошивки для человека (калибровка, ошибки
+        датчика, потеря связи по I2C): они сохраняются и уходят в журнал.
+        """
+        now = time.time() if now is None else now
         frame = parse_master_line(line)
         if frame is None:
+            text = (line or "").strip()
+            if text.startswith("# ") and len(text) > 2:
+                self._note_message(text[2:], now)
             return False
         with self.lock:
-            self.frames[frame["mod"]] = (frame, time.time() if now is None else now)
+            self.frames[frame["mod"]] = (frame, now)
         return True
+
+    def _note_message(self, text, now):
+        messages = getattr(self, "messages", None)
+        if messages is None:
+            return
+        with self.lock:
+            messages.append((now, text))
+            del messages[:-self.MESSAGE_LIMIT]
+        callback = getattr(self, "on_message", None)
+        if callback is not None:
+            try:
+                callback(text)
+            except Exception:                 # noqa: BLE001 — журнал не ломает чтение порта
+                pass
+
+    def recent_messages(self, limit=10):
+        with self.lock:
+            items = list(getattr(self, "messages", None) or [])[-limit:]
+        return [{"ts": round(ts, 3), "text": text} for ts, text in items]
+
+    def calibrate_module(self, module, now=None):
+        """Калибровка по оптодатчику одного модуля (FL/FR/RL/RR) или всех (ALL).
+
+        Колесо проходит до 100° вправо и 200° влево, поэтому команда принимается
+        только при выключенной тяге и стоящем модуле.
+        """
+        module = str(module or "").upper()
+        if module not in MODULE_TITLES and module != "ALL":
+            return {"ok": False, "reason": "invalid_module"}
+        if not self.serial_ready.is_set():
+            return {"ok": False, "reason": "serial_unavailable"}
+        now = time.time() if now is None else now
+        with self.lock:
+            frames = dict(self.frames)
+            drive_active = self.drive_percent != 0
+        if drive_active:
+            return {"ok": False, "reason": "module_busy"}
+        targets = list(MODULE_TITLES) if module == "ALL" else [module]
+        fresh = {mid: frames[mid][0] for mid in targets
+                 if mid in frames and now - frames[mid][1] < self.STALE_S}
+        if not fresh:
+            return {"ok": False, "reason": "module_offline"}
+        if module != "ALL" and module not in fresh:
+            return {"ok": False, "reason": "module_offline"}
+        if any(frame.get("calib") or frame.get("moving") or frame.get("cycle")
+               or (frame.get("drivePercent") or 0) != 0 for frame in fresh.values()):
+            return {"ok": False, "reason": "module_busy"}
+        command = b"k\n" if module == "ALL" else ("w %s calib\n" % module).encode("ascii")
+        try:
+            self.commands.put_nowait(command)
+        except queue.Full:
+            return {"ok": False, "reason": "command_queue_full"}
+        return {"ok": True, "queued": True, "module": module,
+                "offline": sorted(set(targets) - set(fresh))}
 
     def steer_module(self, module, angle, now=None):
         """Поставить в очередь только поворот одного откалиброванного модуля."""
@@ -419,6 +530,9 @@ class MasterSource:
         now = time.time() if now is None else now
         with self.lock:
             entry = self.frames.get(module)
+            drive_active = self.drive_percent != 0
+        if drive_active:
+            return {"ok": False, "reason": "module_busy"}
         if entry is None or now - entry[1] >= self.STALE_S:
             return {"ok": False, "reason": "module_offline"}
         frame = entry[0]
@@ -427,13 +541,127 @@ class MasterSource:
         if frame.get("moving") or frame.get("calib") or frame.get("cycle"):
             return {"ok": False, "reason": "module_busy"}
 
-        # Узкий протокол: module + angle. В нём нет команды тяги/PWM.
+        # Отдельная команда поворота одного модуля, без команды тяги.
         command = ("w %s %.1f\n" % (module, angle)).encode("ascii")
         try:
             self.commands.put_nowait(command)
         except queue.Full:
             return {"ok": False, "reason": "command_queue_full"}
         return {"ok": True, "queued": True, "module": module, "angle": round(angle, 1)}
+
+    def zero_module(self, module, now=None):
+        """Назначить текущую позицию программным нулём; мотор не двигается."""
+        module = str(module or "").upper()
+        if module not in MODULE_TITLES:
+            return {"ok": False, "reason": "invalid_module"}
+        if not self.serial_ready.is_set():
+            return {"ok": False, "reason": "serial_unavailable"}
+
+        now = time.time() if now is None else now
+        with self.lock:
+            entry = self.frames.get(module)
+            drive_active = self.drive_percent != 0
+        if drive_active:
+            return {"ok": False, "reason": "module_busy"}
+        if entry is None or now - entry[1] >= self.STALE_S:
+            return {"ok": False, "reason": "module_offline"}
+        frame = entry[0]
+        if frame.get("moving") or frame.get("calib") or frame.get("cycle"):
+            return {"ok": False, "reason": "module_busy"}
+
+        # Прошивка принимает zero только на стоящем модуле. Оператор сначала
+        # механически выставляет колесо прямо; сервер не запускает калибровочный ход.
+        try:
+            self.commands.put_nowait(("w %s zero\n" % module).encode("ascii"))
+        except queue.Full:
+            return {"ok": False, "reason": "command_queue_full"}
+        return {"ok": True, "queued": True, "module": module}
+
+    def drive_status(self, now=None):
+        now = time.time() if now is None else now
+        with self.lock:
+            frames = dict(self.frames)
+            commanded = self.drive_percent
+        motors = {}
+        reason = ""
+        fresh_frames = {}
+        for module in MODULE_TITLES:
+            entry = frames.get(module)
+            if entry is not None and now - entry[1] < self.STALE_S:
+                fresh_frames[module] = entry[0]
+                motors[module] = entry[0].get("drivePercent")
+            else:
+                motors[module] = None
+
+        if not self.serial_ready.is_set():
+            reason = "serial_unavailable"
+        elif len(fresh_frames) != len(MODULE_TITLES):
+            reason = "module_offline"
+        elif any(frame.get("drivePercent") is None for frame in fresh_frames.values()):
+            reason = "drive_firmware_required"
+        elif any(not frame.get("cal") for frame in fresh_frames.values()):
+            reason = "not_homed"
+        elif any(frame.get("moving") or frame.get("calib") or frame.get("cycle")
+                 for frame in fresh_frames.values()):
+            reason = "module_busy"
+        else:
+            angles = [float(frame["deg"]) for frame in fresh_frames.values()]
+            if max(angles) - min(angles) > DRIVE_ANGLE_ALIGNMENT_DEG:
+                reason = "steering_misaligned"
+
+        return {
+            "available": self.serial_ready.is_set(),
+            "canDrive": not reason,
+            "reason": reason or None,
+            "maxPercent": self.MAX_DRIVE_PERCENT,
+            "commandedPercent": commanded,
+            "active": any(value not in (None, 0) for value in motors.values()),
+            "reportedPercent": motors,
+            "alignmentToleranceDeg": DRIVE_ANGLE_ALIGNMENT_DEG,
+        }
+
+    def drive(self, percent, now=None):
+        try:
+            percent = float(percent)
+        except (TypeError, ValueError):
+            return {"ok": False, "reason": "invalid_drive"}
+        if not math.isfinite(percent) or abs(percent) > self.MAX_DRIVE_PERCENT:
+            return {"ok": False, "reason": "drive_limit"}
+        if not self.serial_ready.is_set():
+            return {"ok": False, "reason": "serial_unavailable"}
+
+        now = time.time() if now is None else now
+        target = int(round(percent))
+        if target == 0:
+            command = b"b\n"
+        else:
+            status = self.drive_status(now)
+            if not status["canDrive"]:
+                return {"ok": False, "reason": status["reason"] or "drive_not_ready"}
+            # «t» — тяга; «d» в прошивке — поворот на угол, как в проверенном скетче.
+            command = ("t %d\n" % target).encode("ascii")
+        if target == 0:
+            # STOP always jumps ahead of queued steering/heartbeat commands,
+            # not only when the bounded queue is already full.
+            self._discard_pending_commands()
+        try:
+            self.commands.put_nowait(command)
+        except queue.Full:
+            if target != 0:
+                return {"ok": False, "reason": "command_queue_full"}
+            self._discard_pending_commands()
+            try:
+                self.commands.put_nowait(command)
+            except queue.Full:
+                return {"ok": False, "reason": "command_queue_full"}
+        with self.lock:
+            self.drive_percent = target
+            self.drive_last_command = now
+        return {"ok": True, "queued": True, "percent": target,
+                "maxPercent": self.MAX_DRIVE_PERCENT}
+
+    def stop_drive(self, now=None):
+        return self.drive(0, now)
 
     def _discard_pending_commands(self):
         while True:
@@ -464,7 +692,9 @@ class MasterSource:
             return
         while not self._stop:
             try:
-                with serial.Serial(self.port, self.baud, timeout=0.2) as dev:
+                # exclusive: второй процесс не может открыть тот же UART и читать
+                # его вперемешку (строки телеметрии рвутся, команды теряются).
+                with serial.Serial(self.port, self.baud, timeout=0.2, exclusive=True) as dev:
                     self.serial_ready.set()
                     print("· master: %s открыт" % self.port)
                     while not self._stop:
@@ -481,6 +711,9 @@ class MasterSource:
             finally:
                 self.serial_ready.clear()
                 self._discard_pending_commands()
+                with self.lock:
+                    self.drive_percent = 0
+                    self.drive_last_command = 0.0
 
     def read(self, now=None):
         now = time.time() if now is None else now
@@ -494,22 +727,113 @@ class MasterSource:
             if fresh:
                 link = True
                 frame = entry[0]
+                error = frame.get("calibError")
                 motors.append({"id": mid, "title": MODULE_TITLES[mid],
                                "angle": round(frame["deg"], 2),
                                "targetAngle": round(frame["tgt"], 2),
-                               "rpm": None, "temp": None,
-                               "homed": frame["cal"], "online": True, "fault": None,
-                               "moving": frame["moving"], "calibrating": frame["calib"]})
+                               "rpm": frame.get("rpm"), "temp": None,
+                               "drivePercent": frame.get("drivePercent"),
+                               "homed": frame["cal"], "manualZero": frame.get("manualZero", frame["cal"]),
+                               "homeSource": frame.get("home") or ("manual" if frame["cal"] else "none"),
+                               "opto": frame.get("opto"),
+                               "calibError": error or 0,
+                               "calibErrorText": CALIB_ERRORS.get(error) if error else None,
+                               "firmware": frame.get("firmware"),
+                               "online": True, "fault": None,
+                               "moving": frame["moving"], "calibrating": frame["calib"],
+                               "cycling": frame.get("cycle", False)})
             else:
                 motors.append({"id": mid, "title": MODULE_TITLES[mid], "angle": None,
                                "targetAngle": None, "rpm": None, "temp": None,
-                               "homed": None, "online": False, "fault": None,
+                               "drivePercent": None, "homed": None, "online": False, "fault": None,
                                "moving": False, "calibrating": False})
-        out = NoSource().read()              # АКБ, скорость, маршрут — пока не передаются
+        out = NoSource().read()              # АКБ и маршрут пока не передаются
         out["motors"] = motors
+        out["drive"] = self.drive_status(now)
         out["mode"] = "МАСТЕР НА СВЯЗИ" if link else None
         out["linkOk"] = link
+        out["masterMessages"] = self.recent_messages(8) if hasattr(self, "messages") else []
         return out
+
+
+class MasterPeerSource:
+    """Пульт (8080) без собственного UART: телеметрия берётся с бортового экрана.
+
+    Порт мастера один, и владеет им бортовой экран (8090). Если открыть его ещё
+    раз из пульта, два процесса читают одни и те же байты, строки рвутся, а
+    команды отбрасываются. Поэтому пульт только опрашивает публичный
+    ``/api/kiosk_state`` экрана и показывает моторы; управление (руление, ноль,
+    тяга) доступно только на самом экране.
+    """
+
+    name = "master-peer"
+    supports_individual_steer = False
+    supports_drive = False
+    POLL_S = 0.2
+    STALE_S = 1.5
+
+    def __init__(self, peer_url, fetch=None):
+        self.peer_url = peer_url
+        self.lock = threading.Lock()
+        self.snapshot_data = None
+        self.snapshot_time = 0.0
+        self.error = "ещё не опрошен"
+        self._fetch = fetch or self._http_get
+        threading.Thread(target=self._poll, daemon=True).start()
+
+    def _http_get(self):
+        import urllib.request
+        with urllib.request.urlopen(self.peer_url, timeout=1.0) as response:
+            return json.loads(response.read().decode("utf-8", "replace"))
+
+    def _poll(self):
+        while True:
+            try:
+                body = self._fetch()
+                data = body.get("data") if isinstance(body, dict) else None
+                if not isinstance(data, dict):
+                    raise ValueError("экран не вернул телеметрию")
+                with self.lock:
+                    self.snapshot_data = data
+                    self.snapshot_time = time.time()
+                    self.error = ""
+            except Exception as exc:  # noqa: BLE001 — экран может быть выключен
+                with self.lock:
+                    self.error = str(exc) or type(exc).__name__
+            time.sleep(self.POLL_S)
+
+    def read(self, now=None):
+        now = time.time() if now is None else now
+        with self.lock:
+            data = self.snapshot_data
+            fresh = data is not None and now - self.snapshot_time < self.STALE_S
+            error = self.error
+        out = NoSource().read()
+        if not fresh:
+            out["peer"] = {"url": self.peer_url, "error": error or "нет связи с бортовым экраном"}
+            return out
+        out["motors"] = data.get("motors") or out["motors"]
+        out["drive"] = data.get("drive") or out["drive"]
+        out["masterMessages"] = data.get("masterMessages") or []
+        out["linkOk"] = bool(data.get("linkOk"))
+        out["mode"] = data.get("mode")
+        out["peer"] = {"url": self.peer_url, "error": ""}
+        return out
+
+    def steer_module(self, module, angle, now=None):
+        return {"ok": False, "reason": "control_not_supported"}
+
+    def zero_module(self, module, now=None):
+        return {"ok": False, "reason": "control_not_supported"}
+
+    def calibrate_module(self, module, now=None):
+        return {"ok": False, "reason": "control_not_supported"}
+
+    def drive(self, percent, now=None):
+        return {"ok": False, "reason": "control_not_supported"}
+
+    def stop_drive(self, now=None):
+        return {"ok": False, "reason": "control_not_supported"}
 
 
 class SerialSource:
@@ -771,7 +1095,14 @@ def scan_points(msg):
 
 
 class RosSource:
-    """ROS 2 (rclpy): /modules/state, /battery, /screen/motors, /scan (лидар). Если rclpy нет — падаем в sim."""
+    """ROS 2 (rclpy): /modules/state, /battery, /screen/motors и скан лидара.
+
+    Пути к системному ROS 2 добавляются сами (``robot_control/ros_env.py``):
+    экран работает из ``.venv`` и без этого не видел ``rclpy`` вовсе. Если ROS 2
+    нет — источник не выдумывает данные: ``linkOk`` остаётся ложным, а причина
+    видна в ``self.reason`` (симуляция включается только явно,
+    ``RC_SLAM_SOURCE=sim``).
+    """
 
     name = "ros"
 
@@ -780,14 +1111,22 @@ class RosSource:
         self.data = {}
         self.scan = []
         self.scan_at = 0.0
+        # ROS 2 стоит системно (/opt/ros/<дистрибутив>), а экран запускается из
+        # .venv проекта: без подготовки путей rclpy в нём не виден, и источник
+        # молча падал в симуляцию (см. robot_control/ros_env.py).
         try:
+            from robot_control import ros_env
+            ros_env.ensure_python_path()
             import rclpy                                            # noqa: F401
             from rclpy.node import Node
-        except ImportError:
-            print("! ros: rclpy не найден — используется демонстрационный источник")
-            self.fallback = SimSource()
+        except ImportError as exc:
+            print("! ros: rclpy не найден (%s) — источник не подключён." % exc)
+            print("       поставь ROS 2 и пакеты лидара: ./scripts/ros2_setup.sh")
+            self.fallback = None
+            self.reason = "ROS 2 недоступен: rclpy не импортируется в этом интерпретаторе"
             return
         self.fallback = None
+        self.reason = ""
         threading.Thread(target=self._spin_node, daemon=True).start()
 
     def _spin_node(self):
@@ -798,6 +1137,8 @@ class RosSource:
         from rclpy.qos import qos_profile_sensor_data
 
         source = self
+        # Топик скана: по умолчанию /scan, как у драйверов лидаров (RC_LIDAR_ROS_TOPIC).
+        scan_topic = os.environ.get("RC_LIDAR_ROS_TOPIC") or "/scan"
 
         class Bridge(Node):
             def __init__(self):
@@ -806,12 +1147,20 @@ class RosSource:
                 self.create_subscription(Float32, "/battery/voltage", source._on_volts, 10)
                 self.create_subscription(Float32, "/battery/current", source._on_amps, 10)
                 self.create_subscription(String, "/screen/motors", source._on_motors, 10)
-                self.create_subscription(LaserScan, "/scan", source._on_scan, qos_profile_sensor_data)
+                self.create_subscription(LaserScan, scan_topic, source._on_scan,
+                                         qos_profile_sensor_data)
 
-        rclpy.init(args=None)
-        node = Bridge()
+        if not rclpy.ok():
+            rclpy.init(args=None)
+        try:
+            node = Bridge()
+        except Exception as exc:                                     # noqa: BLE001
+            self.reason = "узел ROS 2 не создался: %s" % exc
+            print("! ros: %s" % self.reason)
+            return
         self.ok = True
-        print("· ros: мост экрана запущен (/screen/state, /battery/*, /screen/motors)")
+        print("· ros: мост экрана запущен (/screen/state, /battery/*, /screen/motors, %s)"
+              % scan_topic)
         try:
             rclpy.spin(node)
         except Exception:                                            # noqa: BLE001

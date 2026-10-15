@@ -1,0 +1,35 @@
+<?xml version="1.0"?>
+<?xml-model href="http://download.ros.org/schema/package_format3.xsd" schematypens="http://www.w3.org/2001/XMLSchema"?>
+<package format="3">
+  <name>zapret_lidar</name>
+  <version>1.0.0</version>
+  <description>
+    Лидар для робота Zapret через ROS 2: супервизор сам подбирает драйвер
+    (rplidar_ros, hls_lfcd_lds_driver, ldlidar_stl_ros2 или turtlebot3_node) под
+    подключённое устройство, следит за свежестью sensor_msgs/LaserScan и
+    публикует состояние в /zapret/lidar/status — по нему веб-пульт и бортовой
+    экран показывают, почему скана нет и что делать.
+  </description>
+  <maintainer email="revin.d4n@gmail.com">danilka-revin</maintainer>
+  <license>MIT</license>
+
+  <exec_depend>rclpy</exec_depend>
+  <exec_depend>sensor_msgs</exec_depend>
+  <exec_depend>std_msgs</exec_depend>
+  <exec_depend>std_srvs</exec_depend>
+  <exec_depend>launch</exec_depend>
+  <exec_depend>launch_ros</exec_depend>
+
+  <!-- Драйверы лидаров: нужен любой один, соответствующий железу робота.
+       Пакеты не втягиваются автоматически, чтобы сборка не падала на стендах
+       без железа; их ставит scripts/ros2_setup.sh (apt) или собирает из
+       исходников (ldlidar_stl_ros2). -->
+  <!-- <exec_depend>hls_lfcd_lds_driver</exec_depend> -->  <!-- LDS-01/LDS-02 -->
+  <!-- <exec_depend>rplidar_ros</exec_depend> -->          <!-- RPLIDAR A1/A2/A3/S1/C1 -->
+  <!-- <exec_depend>ldlidar_stl_ros2</exec_depend> -->      <!-- LD06/LD19/STL-27L -->
+  <!-- <exec_depend>turtlebot3_node</exec_depend> -->       <!-- LDS-01 через OpenCR -->
+
+  <export>
+    <build_type>ament_python</build_type>
+  </export>
+</package>

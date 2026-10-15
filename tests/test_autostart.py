@@ -2,7 +2,7 @@
 
 Проверяем поведение, из-за которого робот «сам поднимал» пульт и экран:
 `install_ubuntu.sh` больше не включает автозапуск без флага, `make_shortcut.sh`
-не ставит ярлык экрана в автозапуск сеанса, а `scripts/autostart.sh` умеет
+по умолчанию не ставит ярлык в автозапуск сеанса, а `scripts/autostart.sh` умеет
 показать, выключить и вернуть автозапуск (службы systemd, ярлык сеанса,
 автоподъём точки доступа Wi-Fi). `autostart.sh off` = «выключить всё»: он ещё
 и останавливает запущенное (через `scripts/stop.sh`), а `--keep-running`
@@ -88,19 +88,33 @@ def run(name: str, *args: str) -> subprocess.CompletedProcess:
 
 
 def autostart_file(home: Path) -> Path:
-    return home / ".config" / "autostart" / "robot-kiosk.desktop"
+    return home / ".config" / "autostart" / "robot-control.desktop"
 
 
 # --------------------------------------------------------------- файлы скриптов --- #
 
 
-@pytest.mark.parametrize("name", ["autostart.sh", "make_shortcut.sh", "install_ubuntu.sh"])
+@pytest.mark.parametrize("name", ["autostart.sh", "make_shortcut.sh", "install_ubuntu.sh", "start_robot.sh"])
 def test_script_is_in_place_and_runs(name):
     path = SCRIPTS / name
     assert path.is_file(), name
     assert os.access(path, os.X_OK), "%s должен быть исполняемым" % name
     syntax = subprocess.run(["bash", "-n", str(path)], capture_output=True, text=True, check=False)
     assert syntax.returncode == 0, syntax.stderr
+
+
+def test_start_robot_is_single_supervisor_and_checks_dependencies_once():
+    """Единый запуск проверяет зависимости один раз и владеет двумя дочерними процессами."""
+    supervisor = (SCRIPTS / "start_robot.sh").read_text(encoding="utf-8")
+    assert "./scripts/ensure_deps.sh" in supervisor
+    assert 'export RC_SKIP_DEPS=1' in supervisor
+    assert "./scripts/start.sh &" in supervisor
+    assert "./scripts/kiosk.sh &" in supervisor
+    assert "flock -n 9" in supervisor
+    assert "wait -n" in supervisor
+    for helper in ("start.sh", "kiosk.sh"):
+        text = (SCRIPTS / helper).read_text(encoding="utf-8")
+        assert '"${RC_SKIP_DEPS:-0}" != "1"' in text
 
 
 # ----------------------------------------------------------------- автозапуск off --- #
@@ -118,6 +132,9 @@ def test_autostart_off_disables_services_session_entry_and_access_point(fake_hos
     calls = fake_host.calls.read_text(encoding="utf-8")
     assert "disable --now robot-control.service" in calls
     assert "disable --now robot-kiosk.service" in calls
+    # Драйвер лидара ROS 2 держит USB-порт: он тоже должен гаснуть вместе с
+    # приложениями, иначе следующий запуск остаётся без скана.
+    assert "disable --now robot-lidar.service" in calls
     assert "connection.autoconnect no" in calls
     assert not entry.exists(), "ярлык автозапуска сеанса должен быть удалён"
     assert "вручную" in result.stdout
@@ -135,7 +152,11 @@ def test_autostart_status_shows_what_starts_itself(fake_host, monkeypatch):
     result = run("autostart.sh", "status")
     assert result.returncode == 0, result.stderr
     out = result.stdout
-    assert out.count("автозапуск ВКЛЮЧЁН") == 2      # пульт и экран
+    # Пульт, бортовой экран и служба лидара ROS 2: последняя попадает в список
+    # только если она установлена на этой машине (фальшивый systemctl отвечает
+    # «установлена» на любой вызов `cat`).
+    assert out.count("автозапуск ВКЛЮЧЁН") == 3
+    assert "лидар ROS 2" in out
     assert "ВКЛЮЧЁН" in out and str(entry) in out
     assert "автоподъём ВКЛЮЧЁН" in out
     assert "autostart.sh off" in out
@@ -145,8 +166,8 @@ def test_autostart_status_is_quiet_when_nothing_is_enabled(fake_host):
     result = run("autostart.sh", "status")
     assert result.returncode == 0, result.stderr
     assert "само ничего не запускается" in result.stdout
-    assert "./scripts/start.sh" in result.stdout
-    assert "./scripts/kiosk.sh" in result.stdout
+    assert "./scripts/start_robot.sh" in result.stdout
+    assert "./scripts/stop.sh" in result.stdout
 
 
 def test_autostart_rejects_unknown_action(fake_host):
@@ -261,13 +282,20 @@ def test_stop_sh_help_explains_autostart_separation(fake_host):
 # ------------------------------------------------------------- ярлыки на рабочем столе --- #
 
 
-def test_make_shortcut_does_not_autostart_by_default(fake_host):
-    """Ярлыки ставятся, а в автозапуск сеанса экран не попадает."""
+def test_make_shortcut_creates_one_desktop_launcher_without_autostart(fake_host):
+    """Создаётся один общий ярлык, а не отдельные значки пульта и киоска."""
     result = run("make_shortcut.sh")
     assert result.returncode == 0, result.stderr
-    assert (fake_host.root / ".local" / "share" / "applications" / "robot-console.desktop").is_file()
+    desktop = fake_host.root / "Desktop"
+    entries = sorted(desktop.glob("*.desktop"))
+    assert len(entries) == 1
+    assert entries[0].name == "robot-control.desktop"
+    content = entries[0].read_text(encoding="utf-8")
+    assert 'Name=Запустить робот' in content
+    assert 'start_desktop.sh' in content
+    assert not (fake_host.root / ".local" / "share" / "applications" / "robot-console.desktop").exists()
     assert not autostart_file(fake_host.root).exists()
-    assert "Автозапуск не включаю" in result.stdout
+    assert "Автозапуск выключен" in result.stdout
 
 
 def test_make_shortcut_removes_old_autostart_entry(fake_host):
@@ -302,8 +330,9 @@ def test_install_does_not_enable_autostart_without_flag():
     text = (SCRIPTS / "install_ubuntu.sh").read_text(encoding="utf-8")
     assert "--autostart" in text
     assert "if [[ $AUTOSTART -eq 1 ]]; then" in text
-    # без флага сервер поднимается только в текущем окне терминала
-    assert "if [[ $RUN -eq 1 && $AUTOSTART -eq 0 ]]; then" in text
+    # без флага приложение поднимается в текущем окне терминала
+    assert "if [[ $RUN -eq 1 ]]; then" in text
+    assert "exec ./scripts/start_robot.sh" in text
     # точка доступа поднимается без автоподъёма при загрузке
     assert "./scripts/setup_ap.sh --autostart" in text
 
@@ -311,8 +340,8 @@ def test_install_does_not_enable_autostart_without_flag():
 def test_install_help_explains_manual_start():
     result = run("install_ubuntu.sh", "--help")
     assert result.returncode == 0, result.stderr
-    assert "Автозапуск при загрузке по умолчанию НЕ ставится" in result.stdout
-    assert "./scripts/autostart.sh on" in result.stdout
+    assert "Автозапуск при загрузке по умолчанию выключен" in result.stdout
+    assert "--autostart" in result.stdout
 
 
 def test_install_rejects_unknown_flag():

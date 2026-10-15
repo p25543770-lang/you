@@ -206,8 +206,7 @@ def main(argv=None) -> int:
         log("Итог: веб-приложения работают, но реального скана нет — причина выше.")
         log("Что делать дальше:")
         log("  1) .venv/bin/python scripts/lidar_check.py --save-env   # железо и настройки")
-        log("  2) ./scripts/stop.sh && ./scripts/start.sh              # перезапуск пульта")
-        log("  3) ./scripts/kiosk.sh                                   # бортовой экран")
+        log("  2) ./scripts/stop.sh && ./scripts/start_robot.sh         # перезапуск обоих экранов")
         log("  4) journalctl -u robot-control -f  (или окно start.sh)    # журнал лидара")
     return 1
 

@@ -6,14 +6,15 @@
   <title>Экран робота</title>
   <meta name="theme-color" content="#070709" />
   <link rel="stylesheet" href="robot.css" />
+  <link rel="stylesheet" href="lidar_settings.css" />
 </head>
 <body class="kiosk-body">
   <!--
     Киоск-экран на борту робота. Рассчитан на дисплей 11.6" 1920×1080 (landscape):
     слева — крупно АКБ и мини-шасси (как на пульте управления), справа — лидар
     360° на всю высоту. Цифры крупные, чтобы было видно издалека.
-    Статистика (АКБ, шасси, лидар) без пароля — доступна всем.
-    Управление отсеком, сервисом и рулевыми углами — только после PIN-кода.
+    Статистика, настройки, BMS и остальные функции доступны без PIN.
+    PIN запрашивается только при открытии грузового кейса.
   -->
   <div class="kiosk">
     <header class="top">
@@ -28,13 +29,14 @@
         <b>RUS SLAM · Бортовой экран</b>
       </div>
       <div class="top-right">
+        <button id="battery-open" class="swipe-close battery-open" type="button" aria-controls="swipe-battery-view" title="Аккумулятор: все банки, защиты, температуры, подключение BMS">АКБ подробно</button>
         <span class="mode-pill" id="mode-pill">—</span>
         <span class="chip" id="data-chip">ожидание</span>
         <time class="clock" id="clock">--:--</time>
-        <!-- КНОПКА УПРАВЛЕНИЯ — вход по PIN, сама статистика остаётся без пароля -->
-        <button id="k-ctrl-btn" class="k-ctrl-btn" type="button" aria-haspopup="dialog" aria-controls="ctrl-overlay" title="Управление роботом по PIN-коду">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 1 1 8 0v3"/><circle cx="12" cy="16" r="1.6" fill="currentColor" stroke="none"/></svg>
-          <span>Управление</span>
+        <!-- Функции киоска открыты без PIN; код спрашивается только при открытии кейса. -->
+        <button id="k-ctrl-btn" class="k-ctrl-btn" type="button" aria-haspopup="dialog" aria-controls="ctrl-overlay" title="Открыть функции. PIN нужен только для открытия кейса.">
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><path d="M4 7h16M4 12h16M4 17h16"/><circle cx="9" cy="7" r="2" fill="var(--bg)"/><circle cx="15" cy="12" r="2" fill="var(--bg)"/><circle cx="11" cy="17" r="2" fill="var(--bg)"/></svg>
+          <span>Функции</span>
         </button>
       </div>
     </header>
@@ -42,12 +44,13 @@
     <div class="cols">
       <!-- Левая колонка: АКБ + шасси -->
       <div class="col-left">
-        <section class="battery-panel" aria-label="Состояние АКБ">
+        <section class="battery-panel" id="battery-panel" role="button" tabindex="0" aria-controls="swipe-battery-view" aria-label="Состояние АКБ — нажмите, чтобы открыть подробности по всем банкам">
           <article class="soc-big">
             <span class="kpi-label">Заряд АКБ</span>
             <b class="soc-value"><span id="k-soc">—</span><small>%</small></b>
             <div class="battery-bar"><i id="k-soc-bar"></i></div>
             <span class="kpi-sub" id="k-soc-state">—</span>
+            <span class="battery-more" id="battery-more">Подробно: все банки →</span>
           </article>
           <div class="batt-grid">
             <div class="batt-cell big">
@@ -172,9 +175,82 @@
         <h2 id="swipe-title-text">Камеры и логи</h2>
         <small id="swipe-title-hint">свайп влево — назад к статистике</small>
       </div>
+      <button id="swipe-battery-open" class="swipe-close battery-open" type="button" aria-controls="swipe-battery-view">АКБ</button>
       <span class="swipe-live" id="swipe-live">● LIVE</span>
     </header>
     <div class="swipe-body">
+      <section id="swipe-battery-view" class="swipe-view battery-detail" hidden aria-label="Страница 4. Аккумулятор: полная информация и все банки">
+        <header class="battery-report-head">
+          <div><h3>Аккумулятор · JBD BMS</h3><p id="bms-status" role="status">Ожидание BMS…</p><small id="bms-updated">Нет измерений</small></div>
+          <div class="bms-head-actions">
+            <button id="bms-setup-open" class="swipe-close" type="button" aria-controls="bms-setup" aria-expanded="false">Подключение BMS</button>
+            <a id="bms-report" class="swipe-close" href="api/battery/report.csv" aria-disabled="true">Скачать CSV</a>
+          </div>
+        </header>
+
+        <section id="bms-setup" class="bms-setup" hidden aria-label="Подключение BMS">
+          <header><b>Подключение JBD BMS</b><span id="bms-setup-current">порт не выбран</span></header>
+          <p class="bms-setup-hint">BMS подключается к USB через переходник USB-UART: TX платы → RX переходника, RX → TX, GND → GND, 9600 8N1. Выберите порт и нажмите «Проверить» — будет одно чтение данных, в BMS ничего не записывается. Порты мастера руля и лидара здесь не открываются.</p>
+          <ul id="bms-port-list" class="bms-port-list"><li>Список портов загружается…</li></ul>
+          <div class="bms-setup-actions">
+            <button id="bms-probe" type="button">Проверить выбранный</button>
+            <button id="bms-scan" type="button">Найти автоматически</button>
+            <button id="bms-save" type="button" class="primary">Сохранить и подключить</button>
+            <button id="bms-disable" type="button" class="quiet">Отключить BMS</button>
+          </div>
+          <p id="bms-setup-msg" class="bms-setup-msg" role="status"></p>
+        </section>
+
+        <div class="bms-hero">
+          <article class="bms-soc">
+            <span>Заряд</span>
+            <b><span id="bms-soc">—</span><small>%</small></b>
+            <div class="bms-soc-bar"><i id="bms-soc-bar"></i></div>
+            <small id="bms-capacity">остаток — из — Ач</small>
+          </article>
+          <div id="bms-summary" class="bms-summary"></div>
+        </div>
+
+        <div class="bms-columns">
+          <section class="bms-block bms-cells-block" aria-labelledby="bms-cells-title">
+            <h4 id="bms-cells-title">Банки</h4>
+            <p id="bms-spread"></p>
+            <p id="bms-count"></p>
+            <div id="bms-cell-tiles" class="bms-cell-tiles" aria-hidden="true"></div>
+            <h4 id="bms-passport-title" class="bms-subhead">Плата BMS</h4>
+            <dl id="bms-passport" class="bms-facts" aria-labelledby="bms-passport-title"></dl>
+          </section>
+          <div class="bms-side">
+            <section class="bms-block" aria-labelledby="bms-protect-title">
+              <h4 id="bms-protect-title">Защиты и ключи</h4>
+              <div id="bms-fets" class="bms-pills"></div>
+              <p id="bms-faults"></p>
+              <div id="bms-counters" class="bms-counters"></div>
+            </section>
+            <section class="bms-block" aria-labelledby="bms-temps-title">
+              <h4 id="bms-temps-title">Температуры</h4>
+              <div id="bms-temps" class="bms-temps"></div>
+            </section>
+          </div>
+        </div>
+
+        <section class="bms-block" aria-labelledby="bms-thresholds-title">
+          <h4 id="bms-thresholds-title">Пороги защит из памяти BMS <small>только чтение</small></h4>
+          <p id="bms-thresholds-state" class="panel-meta"></p>
+          <dl id="bms-thresholds" class="bms-facts bms-thresholds"></dl>
+        </section>
+
+        <section class="bms-block" aria-labelledby="bms-table-title">
+          <h4 id="bms-table-title">Все банки — точные значения</h4>
+          <p class="panel-meta">Ток: + заряд, − разряд. Балансировка — флаг BMS. Температуры относятся к датчикам АКБ, не к отдельным банкам.</p>
+          <div class="bms-table-wrap">
+            <table class="bms-table">
+              <thead><tr><th scope="col">Банка</th><th scope="col">Напряжение</th><th scope="col">От среднего</th><th scope="col">Балансировка</th><th scope="col">Отметка</th></tr></thead>
+              <tbody id="bms-cells"><tr><td colspan="5">Нет данных от BMS</td></tr></tbody>
+            </table>
+          </div>
+        </section>
+      </section>
       <div id="swipe-cameras-view" class="swipe-view swipe-camera-view">
       <!-- левая часть — две камеры друг над другом -->
       <div class="cam-stack">
@@ -213,91 +289,107 @@
         </header>
         <div id="log-list" class="log-list" role="log" aria-live="polite"></div>
         <footer class="log-foot">
-          <span id="log-status">журнал аудита · /api/audit</span>
+          <span id="log-status">журнал робота · /api/kiosk_logs</span>
           <label class="log-auto"><input id="log-autoscroll" type="checkbox" checked /> автопрокрутка</label>
         </footer>
       </aside>
       </div>
 
-      <!-- Отдельные команды только рулевым шаговым моторам; тяга не управляется. -->
-      <section id="swipe-motors-view" class="swipe-view steer-panel" hidden aria-label="Поворот рулевых модулей">
+      <!-- Руление и удерживаемое низкоскоростное движение на киоске без PIN. -->
+      <section id="swipe-motors-view" class="swipe-view steer-panel" hidden aria-label="Руление и тяга">
         <header class="steer-panel-head">
           <div>
-            <h3>Поворот рулевых модулей</h3>
-            <p>Выбери модуль, задай угол и нажми «Повернуть». Модули управляются по одному.</p>
+            <h3>Руление и движение</h3>
+            <p>Шаговые модули задаются отдельно; BLDC едет только пока удерживается направление.</p>
           </div>
           <div class="steer-access">
-            <span id="steer-auth-status" class="steer-auth-status">нужен PIN</span>
-            <button id="steer-unlock" class="btn-steer" type="button">Разблокировать</button>
-            <button id="steer-lock" class="btn-steer btn-steer--quiet" type="button" hidden>Заблокировать</button>
+            <span id="steer-auth-status" class="steer-auth-status">доступ без PIN</span>
           </div>
         </header>
-        <div class="drive-interlock" role="note">
-          <b>ТЯГА НЕ ВКЛЮЧАЕТСЯ</b>
-          <span>Отправляется только целевой угол рулевого мотора — команды скорости/PWM нет.</span>
-        </div>
+        <section class="traction-controls" aria-label="Тяговые BLDC-моторы">
+          <div class="traction-head"><div><b>Тяга BLDC</b><span>Удерживай направление · отпусти для торможения</span></div>
+            <span id="drive-status" role="status">Нужен ноль всех колёс (калибровка)</span></div>
+          <label class="traction-speed">Предел PWM <b><output id="drive-speed-value">8</output>%</b>
+            <input id="drive-speed" type="range" min="1" max="20" value="8" disabled></label>
+          <div class="traction-actions">
+            <button id="drive-back" type="button" disabled>Зажать: назад</button>
+            <button id="drive-forward" type="button" disabled>Зажать: вперёд</button>
+            <button id="drive-stop" class="traction-stop" type="button" disabled>СТОП</button>
+          </div>
+          <small class="traction-warning">Лимит 20%. Программный стоп и watchdog (650 мс) не заменяют физическую аварийную кнопку. Первые испытания — с вывешенными колёсами.</small>
+        </section>
         <p id="steer-source-status" class="steer-source-status" role="status">Проверка связи с модулями…</p>
+        <section class="steer-calib-bar" aria-label="Калибровка руля по оптодатчику">
+          <div><b>Ноль руля — по оптодатчику D18</b>
+            <span>Колесо идёт вправо до 100°, затем влево до 200°, находит флажок и встаёт в его середину. Колёса не должны упираться, рядом — никого.</span></div>
+          <button id="steer-calib-all" class="btn-steer btn-steer--calib" type="button" disabled>Калибровать все колёса</button>
+        </section>
         <div class="steer-grid">
           <article class="steer-card" data-steer-card="FL">
             <header><b>FL</b><span id="steer-state-FL" class="steer-state">—</span></header>
             <div class="steer-readout"><span>Сейчас <b id="steer-current-FL">—</b></span><span>Цель <output id="steer-target-FL">0°</output></span></div>
+            <div class="steer-meta"><span id="steer-home-FL" data-home="none">ноль: —</span><span id="steer-opto-FL" data-opto="unknown">датчик: —</span></div>
             <input id="steer-slider-FL" data-steer-slider="FL" type="range" min="-32" max="32" step="1" value="0" aria-label="Целевой угол переднего левого рулевого модуля" disabled />
             <div class="steer-range-labels"><span>−32°</span><span>+32°</span></div>
-            <div class="steer-actions"><button type="button" data-steer-adjust="FL" data-step="-5" disabled>−5°</button><button type="button" data-steer-zero="FL" disabled>0°</button><button type="button" data-steer-adjust="FL" data-step="5" disabled>+5°</button><button type="button" class="steer-send" data-steer-send="FL" disabled>Повернуть FL</button></div>
+            <div class="steer-actions"><button type="button" class="steer-calib" data-steer-calib="FL" disabled>Калибровка</button><button type="button" class="steer-origin" data-steer-origin="FL" disabled title="Запасной вариант: выставить колесо прямо руками и назначить текущее положение нулём">0° вручную</button><button type="button" data-steer-adjust="FL" data-step="-5" disabled>−5°</button><button type="button" data-steer-zero="FL" disabled>0°</button><button type="button" data-steer-adjust="FL" data-step="5" disabled>+5°</button><button type="button" class="steer-send" data-steer-send="FL" disabled>Повернуть FL</button></div>
           </article>
           <article class="steer-card" data-steer-card="FR">
             <header><b>FR</b><span id="steer-state-FR" class="steer-state">—</span></header>
             <div class="steer-readout"><span>Сейчас <b id="steer-current-FR">—</b></span><span>Цель <output id="steer-target-FR">0°</output></span></div>
+            <div class="steer-meta"><span id="steer-home-FR" data-home="none">ноль: —</span><span id="steer-opto-FR" data-opto="unknown">датчик: —</span></div>
             <input id="steer-slider-FR" data-steer-slider="FR" type="range" min="-32" max="32" step="1" value="0" aria-label="Целевой угол переднего правого рулевого модуля" disabled />
             <div class="steer-range-labels"><span>−32°</span><span>+32°</span></div>
-            <div class="steer-actions"><button type="button" data-steer-adjust="FR" data-step="-5" disabled>−5°</button><button type="button" data-steer-zero="FR" disabled>0°</button><button type="button" data-steer-adjust="FR" data-step="5" disabled>+5°</button><button type="button" class="steer-send" data-steer-send="FR" disabled>Повернуть FR</button></div>
+            <div class="steer-actions"><button type="button" class="steer-calib" data-steer-calib="FR" disabled>Калибровка</button><button type="button" class="steer-origin" data-steer-origin="FR" disabled title="Запасной вариант: выставить колесо прямо руками и назначить текущее положение нулём">0° вручную</button><button type="button" data-steer-adjust="FR" data-step="-5" disabled>−5°</button><button type="button" data-steer-zero="FR" disabled>0°</button><button type="button" data-steer-adjust="FR" data-step="5" disabled>+5°</button><button type="button" class="steer-send" data-steer-send="FR" disabled>Повернуть FR</button></div>
           </article>
           <article class="steer-card" data-steer-card="RL">
             <header><b>RL</b><span id="steer-state-RL" class="steer-state">—</span></header>
             <div class="steer-readout"><span>Сейчас <b id="steer-current-RL">—</b></span><span>Цель <output id="steer-target-RL">0°</output></span></div>
+            <div class="steer-meta"><span id="steer-home-RL" data-home="none">ноль: —</span><span id="steer-opto-RL" data-opto="unknown">датчик: —</span></div>
             <input id="steer-slider-RL" data-steer-slider="RL" type="range" min="-32" max="32" step="1" value="0" aria-label="Целевой угол заднего левого рулевого модуля" disabled />
             <div class="steer-range-labels"><span>−32°</span><span>+32°</span></div>
-            <div class="steer-actions"><button type="button" data-steer-adjust="RL" data-step="-5" disabled>−5°</button><button type="button" data-steer-zero="RL" disabled>0°</button><button type="button" data-steer-adjust="RL" data-step="5" disabled>+5°</button><button type="button" class="steer-send" data-steer-send="RL" disabled>Повернуть RL</button></div>
+            <div class="steer-actions"><button type="button" class="steer-calib" data-steer-calib="RL" disabled>Калибровка</button><button type="button" class="steer-origin" data-steer-origin="RL" disabled title="Запасной вариант: выставить колесо прямо руками и назначить текущее положение нулём">0° вручную</button><button type="button" data-steer-adjust="RL" data-step="-5" disabled>−5°</button><button type="button" data-steer-zero="RL" disabled>0°</button><button type="button" data-steer-adjust="RL" data-step="5" disabled>+5°</button><button type="button" class="steer-send" data-steer-send="RL" disabled>Повернуть RL</button></div>
           </article>
           <article class="steer-card" data-steer-card="RR">
             <header><b>RR</b><span id="steer-state-RR" class="steer-state">—</span></header>
             <div class="steer-readout"><span>Сейчас <b id="steer-current-RR">—</b></span><span>Цель <output id="steer-target-RR">0°</output></span></div>
+            <div class="steer-meta"><span id="steer-home-RR" data-home="none">ноль: —</span><span id="steer-opto-RR" data-opto="unknown">датчик: —</span></div>
             <input id="steer-slider-RR" data-steer-slider="RR" type="range" min="-32" max="32" step="1" value="0" aria-label="Целевой угол заднего правого рулевого модуля" disabled />
             <div class="steer-range-labels"><span>−32°</span><span>+32°</span></div>
-            <div class="steer-actions"><button type="button" data-steer-adjust="RR" data-step="-5" disabled>−5°</button><button type="button" data-steer-zero="RR" disabled>0°</button><button type="button" data-steer-adjust="RR" data-step="5" disabled>+5°</button><button type="button" class="steer-send" data-steer-send="RR" disabled>Повернуть RR</button></div>
+            <div class="steer-actions"><button type="button" class="steer-calib" data-steer-calib="RR" disabled>Калибровка</button><button type="button" class="steer-origin" data-steer-origin="RR" disabled title="Запасной вариант: выставить колесо прямо руками и назначить текущее положение нулём">0° вручную</button><button type="button" data-steer-adjust="RR" data-step="-5" disabled>−5°</button><button type="button" data-steer-zero="RR" disabled>0°</button><button type="button" data-steer-adjust="RR" data-step="5" disabled>+5°</button><button type="button" class="steer-send" data-steer-send="RR" disabled>Повернуть RR</button></div>
           </article>
         </div>
-        <p class="steer-footnote">Нужны источник «master», свежая связь, калибровка и остановленный модуль. Угол ограничен ±32°.</p>
+        <ul id="steer-messages" class="steer-messages" aria-label="Сообщения прошивки руля" hidden></ul>
+        <p class="steer-footnote">Нужны источник master и свежая связь. Ноль задаёт «Калибровка» по оптодатчику D18 (прошивка v2); «0° вручную» — запасной вариант, если датчик снят: сначала выставьте колесо прямо руками. Ноль сбрасывается при перезапуске Arduino; поворот с экрана — в пределах ±32°.</p>
       </section>
     </div>
     </div>
   </div>
 
-  <!-- ============ ОВЕРЛЕЙ УПРАВЛЕНИЯ: PIN + ФУНКЦИИ ============ -->
+  <!-- ============ ФУНКЦИИ БЕЗ PIN · PIN ТОЛЬКО ДЛЯ ОТКРЫТИЯ КЕЙСА ============ -->
   <div id="ctrl-overlay" class="ctrl-overlay" hidden aria-hidden="true">
     <div class="ctrl-backdrop" id="ctrl-backdrop" aria-hidden="true"></div>
     <div class="ctrl-sheet" role="dialog" aria-modal="true" aria-labelledby="ctrl-title" tabindex="-1">
       <header class="ctrl-head">
         <div class="ctrl-head-left">
           <span class="ctrl-head-icon" aria-hidden="true">
-            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="5" y="11" width="14" height="10" rx="2"/><path d="M8 11V8a4 4 0 1 1 8 0v3"/></svg>
+            <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M4 6h16M4 12h16M4 18h16"/><circle cx="9" cy="6" r="2" fill="var(--bg)"/><circle cx="15" cy="12" r="2" fill="var(--bg)"/><circle cx="11" cy="18" r="2" fill="var(--bg)"/></svg>
           </span>
           <div>
-            <h2 id="ctrl-title">Управление роботом</h2>
-            <p id="ctrl-subtitle" class="ctrl-subtitle">введи PIN-код — откроются функции</p>
+            <h2 id="ctrl-title">Функции</h2>
+            <p id="ctrl-subtitle" class="ctrl-subtitle">функции доступны без PIN · PIN нужен только для открытия кейса</p>
           </div>
         </div>
         <button id="ctrl-close" class="ctrl-close" type="button" aria-label="Закрыть">✕</button>
       </header>
 
-      <!-- === ЭКРАН 1: ПИН-КЛАВИАТУРА (сюда водить пальцами) === -->
-      <section id="pin-view" class="pin-view" aria-label="Ввод PIN-кода">
+      <!-- PIN-клавиатура появляется только после нажатия «Открыть кейс». -->
+      <section id="pin-view" class="pin-view" aria-label="Открытие кейса по PIN">
         <div class="pin-dots-wrap">
           <div id="pin-dots" class="pin-dots" aria-hidden="true">
             <span></span><span></span><span></span><span></span><span></span><span></span><span></span><span></span>
           </div>
           <div id="pin-display" class="pin-display" aria-live="polite" aria-label="PIN">••••</div>
-          <p id="pin-hint" class="pin-hint">Води пальцем по цифрам — PIN 4–8 цифр</p>
+          <p id="pin-hint" class="pin-hint">Введите PIN-код · 4–8 цифр</p>
           <p id="pin-msg" class="pin-msg" role="status" aria-live="polite"></p>
         </div>
 
@@ -317,13 +409,13 @@
         </div>
 
         <div class="pin-actions">
-          <button id="pin-submit" class="btn btn-primary pin-submit" type="button">Открыть доступ</button>
-          <button id="pin-cancel" class="btn btn-ghost" type="button">Назад к статистике</button>
+          <button id="pin-submit" class="btn btn-primary pin-submit" type="button">Открыть кейс</button>
+          <button id="pin-cancel" class="btn btn-ghost" type="button">Назад к функциям</button>
         </div>
-        <p class="pin-footnote">Телеметрия остаётся публичной — PIN открывает управление отсеком, сервисом и рулевыми углами</p>
+        <p class="pin-footnote">PIN проверяется только для открытия кейса. Остальные функции доступны без PIN.</p>
       </section>
 
-      <!-- === ЭКРАН 2: ФУНКЦИИ (после верного PIN) === -->
+      <!-- === ФУНКЦИИ ДОСТУПНЫ СРАЗУ, БЕЗ PIN === -->
       <section id="ctrl-view" class="ctrl-view" hidden aria-label="Функции управления">
         <div class="ctrl-status-row">
           <div id="ctrl-lock-chip" class="ctrl-chip">отсек: —</div>
@@ -346,7 +438,7 @@
 
           <button id="btn-steering-controls" class="ctrl-card ctrl-card--accent" type="button" role="listitem">
             <span class="ctrl-card-icon" aria-hidden="true">↗</span>
-            <span class="ctrl-card-text"><b>Поворот модулей</b><small>каждый рулевой мотор отдельно · без тяги</small></span>
+            <span class="ctrl-card-text"><b>Руление и движение</b><small>углы модулей + тяга с dead-man кнопкой</small></span>
             <span class="ctrl-card-arrow" aria-hidden="true">→</span>
           </button>
 
@@ -378,10 +470,10 @@
           <button id="ctrl-back" class="btn btn-ghost btn-large" type="button">← Вернуться к статистике</button>
           <button id="ctrl-logout" class="btn btn-ghost btn-large" type="button">Запереть и выйти</button>
         </div>
-        <p class="pin-footnote">Кнопка «Вернуться к статистике» — обратно к публичному экрану без пароля · отсек остаётся в выбранном положении</p>
+        <p class="pin-footnote">Закройте панель, чтобы вернуться к экрану телеметрии · состояние кейса не меняется</p>
       </section>
 
-      <!-- === ЭКРАН 3: ТЕМЫ (20 видов, доступны только после PIN) === -->
+      <!-- === ЭКРАН 3: ТЕМЫ (20 видов, доступны без PIN) === -->
       <section id="themes-view" class="themes-view" hidden aria-label="Выбор темы оформления">
         <div class="themes-head">
           <button id="themes-back" class="btn btn-ghost" type="button">← Назад</button>
@@ -422,5 +514,7 @@
   </div>
 
   <script src="robot.js"></script>
+  <script src="battery.js"></script>
+  <script src="lidar_settings.js"></script>
 </body>
 </html>

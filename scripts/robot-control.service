@@ -1,6 +1,6 @@
 # Запуск веб-пульта как службы Ubuntu (автозапуск — по желанию: без
-# `systemctl enable` служба просто стоит на месте, а пульт запускается
-# вручную — ./scripts/start.sh).
+# `systemctl enable` служба просто стоит на месте, а оба интерфейса запускаются
+# вручную одним действием — ./scripts/start_robot.sh).
 #
 # Установка:
 #   sudo useradd --system --home /opt/robot-control --shell /usr/sbin/nologin robotctl || true
@@ -37,7 +37,8 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=/opt/robot-control/data /opt/robot-control/var
+# Нужна запись в .git/ и файлы проекта для fast-forward-обновления из панели.
+ReadWritePaths=/opt/robot-control
 
 [Install]
 WantedBy=multi-user.target

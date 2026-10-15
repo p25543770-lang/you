@@ -1,14 +1,12 @@
 #!/usr/bin/env bash
 #
-# Ярлык-запуск пульта оператора. При каждом старте:
-#   1. автообновление кода с git (reset на origin текущей ветки);
-#   2. подтягивание зависимостей (venv создаётся, pip ставит только при изменении
-#      requirements.txt);
-#   3. создание .env и подсказка по учётке, если их нет;
-#   4. перезапуск сервера (если уже работал — аккуратно перезапускается);
-#   5. открытие сайта в браузере (если есть графика).
+# Внутренняя команда запуска веб-пульта; обычно вызывается из start_robot.sh.
+#   1. (если не пропущено) проверка зависимостей;
+#   2. создание .env и учётки при первом запуске;
+#   3. запуск веб-пульта во foreground с аккуратной остановкой.
+# Код Git не сбрасывается автоматически: обновление запускается кнопкой в панели.
 #
-# Использование: ./scripts/start.sh   (или ярлык «Робот-пульт» на рабочем столе)
+# Использование: ./scripts/start.sh (внутренний компонент)
 # Остановка:     ./scripts/stop.sh
 # Логи:          var/server.log
 #
@@ -24,32 +22,11 @@ trap 'echo "✗ Ошибка на строке $LINENO (команда: $BASH_CO
 PORT="$(grep -E '^RC_PORT=' .env 2>/dev/null | cut -d= -f2 || true)"
 PORT="${PORT:-8080}"
 
-# --- 1. автообновление с git ------------------------------------------------- #
-if [[ -d .git ]] && command -v git >/dev/null 2>&1; then
-  BR="$(git rev-parse --abbrev-ref HEAD)"
-  if git fetch -q origin "$BR" 2>/dev/null; then
-    LOCAL="$(git rev-parse HEAD)"
-    REMOTE="$(git rev-parse "origin/$BR")"
-    if [[ "$LOCAL" != "$REMOTE" ]]; then
-      log "есть обновления с git — применяю (ветка $BR)…"
-      git reset --hard -q "origin/$BR"
-      # перезапускаем уже обновлённый скрипт (один раз)
-      if [[ -z "${RC_UPDATED:-}" ]]; then
-        RC_UPDATED=1 exec "$0" "$@"
-      fi
-    else
-      log "код актуален (ветка $BR, $(git rev-parse --short HEAD))"
-    fi
-  else
-    log "git недоступен — пропускаю автообновление"
-  fi
-else
-  log "это не git-клон — автообновление пропущено"
-fi
-
-# --- 2. python и зависимости -------------------------------------------------- #
+# --- 1. зависимости ----------------------------------------------------------- #
 # Работает и без интернета: pip и колёса лежат в vendor/ (см. ensure_deps.sh).
-./scripts/ensure_deps.sh
+if [[ "${RC_SKIP_DEPS:-0}" != "1" ]]; then
+  ./scripts/ensure_deps.sh
+fi
 
 # --- 3. .env и учётка ----------------------------------------------------------- #
 if [[ ! -f .env ]]; then
@@ -58,6 +35,10 @@ if [[ ! -f .env ]]; then
     echo "RC_SECRET_KEY=$(python3 -c 'import secrets;print(secrets.token_urlsafe(48))')"
     echo "RC_BIND_HOST=0.0.0.0"
     echo "RC_PORT=8080"
+    echo "RC_SLAM_SOURCE=master"
+    echo "RC_SLAM_PORT=/dev/ttyACM0"
+    echo "RC_UPDATE_REMOTE=origin"
+    echo "RC_UPDATE_BRANCH=main"
   } > .env
   chmod 600 .env
   PORT=8080
@@ -152,8 +133,17 @@ log "сервер работает в этом окне: закроете окн
 SERVER_PID=""
 cleanup() {
   if [[ -n "$SERVER_PID" ]] && kill -0 "$SERVER_PID" 2>/dev/null; then
-    # gunicorn живёт в своей сессии (setsid): убиваем всю его группу
+    # gunicorn живёт в своей сессии (setsid): завершаем всю его группу и ждём,
+    # чтобы единый launcher не оставлял сервер слушать порт после закрытия.
     kill -TERM -- -"$SERVER_PID" 2>/dev/null || kill -TERM "$SERVER_PID" 2>/dev/null || true
+    for _ in $(seq 1 50); do
+      kill -0 "$SERVER_PID" 2>/dev/null || break
+      sleep 0.1
+    done
+    if kill -0 "$SERVER_PID" 2>/dev/null; then
+      kill -KILL -- -"$SERVER_PID" 2>/dev/null || kill -KILL "$SERVER_PID" 2>/dev/null || true
+    fi
+    wait "$SERVER_PID" 2>/dev/null || true
   fi
   rm -f "$PIDFILE"
 }

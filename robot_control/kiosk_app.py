@@ -1,8 +1,12 @@
 """Отдельное приложение для дисплея на борту робота.
 
 Корень / и /main.html сразу отдают экран киоска с АКБ, шасси и лидаром.
-Телеметрия публична; ручной поворот рулевых модулей защищён PIN и доступен
-только источнику MasterSource. Команды движения/тяги этот экран не отправляет.
+Телеметрия и функции бортового киоска доступны без PIN; PIN запрашивается
+только при открытии грузового отсека. Руление и удерживаемое низкоскоростное
+управление BLDC доступны только источнику MasterSource. Тяга ограничена 20%,
+требует ручного нуля и выровненных колёс; аппаратный watchdog включает тормоз,
+если heartbeat не приходит 650 мс. Веб-пульт оператора работает отдельно и
+сохраняет собственную авторизацию.
 
 Порт по умолчанию — 8090 (переменная ``RC_KIOSK_PORT``). Запуск одной
 командой — ``./run_kiosk.py`` или ``./scripts/kiosk.sh``: сервер поднимается на
@@ -50,23 +54,27 @@ except ImportError:  # pragma: no cover - не-POSIX платформы
 from flask import Flask, Response, jsonify, redirect, request
 from werkzeug.serving import make_server
 
+from robot_control import eventlog
 from robot_control.camera import CameraManager
 from robot_control.config import PROJECT_ROOT, Config
 from robot_control.lidar import LidarManager, set_self_port
+from robot_control.lidar_settings import apply_lidar_settings, settings_payload
 from robot_control.slam import (
     GUI_DIR,
     KIOSK_PAGE,
     KIOSK_URL_PATH,
     STEERING_COMMAND_HEADER,
     STEERING_COMMAND_HEADER_VALUE,
+    DRIVE_COMMAND_HEADER_VALUE,
     build_state,
+    dispatch_drive_command,
+    dispatch_steering_calibration,
     dispatch_steering_command,
-    grant_steering_access,
+    dispatch_steering_zero,
+    kiosk_log_payload,
     lidar_for_screen,
     lidar_status_payload,
-    revoke_steering_access,
     start_lidar,
-    steering_access_valid,
     steering_control_info,
 )
 
@@ -438,7 +446,74 @@ def create_kiosk_app(config: Config | None = None) -> Flask:
         SESSION_COOKIE_SECURE=config.cookie_secure,
     )
 
-    # Телеметрия открыта без логина; поворот модулей доступен только по PIN.
+    # Панель «Логи» показывает настоящий журнал процесса: записи логирования
+    # robot_control.* и явные события маршрутов. Подключаем его первым делом,
+    # чтобы в журнал попало всё, включая неудачный старт источника данных.
+    eventlog.install()
+
+    from .battery import BatteryManager, report_response
+    from . import bms_setup
+    battery = BatteryManager(os.environ.get("RC_BMS_PORT", "").strip())
+    app.extensions["rc_battery"] = battery
+    if not config.testing:
+        battery.start()
+
+    @app.get("/api/battery")
+    def api_battery():
+        snap = battery.snapshot()
+        # Настройка порта BMS есть только здесь, на бортовом экране (он держит UART).
+        snap["setupAvailable"] = True
+        return jsonify({"ok": True, "battery": snap}), 200, {"Cache-Control": "no-store"}
+
+    @app.get("/api/battery/report.csv")
+    def api_battery_report():
+        return report_response(battery.snapshot())
+
+    # ------------------- Подключение BMS со страницы «АКБ» ------------------- #
+    # Настройка порта и разовая проверка BMS — сервисные операции, не команды
+    # движения. На бортовом экране они доступны без PIN; мастер/лидар/шасси
+    # защищены от выбора на уровне bms_setup.
+    @app.get("/api/battery/setup")
+    def api_battery_setup():
+        payload = bms_setup.setup_payload(battery)
+        payload["requiresPin"] = False  # совместимость со старыми клиентами
+        return jsonify(payload), 200, {"Cache-Control": "no-store"}
+
+    @app.post("/api/battery/probe")
+    def api_battery_probe():
+        body = request.get_json(silent=True) or {}
+        port = str(body.get("port") or "").strip()
+        result = bms_setup.probe_port(port)
+        eventlog.record("info" if result.get("found") else "warn",
+                        "BMS: проверка %s — %s" % (port or "?", result.get("summary") or result.get("error")
+                                                   or "JBD не ответила"),
+                        source="АКБ")
+        return jsonify(result), 200 if result.get("ok") else 409
+
+    @app.post("/api/battery/scan")
+    def api_battery_scan():
+        result = bms_setup.scan_ports()
+        eventlog.record("info", "BMS: автопоиск — найдено %d: %s" % (
+            len(result["found"]), ", ".join(result["found"]) or "нет"), source="АКБ")
+        return jsonify(result)
+
+    @app.post("/api/battery/port")
+    def api_battery_port():
+        body = request.get_json(silent=True) or {}
+        if "port" not in body or not isinstance(body.get("port"), str):
+            return jsonify({"ok": False, "error": "нужно поле port"}), 400
+        try:
+            result = bms_setup.apply_port(battery, body["port"])
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        except OSError as exc:
+            return jsonify({"ok": False, "error": "не удалось записать .env: %s" % exc}), 500
+        eventlog.record("ok", "BMS: порт %s сохранён в .env, подключение…" % (result["port"] or "—")
+                        if result["port"] else "BMS отключена: RC_BMS_PORT очищен", source="АКБ")
+        return jsonify(result)
+
+    # Телеметрия и команды бортового киоска открыты без PIN; отдельный
+    # веб-пульт оператора использует свой механизм авторизации.
     try:
         state = build_state(
             mode=config.slam_source,
@@ -454,6 +529,19 @@ def create_kiosk_app(config: Config | None = None) -> Flask:
         log.error("киоск: не удалось подключить источник: %s", exc)
         state = None
     app.extensions["rc_slam"] = state
+
+    def note_case_pin_result(result: dict, *, where: str) -> None:
+        """Журналировать PIN кейса без самого кода и без обещаний авторизации руля."""
+        reasons = {
+            "wrong": "неверный PIN",
+            "format": "PIN должен быть 4…8 цифр",
+            "blocked": "ввод заблокирован после серии ошибок",
+        }
+        if result.get("ok"):
+            eventlog.record("ok", "PIN принят (%s)" % where, source="pin")
+        else:
+            reason = reasons.get(str(result.get("reason") or ""), "проверка не пройдена")
+            eventlog.record("warn", "PIN не принят (%s): %s" % (where, reason), source="pin")
 
     # Лидар стартует сразу, а не по первому запросу экрана: .env уже прочитан,
     # а USB-порт должен занять именно этот процесс (пульт возьмёт скан по HTTP).
@@ -476,6 +564,18 @@ def create_kiosk_app(config: Config | None = None) -> Flask:
     def kiosk():
         return _send(KIOSK_PAGE)
 
+    @app.get("/api/kiosk_logs")
+    def api_kiosk_logs():
+        """Настоящий журнал событий робота для панели «Логи» на борту.
+
+        Публичен вместе с остальной телеметрией экрана: это журнал самого
+        процесса — подключение лидара, ошибки портов, PIN, команды руления и
+        тяги. Выдуманных строк в нём нет; если событий не было, ``entries``
+        пустой, и экран так и пишет.
+        """
+        limit = eventlog.clamp_limit(request.args.get("limit"))
+        return jsonify({"ok": True, "data": kiosk_log_payload(limit, state=state)})
+
     @app.get("/main.html")
     @app.get("/robot.html")
     def kiosk_alt():
@@ -489,7 +589,7 @@ def create_kiosk_app(config: Config | None = None) -> Flask:
         manager = LidarManager.get_instance()
         snap = state.snapshot()
         points, demo = lidar_for_screen(manager, snap)
-        # Телеметрия и признак поддержки публичны; команды модулю — только после PIN.
+        # Телеметрия и доступность управления публичны; PIN используется только для кейса.
         return jsonify({"ok": True, "data": {
             "battery": snap.get("battery"),
             "motors": snap.get("motors"),
@@ -507,6 +607,9 @@ def create_kiosk_app(config: Config | None = None) -> Flask:
             "ts": snap.get("ts"),
             "source": snap.get("source"),
             "steeringControl": steering_control_info(state.source),
+            "drive": snap.get("drive"),
+            # Последние сообщения прошивки мастера («# FR: Калибровка ЗАВЕРШЕНА!»).
+            "masterMessages": snap.get("masterMessages") or [],
         }})
 
     @app.get("/api/lidar")
@@ -602,28 +705,10 @@ def create_kiosk_app(config: Config | None = None) -> Flask:
     def api_kiosk_lock():
         if state is None:
             return jsonify({"ok": False, "error": "no source"}), 503
+        # Поле оставлено для совместимости со старым клиентом; в киоске команды
+        # руля/тяги не зависят от PIN. Только open_lock проверяет PIN кейса.
         return jsonify({"ok": True, "lock": state.vault.state(state.lock_open),
-                        "steeringAuthorized": steering_access_valid()})
-
-    @app.post("/api/kiosk_lock/verify")
-    def api_kiosk_lock_verify():
-        if state is None:
-            return jsonify({"ok": False, "error": "no source"}), 503
-        body = request.get_json(silent=True) or {}
-        pin = str(body.get("pin", ""))
-        result = state.vault.verify(pin)
-        if result.get("ok"):
-            grant_steering_access()
-        else:
-            revoke_steering_access()
-        result["lock"] = state.vault.state(state.lock_open)
-        result["steeringAuthorized"] = steering_access_valid() if result.get("ok") else False
-        return jsonify(result), 200 if result.get("ok") else 403
-
-    @app.post("/api/kiosk_lock/session/end")
-    def api_kiosk_steering_logout():
-        revoke_steering_access()
-        return jsonify({"ok": True, "steeringAuthorized": False})
+                        "steeringAuthorized": True})
 
     @app.post("/api/kiosk_lock/open")
     def api_kiosk_lock_open():
@@ -632,6 +717,7 @@ def create_kiosk_app(config: Config | None = None) -> Flask:
         body = request.get_json(silent=True) or {}
         pin = str(body.get("pin", ""))
         result = state.open_lock(pin)
+        note_case_pin_result(result, where="открытие кейса")
         return jsonify(result), 200 if result.get("ok") else 403
 
     @app.post("/api/kiosk_lock/close")
@@ -646,10 +732,66 @@ def create_kiosk_app(config: Config | None = None) -> Flask:
             return jsonify({"ok": False, "error": "no source"}), 503
         if request.headers.get(STEERING_COMMAND_HEADER) != STEERING_COMMAND_HEADER_VALUE:
             return jsonify({"ok": False, "reason": "request_header_required"}), 400
-        if not steering_access_valid():
-            return jsonify({"ok": False, "reason": "pin_required"}), 401
         result, status = dispatch_steering_command(state.source, request.get_json(silent=True))
         return jsonify(result), status
+
+    @app.post("/api/kiosk_zero")
+    def api_kiosk_zero():
+        if state is None:
+            return jsonify({"ok": False, "error": "no source"}), 503
+        if request.headers.get(STEERING_COMMAND_HEADER) != STEERING_COMMAND_HEADER_VALUE:
+            return jsonify({"ok": False, "reason": "request_header_required"}), 400
+        result, status = dispatch_steering_zero(state.source, request.get_json(silent=True))
+        return jsonify(result), status
+
+    @app.post("/api/kiosk_calibrate")
+    def api_kiosk_calibrate():
+        """Калибровка руля по оптодатчику D18: один модуль или ``ALL``."""
+        if state is None:
+            return jsonify({"ok": False, "error": "no source"}), 503
+        if request.headers.get(STEERING_COMMAND_HEADER) != STEERING_COMMAND_HEADER_VALUE:
+            return jsonify({"ok": False, "reason": "request_header_required"}), 400
+        result, status = dispatch_steering_calibration(state.source, request.get_json(silent=True))
+        return jsonify(result), status
+
+    @app.post("/api/kiosk_drive")
+    def api_kiosk_drive():
+        if state is None:
+            return jsonify({"ok": False, "error": "no source"}), 503
+        if request.headers.get(STEERING_COMMAND_HEADER) != DRIVE_COMMAND_HEADER_VALUE:
+            return jsonify({"ok": False, "reason": "request_header_required"}), 400
+        result, status = dispatch_drive_command(state.source, request.get_json(silent=True))
+        return jsonify(result), status
+
+    # ------------------------- Настройки лидара ------------------------- #
+    # Настроить и пересканировать лидар можно без PIN: эти операции не дают
+    # команд движения. Набор параметров проходит строгую валидацию, а порт
+    # лидара синхронизируется с источником шасси общим межпроцессным замком.
+    @app.get("/api/lidar/settings")
+    def api_kiosk_lidar_settings():
+        result = settings_payload(LidarManager.get_instance())
+        result["canEdit"] = True
+        result["requiresPin"] = False  # совместимость со старыми клиентами
+        return jsonify(result)
+
+    @app.post("/api/lidar/settings")
+    def api_kiosk_lidar_settings_save():
+        body = request.get_json(silent=True) or {}
+        try:
+            result = apply_lidar_settings(body.get("settings") or body)
+        except ValueError as exc:
+            return jsonify({"ok": False, "error": str(exc)}), 400
+        return jsonify(result)
+
+    @app.post("/api/lidar/rescan")
+    def api_kiosk_lidar_rescan():
+        manager = LidarManager.get_instance()
+        result = manager.restart_search()
+        return jsonify({"ok": True, "settings": manager.current_settings(),
+                        # При источнике ros «пересканировать» значит перезапустить
+                        # драйвер через супервизор: его ответ виден в панели.
+                        "ros_rescan": result.get("ros_rescan") if isinstance(result, dict) else None,
+                        "status": manager.get_status()})
 
     @app.get("/healthz")
     def healthz():
@@ -659,8 +801,8 @@ def create_kiosk_app(config: Config | None = None) -> Flask:
             "source": getattr(getattr(state, "source", None), "name", None) if state else None,
         })
 
-    # статика (robot.css, robot.js)
-    for filename in ("robot.css", "robot.js"):
+    # статика (robot.css, robot.js и панель настроек лидара)
+    for filename in ("robot.css", "robot.js", "battery.js", "lidar_settings.css", "lidar_settings.js"):
         # нужен closure, чтобы цикл не переиспользовал последнее значение
         def _view(name=filename):
             return _send(name)
@@ -929,14 +1071,14 @@ def _remove_pid_file() -> None:
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         prog="run_kiosk.py",
-        description="Бортовой экран (8090): публичная телеметрия, поворот модулей после PIN",
+        description="Бортовой экран (8090): функции без PIN, кейс по PIN",
     )
     parser.add_argument("--host", default=None,
                         help="адрес прослушивания (по умолчанию RC_BIND_HOST или 0.0.0.0)")
     parser.add_argument("--port", type=int, default=None,
                         help=f"порт экрана (по умолчанию RC_KIOSK_PORT или {DEFAULT_PORT})")
     parser.add_argument("--source", choices=["auto", "sim", "serial", "ros", "master"], default=None,
-                        help="источник данных: auto, sim, serial, ros или master (адресное управление углом)")
+                        help="источник данных: master (по умолчанию), auto, sim, serial или ros")
     parser.add_argument("--open", dest="open_screen", action="store_true", default=None,
                         help="открыть экран в браузере (по умолчанию — если есть дисплей)")
     parser.add_argument("--no-open", dest="open_screen", action="store_false",
@@ -956,8 +1098,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
 
     # Настройки (заодно подхватываем .env — например RC_KIOSK_OPEN).
-    # По умолчанию ищем ROS/UART; мастер выбирается явно как RC_SLAM_SOURCE=master.
-    # Симуляция включается явно: RC_SLAM_SOURCE=sim ./run_kiosk.py
+    # По умолчанию используется USB-мастер четырёх I2C-плат; стенд включается
+    # явно: RC_SLAM_SOURCE=sim ./run_kiosk.py
     cfg = Config.from_env()
     if args.source:
         cfg = replace(cfg, slam_source=args.source)

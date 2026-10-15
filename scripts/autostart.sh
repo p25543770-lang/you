@@ -2,11 +2,10 @@
 #
 # Автозапуск приложения на роботе: посмотреть, выключить или вернуть.
 #
-# Приложение по умолчанию НЕ стартует само — и пульт оператора (8080), и
-# бортовой экран (8090) поднимаются вручную:
+# Приложение по умолчанию НЕ стартует само — пульт оператора (8080) и
+# бортовой экран (8090) запускаются одним ярлыком/командой:
 #
-#   ./scripts/start.sh     пульт оператора
-#   ./scripts/kiosk.sh     бортовой экран робота
+#   ./scripts/start_robot.sh
 #
 # Этот скрипт нужен, если автозапуск когда-то включали (install_ubuntu.sh
 # --autostart/--systemd, `systemctl enable robot-control robot-kiosk`,
@@ -21,8 +20,9 @@
 #   ./scripts/autostart.sh on               # вернуть автозапуск
 #
 # Что проверяет и меняет:
-#   * службы systemd: robot-control (пульт), robot-kiosk (экран);
-#   * ярлык экрана в автозапуске сеанса: ~/.config/autostart/robot-kiosk.desktop;
+#   * службы systemd: robot-control (пульт), robot-kiosk (экран) и robot-lidar
+#     (лидар через ROS 2 — если эта служба установлена);
+#   * единый ярлык пульта + экрана в автозапуске сеанса: ~/.config/autostart/robot-control.desktop;
 #   * автоподъём точки доступа Wi-Fi robot-ap (connection.autoconnect);
 #   * строки автозапуска в cron, если кто-то прописал их руками (о них
 #     скрипт только предупреждает — правьте сами: crontab -e).
@@ -43,7 +43,7 @@ fi
 UNITS=(robot-control robot-kiosk)
 UNIT_TITLES=("пульт оператора (8080)" "бортовой экран (8090)")
 AUTOSTART_DIR="${HOME}/.config/autostart"
-AUTOSTART_NAMES=(robot-kiosk robot-console)
+AUTOSTART_NAMES=(robot-control robot-kiosk robot-console)
 AP_CONN="robot-ap"
 
 log()  { printf '\033[1;32m[autostart]\033[0m %s\n' "$*"; }
@@ -73,6 +73,15 @@ have_systemd() {
   command -v systemctl >/dev/null 2>&1 || return 1
   $SUDO systemctl list-unit-files --no-pager >/dev/null 2>&1
 }
+
+# Лидар через ROS 2 (robot-lidar) — отдельная служба: драйвер лидара занимает
+# USB-порт и должен подниматься раньше приложений (см. ros2_setup.sh --service).
+# Добавляем её в общий список только если она установлена: иначе в status у
+# каждой установки без ROS 2 висело бы «служба не установлена».
+if have_systemd && $SUDO systemctl cat robot-lidar.service >/dev/null 2>&1; then
+  UNITS+=(robot-lidar)
+  UNIT_TITLES+=("лидар ROS 2 (драйвер 360°)")
+fi
 
 unit_installed() {
   have_systemd && $SUDO systemctl cat "$1.service" >/dev/null 2>&1
@@ -122,10 +131,9 @@ ap_autoconnect() {
 print_manual_hint() {
   cat <<'EOF'
 
-Приложение запускается вручную:
-  ./scripts/start.sh     пульт оператора (http://<IP>:8080/)
-  ./scripts/kiosk.sh     бортовой экран робота (http://127.0.0.1:8090/)
-  ./scripts/stop.sh      остановить запущенное
+Приложение запускается одним действием:
+  ./scripts/start_robot.sh   веб-пульт + бортовой экран
+  ./scripts/stop.sh          остановить запущенное
 EOF
 }
 
@@ -156,10 +164,10 @@ if [[ $ACTION == "status" ]]; then
 
   entry="$(autostart_file)"
   if [[ -n "$entry" ]]; then
-    echo "  • ярлык экрана в автозапуске сеанса: $entry (ВКЛЮЧЁН)"
+    echo "  • единый ярлык пульта и экрана в автозапуске сеанса: $entry (ВКЛЮЧЁН)"
     auto_count=$((auto_count + 1))
   else
-    echo "  • ярлык экрана в автозапуске сеанса: нет"
+    echo "  • единый ярлык в автозапуске сеанса: нет"
   fi
 
   if ! command -v nmcli >/dev/null 2>&1; then
@@ -281,7 +289,7 @@ if [[ $ACTION == "on" || $ACTION == "enable" ]]; then
       unit="${UNITS[$index]}"
       title="${UNIT_TITLES[$index]}"
       if ! unit_installed "$unit"; then
-        echo "  служба $unit не установлена — поставь: sudo ./scripts/install_ubuntu.sh --autostart"
+        echo "  служба $unit не установлена — поставь: ./scripts/install_ubuntu.sh --autostart"
         continue
       fi
       if $SUDO systemctl enable --now "$unit.service" >/dev/null 2>&1; then

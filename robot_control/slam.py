@@ -24,11 +24,13 @@ import logging
 import os
 import math
 import re
+import threading
 import time
 from pathlib import Path
 
 from flask import Blueprint, Response, jsonify, request, send_from_directory, session
 
+from robot_control import eventlog
 from robot_control.camera import CameraManager
 from robot_control.lidar import (
     LidarManager,
@@ -53,12 +55,14 @@ KIOSK_PAGE = "robot.html"
 #: Путь бортового экрана: его же открывает браузер на дисплее робота.
 KIOSK_URL_PATH = "/kiosk"
 
-#: Ввод PIN открывает короткую сессию только для команд поворота рулевых модулей.
+#: Ввод PIN открывает короткую сессию для руления и удерживаемой тяги.
 STEERING_SESSION_KEY = "kiosk_steering_expires"
 STEERING_SESSION_TTL_S = 5 * 60
 STEERING_ANGLE_LIMIT_DEG = 32.0
 STEERING_COMMAND_HEADER = "X-Robot-Control"
 STEERING_COMMAND_HEADER_VALUE = "steering"
+DRIVE_COMMAND_HEADER_VALUE = "drive"
+MAX_DRIVE_PERCENT = 20
 
 
 def grant_steering_access(now=None):
@@ -71,25 +75,232 @@ def revoke_steering_access():
 
 
 def steering_access_valid(now=None):
-    """Проверить и очистить истёкший доступ к рулевым моторам."""
+    """Проверить и очистить истёкший доступ к рулению и тяге."""
     now = time.time() if now is None else now
     expires = session.get(STEERING_SESSION_KEY, 0)
     if not isinstance(expires, (int, float)) or expires <= now:
+        # Истёкшая сессия — настоящее событие: на экране видно, почему руление
+        # снова требует PIN. Сессии, которой не было, в журнал не попадает:
+        # иначе запись появлялась бы на каждом опросе состояния.
+        if expires:
+            eventlog.record(
+                "warn",
+                "PIN-сессия руления истекла (%.0f мин) — команды снова требуют PIN"
+                % (STEERING_SESSION_TTL_S / 60.0),
+                source="руление",
+            )
         revoke_steering_access()
         return False
     return True
 
 
+#: Русский текст причины отказа проверки PIN (сам код в журнал не пишется).
+PIN_REASON_TEXT = {
+    "wrong": "неверный PIN",
+    "format": "PIN должен быть 4…8 цифр",
+    "blocked": "ввод заблокирован после серии ошибок",
+    "ok": "PIN принят",
+}
+
+
+def note_pin_result(result, *, where="киоск"):
+    """Записать в журнал настоящий итог проверки PIN (подробности без цифр кода)."""
+    reason = str((result or {}).get("reason", ""))
+    text = PIN_REASON_TEXT.get(reason, reason or "проверка не пройдена")
+    if (result or {}).get("ok"):
+        eventlog.record(
+            "ok",
+            "PIN принят (%s): руление и тяга разрешены на %.0f мин"
+            % (where, STEERING_SESSION_TTL_S / 60.0),
+            source="pin",
+        )
+    else:
+        eventlog.record("warn", "PIN не принят (%s): %s" % (where, text), source="pin")
+
+
+#: Последняя записанная ступень тяги: heartbeat ручки не должен забивать журнал.
+_last_drive_percent: float | None = None
+_last_drive_lock = threading.Lock()
+
+
+def note_drive_command(percent: float) -> None:
+    """Записать ступень тяги (0 — тормоз), а не каждый heartbeat удержания.
+
+    Кнопку держат, и команда уходит 5 раз в секунду; в журнале отражается
+    смена ступени, то есть реальное действие оператора. Повторы внутри
+    ``eventlog`` сворачиваются в счётчик ``×N``.
+    """
+    global _last_drive_percent
+    step = round(float(percent))
+    with _last_drive_lock:
+        if _last_drive_percent == step:
+            return
+        _last_drive_percent = step
+    if step == 0:
+        eventlog.record("info", "тяга 0% — тормоз BLDC", source="тяга")
+    else:
+        eventlog.record(
+            "ok",
+            "тяга %+d%% (%s)" % (step, "вперёд" if step > 0 else "назад"),
+            source="тяга",
+        )
+
+
+#: Русский текст причины отказа команды — для журнала экрана.
+COMMAND_REASON_TEXT = {
+    "payload": "неверный состав полей",
+    "invalid_module": "неизвестный модуль",
+    "invalid_angle": "неверный угол",
+    "angle_limit": "угол вне допуска ±%.0f°" % STEERING_ANGLE_LIMIT_DEG,
+    "invalid_drive": "неверная величина тяги",
+    "drive_limit": "тяга вне допуска ±%d%%" % MAX_DRIVE_PERCENT,
+    "control_not_supported": "источник данных не умеет адресное управление",
+    "module_offline": "модуль не на связи",
+    "serial_unavailable": "нет связи по UART",
+    "command_queue_full": "очередь команд занята",
+    "command_failed": "команда не выполнена",
+    "pin_required": "нужен PIN руления",
+    "request_header_required": "запрос без заголовка X-Robot-Control",
+    "module_busy": "модуль занят (поворачивается, калибруется или включена тяга)",
+    "not_homed": "у модуля нет нуля — откалибруйте по датчику или задайте 0°",
+}
+
+
+def note_pin_required(action: str) -> None:
+    """Команда без PIN-сессии: на экране видно, чего именно не хватает."""
+    note_command_rejected(action, "pin_required")
+
+
+def note_command_rejected(action: str, reason: str) -> None:
+    """Отказ команды — тоже настоящее событие: на экране видно, почему её нет."""
+    text = COMMAND_REASON_TEXT.get(reason, reason or "причина неизвестна")
+    eventlog.record("warn", "%s отклонено: %s" % (action, text), source="управление")
+
+
+def note_steering_command(module: str, angle: float) -> None:
+    """Записать настоящую команду поворота одного модуля."""
+    eventlog.record("ok", "руление %s → %+.1f°" % (module, float(angle)), source="руление")
+
+
+def note_steering_zero(module: str) -> None:
+    """Записать ручной программный ноль: без движения, только отсчёт от колеса."""
+    eventlog.record(
+        "info", "программный ноль %s выставлен вручную (без движения)" % module,
+        source="руление",
+    )
+
+
+def note_steering_calibration(module: str) -> None:
+    """Записать запуск калибровки по оптодатчику D18 (колесо будет двигаться)."""
+    target = "всех колёс" if module == "ALL" else module
+    eventlog.record(
+        "ok", "калибровка руля %s по оптодатчику запущена" % target, source="руление",
+    )
+
+
+#: Слова в сообщении прошивки, после которых запись в журнале — предупреждение.
+_MASTER_WARN_WORDS = ("ОШИБКА", "нет связи", "не доставлена", "нет команды", "отклонена",
+                      "заблокирован", "Неизв.")
+
+
+def note_master_message(text: str) -> None:
+    """Сообщение прошивки мастера («# FR: Калибровка ЗАВЕРШЕНА!») — в журнал экрана."""
+    text = str(text or "").strip()
+    if not text:
+        return
+    level = "warn" if any(word in text for word in _MASTER_WARN_WORDS) else "info"
+    eventlog.record(level, "прошивка " + text, source="мастер")
+
+
+def reset_journal_notes() -> None:
+    """Забыть, о чём журнал уже писал: повторная инициализация и тесты.
+
+    Без этого после очистки журнала тот же статус лидара считался бы «уже
+    записанным» и на экране осталась бы пустота.
+    """
+    global _lidar_note, _last_drive_percent
+    with _lidar_note_lock:
+        _lidar_note = None
+    with _last_drive_lock:
+        _last_drive_percent = None
+
+
+#: Повторяющийся «лидар:» внутри причины статуса — префикс нужен один.
+_LIDAR_PREFIX_RE = re.compile(r"(?i)(?:^|(?<=[\s(]))лидар:\s*")
+
+#: Последнее состояние лидара, о котором уже написано в журнал.
+_lidar_note: tuple | None = None
+_lidar_note_lock = threading.Lock()
+
+
+def note_lidar_status(status) -> None:
+    """Записать в журнал смену состояния лидара — и только смену.
+
+    Статус пересобирается на каждом запросе экрана, поэтому в журнал попадает
+    переход («на связи» → «скан не идёт»), а не одна и та же строка подряд.
+    """
+    global _lidar_note
+    if not isinstance(status, dict):
+        return
+    key = (
+        bool(status.get("connected")),
+        bool(status.get("demo")),
+        str(status.get("reason", "")),
+        str(status.get("source", "")),
+    )
+    with _lidar_note_lock:
+        if key == _lidar_note:
+            return
+        _lidar_note = key
+    connected, demo, reason, source = key
+    # Причина приходит из статуса со своим «лидар:» (иногда дважды) — на экране
+    # это читалось бы как «лидар: … лидар: …», поэтому префикс оставляем один.
+    detail = _LIDAR_PREFIX_RE.sub("", reason).strip()
+    if connected:
+        points = status.get("points_count")
+        where = "%s, %s точек" % (source or "источник", points) if points else (source or "")
+        eventlog.record("ok", "лидар на связи (" + where + ")" if where else "лидар на связи",
+                        source="лидар")
+    elif demo:
+        eventlog.record("warn", "лидар: " + (detail or "реального лидара нет, показан демо-скан"),
+                        source="лидар")
+    else:
+        eventlog.record("warn", "лидар: скана нет — " + (detail or "причина неизвестна"),
+                        source="лидар")
+
+
 def steering_control_info(source):
-    """Публичная возможность управления: только мастер с адресной командой."""
+    """Публичная возможность управления: мастер, адресные команды, ноль руля.
+
+    Ноль — калибровкой по оптодатчику D18 (прошивка v2, команда ``k``), ручной
+    «Задать 0°» остался запасным вариантом (например, датчик снят).
+    """
+    calibration = bool(getattr(source, "supports_calibration", False))
     return {
         "available": bool(getattr(source, "supports_individual_steer", False)),
         "source": getattr(source, "name", "unknown"),
+        "zeroMode": "opto" if calibration else "manual",
+        "optoUsed": calibration,
+        "calibration": calibration,
+        "manualZero": True,
+        "limitDeg": STEERING_ANGLE_LIMIT_DEG,
     }
 
 
 def dispatch_steering_command(source, body):
-    """Проверить узкий payload и отправить один целевой угол без команд тяги."""
+    """Проверить payload и отправить адресную команду одному рулевому модулю.
+
+    Ответ не меняется, но отказ теперь виден в журнале экрана: иначе на борту
+    «ничего не произошло» без объяснения — оператор не знает, ждать ему или
+    искать причину.
+    """
+    result, status = _steering_command(source, body)
+    if not result.get("ok"):
+        note_command_rejected("руление", str(result.get("reason", "")))
+    return result, status
+
+
+def _steering_command(source, body):
     if not isinstance(body, dict) or set(body) != {"module", "angle"}:
         return {"ok": False, "reason": "payload"}, 400
     module = body.get("module")
@@ -117,6 +328,7 @@ def dispatch_steering_command(source, body):
         return {"ok": False, "reason": "control_not_supported"}, 409
     result = command(module, angle)
     if result.get("ok"):
+        note_steering_command(module, result.get("angle", round(angle, 1)))
         return {"ok": True, "queued": True, "module": module,
                 "angle": result.get("angle", round(angle, 1))}, 200
 
@@ -127,6 +339,120 @@ def dispatch_steering_command(source, body):
     elif reason == "command_queue_full":
         status = 429
     elif reason in {"invalid_module", "invalid_angle", "angle_limit"}:
+        status = 400
+    return {"ok": False, "reason": reason}, status
+
+
+def dispatch_steering_zero(source, body):
+    """Проверить payload и поставить в очередь программный ноль одного модуля."""
+    result, status = _steering_zero(source, body)
+    if not result.get("ok"):
+        note_command_rejected("программный ноль", str(result.get("reason", "")))
+    return result, status
+
+
+def _steering_zero(source, body):
+    if not isinstance(body, dict) or set(body) != {"module"}:
+        return {"ok": False, "reason": "payload"}, 400
+    module = body.get("module")
+    if not isinstance(module, str) or module.upper() not in {"FL", "FR", "RL", "RR"}:
+        return {"ok": False, "reason": "invalid_module"}, 400
+    module = module.upper()
+    if not getattr(source, "supports_individual_steer", False):
+        return {"ok": False, "reason": "control_not_supported"}, 409
+    command = getattr(source, "zero_module", None)
+    if not callable(command):
+        return {"ok": False, "reason": "control_not_supported"}, 409
+    result = command(module)
+    if result.get("ok"):
+        note_steering_zero(module)
+        return {"ok": True, "queued": True, "module": module,
+                "zeroMode": "manual"}, 200
+    reason = result.get("reason", "command_failed")
+    status = 409
+    if reason in {"serial_unavailable", "module_offline"}:
+        status = 503
+    elif reason == "command_queue_full":
+        status = 429
+    elif reason == "invalid_module":
+        status = 400
+    return {"ok": False, "reason": reason}, status
+
+
+def dispatch_steering_calibration(source, body):
+    """Проверить payload и запустить калибровку по оптодатчику (модуль или ALL)."""
+    result, status = _steering_calibration(source, body)
+    if not result.get("ok"):
+        note_command_rejected("калибровка руля", str(result.get("reason", "")))
+    return result, status
+
+
+def _steering_calibration(source, body):
+    if not isinstance(body, dict) or set(body) != {"module"}:
+        return {"ok": False, "reason": "payload"}, 400
+    module = body.get("module")
+    if not isinstance(module, str) or module.upper() not in {"FL", "FR", "RL", "RR", "ALL"}:
+        return {"ok": False, "reason": "invalid_module"}, 400
+    module = module.upper()
+    command = getattr(source, "calibrate_module", None)
+    if not getattr(source, "supports_calibration", False) or not callable(command):
+        return {"ok": False, "reason": "control_not_supported",
+                "source": getattr(source, "name", "unknown")}, 409
+    result = command(module)
+    if result.get("ok"):
+        note_steering_calibration(module)
+        return {"ok": True, "queued": True, "module": module,
+                "offline": list(result.get("offline") or [])}, 200
+    reason = result.get("reason", "command_failed")
+    status = 409
+    if reason in {"serial_unavailable", "module_offline"}:
+        status = 503
+    elif reason == "command_queue_full":
+        status = 429
+    elif reason == "invalid_module":
+        status = 400
+    return {"ok": False, "reason": reason}, status
+
+
+def dispatch_drive_command(source, body):
+    """Проверить ограниченную команду тяги (отрицательная величина — назад)."""
+    result, status = _drive_command(source, body)
+    if not result.get("ok"):
+        note_command_rejected("тяга", str(result.get("reason", "")))
+    return result, status
+
+
+def _drive_command(source, body):
+    if not isinstance(body, dict) or set(body) != {"percent"}:
+        return {"ok": False, "reason": "payload"}, 400
+    raw_percent = body.get("percent")
+    if isinstance(raw_percent, bool):
+        return {"ok": False, "reason": "invalid_drive"}, 400
+    try:
+        percent = float(raw_percent)
+    except (TypeError, ValueError):
+        return {"ok": False, "reason": "invalid_drive"}, 400
+    if not math.isfinite(percent):
+        return {"ok": False, "reason": "invalid_drive"}, 400
+    if abs(percent) > MAX_DRIVE_PERCENT:
+        return {"ok": False, "reason": "drive_limit", "limit": MAX_DRIVE_PERCENT}, 400
+    if not getattr(source, "supports_drive", False):
+        return {"ok": False, "reason": "control_not_supported"}, 409
+    command = getattr(source, "drive", None)
+    if not callable(command):
+        return {"ok": False, "reason": "control_not_supported"}, 409
+    result = command(percent)
+    if result.get("ok"):
+        note_drive_command(result.get("percent", round(percent)))
+        return {"ok": True, "queued": True, "percent": result.get("percent", round(percent)),
+                "maxPercent": MAX_DRIVE_PERCENT}, 200
+    reason = result.get("reason", "command_failed")
+    status = 409
+    if reason in {"serial_unavailable", "module_offline"}:
+        status = 503
+    elif reason == "command_queue_full":
+        status = 429
+    elif reason in {"invalid_drive", "drive_limit", "payload"}:
         status = 400
     return {"ok": False, "reason": reason}, status
 
@@ -145,6 +471,14 @@ ASSETS = {
     # страница киоска на борту робота (без авторизации)
     "robot.css": "robot_css",
     "robot.js": "robot_js",
+    "battery.js": "battery_js",
+    "steering.css": "steering_css",
+    "steering.js": "steering_js",
+    "update.css": "update_css",
+    "update.js": "update_js",
+    # панель настроек лидара (кнопка «Лидар» на пульте и на бортовом экране)
+    "lidar_settings.css": "lidar_settings_css",
+    "lidar_settings.js": "lidar_settings_js",
 }
 
 #: Порты, которые проверяем в режиме ``auto``, если список не задан явно.
@@ -168,6 +502,16 @@ def load_backend():
 
 
 def _have(module_name: str) -> bool:
+    """Есть ли модуль в этом интерпретаторе.
+
+    Для ``rclpy`` отдельная ветка: ROS 2 ставится системно в ``/opt/ros``, а
+    приложение работает из ``.venv`` и без подготовки путей системных пакетов не
+    видит (см. :mod:`robot_control.ros_env`). Раньше ``auto`` из-за этого
+    выбирал UART-модули, хотя ROS 2 на роботе стоял.
+    """
+    if module_name == "rclpy":
+        from . import ros_env
+        return ros_env.rclpy_available()
     try:
         __import__(module_name)
     except ImportError:
@@ -189,7 +533,8 @@ def chassis_ports(ports):
     остановлен). Порт из ``RC_LIDAR_PORT`` сравнивается по realpath, потому что
     на роботе это обычно ``/dev/serial/by-id/…`` → ``/dev/ttyUSB1``.
     """
-    reserved = lidar_reserved_ports()
+    from .battery import reserved_ports
+    reserved = lidar_reserved_ports() | reserved_ports()
     if not reserved:
         return list(ports)
     kept, skipped = [], []
@@ -204,7 +549,7 @@ def chassis_ports(ports):
             kept.append(port)
     if skipped:
         log.info(
-            "шасси: порт(ы) %s отданы лидару (RC_LIDAR_PORT) — модули их не открывают",
+            "шасси: порт(ы) %s отданы лидару/BMS (RC_LIDAR_PORT/RC_BMS_PORT) — модули их не открывают",
             ", ".join(skipped),
         )
     return kept
@@ -246,6 +591,9 @@ def chassis_source(mod, ports):
         перебирает такой порт: он всё равно занят, а совет «проверь кабель»
         уводит в сторону.
     """
+    from .battery import reserved_ports
+    bms_ports = reserved_ports()
+    ports = [p for p in ports if p not in bms_ports and os.path.realpath(p) not in bms_ports]
     return mod.SerialSource(
         ports,
         claim=try_lock_port,
@@ -256,10 +604,21 @@ def chassis_source(mod, ports):
     )
 
 
-def make_source(mode: str = "auto", ports=None):
+def peer_kiosk_url() -> str:
+    """Адрес бортового экрана, откуда пульт берёт телеметрию мастера."""
+    explicit = (os.environ.get("RC_SLAM_PEER_URL") or "").strip()
+    if explicit:
+        return explicit
+    port = (os.environ.get("RC_KIOSK_PORT") or "8090").strip() or "8090"
+    return f"http://127.0.0.1:{port}/api/kiosk_state"
+
+
+def make_source(mode: str = "auto", ports=None, master_role: str = "owner"):
     """Источник данных робота.
 
     ``master``: один UART мастер-Arduino (строки "@TLM", см. firmware/motor_master).
+    Порт открывает только владелец (``master_role="owner"`` — бортовой экран);
+    пульт (``"peer"``) читает телеметрию с экрана и порт не трогает.
     ``auto``: ROS 2, если есть rclpy; иначе UART-модули, если есть pyserial и
     живой порт; иначе пустой источник (без выдуманных данных).
     """
@@ -278,9 +637,17 @@ def make_source(mode: str = "auto", ports=None):
         return chassis_source(mod, chosen)
     if mode == "ros":
         return mod.RosSource()
+    if mode == "master" and master_role == "peer":
+        return mod.MasterPeerSource(peer_kiosk_url())
     if mode == "master":
         # мастер-Arduino на одном UART (RC_SLAM_PORT, по умолчанию /dev/ttyACM0)
-        return mod.MasterSource(os.environ.get("RC_SLAM_PORT", "/dev/ttyACM0").strip())
+        from .battery import reserved_ports
+        port = os.environ.get("RC_SLAM_PORT", "/dev/ttyACM0").strip()
+        if port in reserved_ports() or os.path.realpath(port) in reserved_ports():
+            log.error("Шасси: RC_SLAM_PORT совпадает с RC_BMS_PORT — мастер отключён")
+            return mod.NoSource()
+        # Сообщения прошивки («# FR: Калибровка ЗАВЕРШЕНА!») — в журнал экрана.
+        return mod.MasterSource(port, on_message=note_master_message)
 
     if mode != "auto":
         log.warning("неизвестный RC_SLAM_SOURCE=%r — использую auto", mode)
@@ -299,10 +666,10 @@ def make_source(mode: str = "auto", ports=None):
 
 
 def build_state(mode="auto", ports=None, lock_file=None, pin=None,
-                max_attempts=None, lock_sec=None):
+                max_attempts=None, lock_sec=None, master_role="owner"):
     """Собирает ``App`` из backend.py: источник данных + PIN-хранилище."""
     mod = load_backend()
-    source = make_source(mode, ports)
+    source = make_source(mode, ports, master_role=master_role)
     path = str(lock_file) if lock_file else str(GUI_DIR / "state" / "lock.json")
     directory = os.path.dirname(path)
     if directory:
@@ -354,7 +721,21 @@ def lidar_status_payload(manager, points, demo):
         status["reason"] = "демо-скан источника данных (реального лидара нет): " + status["reason"]
     status["scan"] = points
     status["count"] = len(points) if points else 0
+    # Экранный журнал: смена состояния лидара — настоящее событие робота.
+    note_lidar_status(status)
     return status
+
+
+def kiosk_log_payload(limit=None, *, state=None) -> dict:
+    """Настоящий журнал событий для экрана: записи, счётчики, время работы."""
+    source = None
+    if state is not None:
+        source = getattr(getattr(state, "source", None), "name", None)
+    uptime = None
+    started = getattr(state, "started", None)
+    if isinstance(started, (int, float)):
+        uptime = max(0, int(time.time() - started))
+    return eventlog.payload(limit, uptime_sec=uptime, source=source)
 
 
 def start_lidar(*, testing: bool = False, port: int | None = None, force: bool = False):
@@ -412,7 +793,7 @@ def create_blueprint(state, guard=None) -> Blueprint:
 
     # --------- экран киоска на борту робота: без авторизации -------- #
     # Открывается локально в киоск-браузере на роботе; телеметрия публична,
-    # а адресный поворот рулевых модулей открывается отдельной PIN-сессией.
+    # а руление/тяга открываются отдельной короткой PIN-сессией.
     @bp.get(KIOSK_URL_PATH, endpoint="kiosk")
     def kiosk_screen():
         """Экран, который показывается на дисплее самого робота."""
@@ -443,11 +824,32 @@ def create_blueprint(state, guard=None) -> Blueprint:
             "ts": snap.get("ts"),
             "source": snap.get("source"),
             "steeringControl": steering_control_info(state.source),
+            "drive": snap.get("drive"),
+            "masterMessages": snap.get("masterMessages") or [],
         }
         return jsonify({"ok": True, "data": public})
 
-    # PIN-оверлей киоска: телеметрия публична, команды рулевым моторам — только
-    # после отдельной проверки PIN и с короткоживущей серверной сессией.
+    @bp.get("/api/battery")
+    def api_battery():
+        from .battery import kiosk_snapshot
+        snap = kiosk_snapshot()
+        # Порт BMS держит бортовой экран: настраивать подключение можно только там.
+        snap["setupAvailable"] = False
+        return jsonify({"ok": True, "battery": snap}), 200, {"Cache-Control": "no-store"}
+
+    @bp.get("/api/battery/setup")
+    def api_battery_setup():
+        return jsonify({"ok": True, "available": False, "ports": [],
+                        "reason": "Подключение BMS настраивается на бортовом экране (порт 8090): "
+                                  "страница «АКБ» → «Подключение BMS»."}), 200, {"Cache-Control": "no-store"}
+
+    @bp.get("/api/battery/report.csv")
+    def api_battery_report():
+        from .battery import kiosk_snapshot, report_response
+        return report_response(kiosk_snapshot())
+
+    # PIN-оверлей киоска: телеметрия публична, команды руления и тяги доступны
+    # только после проверки PIN и в короткоживущей серверной сессии.
     @bp.get("/api/kiosk_lock")
     def api_kiosk_lock():
         return jsonify({"ok": True, "lock": state.vault.state(state.lock_open),
@@ -457,6 +859,7 @@ def create_blueprint(state, guard=None) -> Blueprint:
     def api_kiosk_lock_verify():
         body = request.get_json(silent=True) or {}
         result = state.vault.verify(str(body.get("pin", "")))
+        note_pin_result(result, where="бортовой экран")
         if result.get("ok"):
             grant_steering_access()
         else:
@@ -467,6 +870,8 @@ def create_blueprint(state, guard=None) -> Blueprint:
 
     @bp.post("/api/kiosk_lock/session/end")
     def api_kiosk_steering_logout():
+        if steering_access_valid():
+            eventlog.record("info", "PIN-сессия руления закрыта оператором", source="руление")
         revoke_steering_access()
         return jsonify({"ok": True, "steeringAuthorized": False})
 
@@ -485,8 +890,39 @@ def create_blueprint(state, guard=None) -> Blueprint:
         if request.headers.get(STEERING_COMMAND_HEADER) != STEERING_COMMAND_HEADER_VALUE:
             return jsonify({"ok": False, "reason": "request_header_required"}), 400
         if not steering_access_valid():
+            note_pin_required("руление")
             return jsonify({"ok": False, "reason": "pin_required"}), 401
         result, status = dispatch_steering_command(state.source, request.get_json(silent=True))
+        return jsonify(result), status
+
+    @bp.post("/api/kiosk_zero")
+    def api_kiosk_zero():
+        if request.headers.get(STEERING_COMMAND_HEADER) != STEERING_COMMAND_HEADER_VALUE:
+            return jsonify({"ok": False, "reason": "request_header_required"}), 400
+        if not steering_access_valid():
+            note_pin_required("программный ноль")
+            return jsonify({"ok": False, "reason": "pin_required"}), 401
+        result, status = dispatch_steering_zero(state.source, request.get_json(silent=True))
+        return jsonify(result), status
+
+    @bp.post("/api/kiosk_calibrate")
+    def api_kiosk_calibrate():
+        if request.headers.get(STEERING_COMMAND_HEADER) != STEERING_COMMAND_HEADER_VALUE:
+            return jsonify({"ok": False, "reason": "request_header_required"}), 400
+        if not steering_access_valid():
+            note_pin_required("калибровка руля")
+            return jsonify({"ok": False, "reason": "pin_required"}), 401
+        result, status = dispatch_steering_calibration(state.source, request.get_json(silent=True))
+        return jsonify(result), status
+
+    @bp.post("/api/kiosk_drive")
+    def api_kiosk_drive():
+        if request.headers.get(STEERING_COMMAND_HEADER) != DRIVE_COMMAND_HEADER_VALUE:
+            return jsonify({"ok": False, "reason": "request_header_required"}), 400
+        if not steering_access_valid():
+            note_pin_required("тяга")
+            return jsonify({"ok": False, "reason": "pin_required"}), 401
+        result, status = dispatch_drive_command(state.source, request.get_json(silent=True))
         return jsonify(result), status
 
     # -------------------------------- API -------------------------------- #
@@ -503,6 +939,16 @@ def create_blueprint(state, guard=None) -> Blueprint:
         snap["lidarStatus"] = lidar_status_payload(manager, points, demo)
         snap["cameras"] = CameraManager.get_instance().list_cameras()
         return jsonify({"ok": True, "data": snap})
+
+    @bp.post("/api/drive")
+    @guard
+    def api_drive():
+        if request.headers.get(STEERING_COMMAND_HEADER) != DRIVE_COMMAND_HEADER_VALUE:
+            return jsonify({"ok": False, "reason": "request_header_required"}), 400
+        if not steering_access_valid():
+            return jsonify({"ok": False, "reason": "pin_required"}), 401
+        result, status = dispatch_drive_command(state.source, request.get_json(silent=True))
+        return jsonify(result), status
 
     # ----------------------------- ЛИДАР --------------------------------- #
     @bp.get("/api/lidar")
@@ -595,6 +1041,19 @@ def create_blueprint(state, guard=None) -> Blueprint:
             mgr.feed_frame(cam_id, data)
             return jsonify({"ok": True})
         return jsonify({"ok": False, "error": "empty data"}), 400
+
+    @bp.get("/api/kiosk_logs")
+    @guard
+    def api_kiosk_logs():
+        """Настоящий журнал событий робота — то, что показывает панель «Логи».
+
+        Тот же журнал, что и на бортовом экране (8090): записи логирования
+        ``robot_control.*`` и явные события маршрутов. На пульте он закрыт
+        входом оператора — в отличие от киоска, где панель публична, как и
+        вся телеметрия борта.
+        """
+        limit = eventlog.clamp_limit(request.args.get("limit"))
+        return jsonify({"ok": True, "data": kiosk_log_payload(limit, state=state)})
 
     @bp.get("/api/audit")
     @guard

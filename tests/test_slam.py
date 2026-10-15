@@ -94,6 +94,38 @@ def test_kiosk_steering_endpoint_uses_pin_session_without_operator_login(app, cl
     assert response.get_json()["module"] == "RL"
 
 
+def test_operator_drive_requires_login_pin_and_drive_header(app, client, operator):
+    class FakeDriveSource:
+        name = "master"
+        supports_drive = True
+
+        def __init__(self):
+            self.commands = []
+
+        def drive(self, percent):
+            self.commands.append(percent)
+            return {"ok": True, "percent": percent}
+
+    source = FakeDriveSource()
+    app.extensions["rc_slam"].source = source
+    body = {"percent": 8}
+    header = {"X-Robot-Control": "drive"}
+
+    assert client.post("/api/drive", json=body, headers=header).status_code == 302
+    login(client)
+    assert client.post("/api/drive", json=body, headers=header).status_code == 401
+    assert client.post("/api/kiosk_lock/verify", json={"pin": DEFAULT_PIN}).status_code == 200
+    assert client.post("/api/drive", json=body).status_code == 400
+
+    response = client.post("/api/drive", json=body, headers=header)
+    assert response.status_code == 200
+    assert response.get_json()["percent"] == 8
+    assert source.commands == [8.0]
+
+    client.post("/api/kiosk_lock/session/end", json={})
+    assert client.post("/api/drive", json={"percent": 0}, headers=header).status_code == 401
+
+
 def test_api_health_reports_source(client, operator):
     login(client)
     body = client.get("/api/health").get_json()
@@ -147,6 +179,29 @@ def test_audit_records_attempts(client, operator):
     assert body["ok"] is True
     assert body["audit"], "журнал пуст"
     assert body["integrity"]["ok"] is True  # хеш-цепочка не повреждена
+
+
+def test_kiosk_logs_are_real_and_need_login(client, operator):
+    """Журнал событий для панели «Логи»: настоящие записи и только после входа.
+
+    На борту (8090) панель публична вместе с телеметрией, а на пульте журнал
+    процесса закрыт входом оператора — как и остальные служебные данные.
+    """
+    assert client.get("/api/kiosk_logs").status_code in (302, 401)
+
+    login(client)
+    body = client.get("/api/kiosk_logs?limit=20").get_json()
+    assert body["ok"] is True
+    data = body["data"]
+    assert data["demo"] is False           # выдуманных строк в журнале нет
+
+    # Настоящее событие робота: неверный PIN отсечён — в журнале это видно.
+    client.post("/api/lock/open", json={"pin": "0000"})
+    client.post("/api/kiosk_lock/verify", json={"pin": "0000"})
+    entries = client.get("/api/kiosk_logs?limit=50").get_json()["data"]["entries"]
+    text = "\n".join(entry["msg"] for entry in entries)
+    assert "PIN" in text and "неверный PIN" in text
+    assert "0000" not in text
 
 
 # -------------------------------- статика -------------------------------- #
@@ -365,6 +420,8 @@ def test_master_source_queues_only_safe_module_angle_commands():
     src = object.__new__(backend.MasterSource)
     src.lock = threading.Lock()
     src.frames = {}
+    src.drive_percent = 0
+    src.drive_last_command = 0.0
     src.commands = queue.Queue(maxsize=4)
     src.serial_ready = threading.Event()
     src.serial_ready.set()
@@ -381,6 +438,142 @@ def test_master_source_queues_only_safe_module_angle_commands():
     src.feed("@TLM mod=RR deg=0 tgt=0 moving=1 cal=1 cycle=0 calib=0", now=100.0)
     assert src.steer_module("RR", 10, now=100.2)["reason"] == "module_busy"
     assert src.steer_module("FR", 10, now=101.2)["reason"] == "module_offline"
+
+
+def test_master_telemetry_parses_bldc_rpm_and_drive_percent():
+    backend = _load_backend()
+    frame = backend.parse_master_line(
+        "@TLM mod=FL deg=0.00 tgt=0.00 moving=0 cal=1 cycle=0 calib=0 opto=0 rpm=245.5 drive=-12 t=42")
+    assert frame["rpm"] == 245.5
+    assert frame["drivePercent"] == -12
+    assert backend.parse_master_line(
+        "@TLM mod=FL deg=0 tgt=0 moving=0 cal=1 rpm=20 drive=21") is None
+
+
+def test_master_source_drive_requires_aligned_zeroed_modules_and_prioritizes_stop():
+    import queue
+    import threading
+
+    backend = _load_backend()
+    src = object.__new__(backend.MasterSource)
+    src.lock = threading.Lock()
+    src.frames = {}
+    src.drive_percent = 0
+    src.drive_last_command = 0.0
+    src.commands = queue.Queue(maxsize=2)
+    src.serial_ready = threading.Event()
+    src.serial_ready.set()
+
+    for module in ("FL", "FR", "RL", "RR"):
+        src.feed("@TLM mod=%s deg=0.0 tgt=0.0 moving=0 cal=1 rpm=0.0 drive=0" % module, now=100.0)
+    status = src.drive_status(now=100.2)
+    assert status["canDrive"] is True
+    assert status["reason"] is None
+
+    # Тяга — «t N»: «d» в прошивке осталась поворотом на угол (как в проверенном скетче).
+    assert src.drive(12, now=100.2)["ok"] is True
+    assert src.commands.get_nowait() == b"t 12\n"
+    assert src.drive(-8, now=100.3)["ok"] is True
+    assert src.commands.get_nowait() == b"t -8\n"
+    assert src.steer_module("FL", 5, now=100.3)["reason"] == "module_busy"
+
+    # Очередь заполнена поворотами — STOP вытесняет их, а не пропадает.
+    src.commands.put_nowait(b"w FL 5\n")
+    src.commands.put_nowait(b"w FR 5\n")
+    assert src.stop_drive(now=100.4)["ok"] is True
+    assert src.commands.get_nowait() == b"b\n"
+    assert src.commands.empty()
+
+    src.feed("@TLM mod=RR deg=4.0 tgt=4.0 moving=0 cal=1 rpm=0 drive=0", now=100.5)
+    assert src.drive_status(now=100.6)["reason"] == "steering_misaligned"
+
+
+def test_master_line_v2_reports_zero_source_calibration_error_and_firmware():
+    """Прошивка v2: откуда ноль (датчик/вручную), код ошибки калибровки, версия."""
+    backend = _load_backend()
+    frame = backend.parse_master_line(
+        "@TLM mod=RR deg=0.00 tgt=0.00 moving=0 cal=1 cycle=0 calib=0 opto=1 home=opto "
+        "err=0 rpm=0.0 drive=0 fw=2 t=5000")
+    assert frame["cal"] is True and frame["home"] == "opto" and frame["manualZero"] is False
+    assert frame["opto"] is True and frame["firmware"] == 2 and frame["calibError"] == 0
+    failed = backend.parse_master_line(
+        "@TLM mod=FR deg=-75.00 tgt=-75.00 moving=0 cal=0 cycle=0 calib=0 opto=0 home=none "
+        "err=1 rpm=0.0 drive=0 fw=2 t=9000")
+    assert failed["cal"] is False and failed["home"] == "none" and failed["calibError"] == 1
+    manual = backend.parse_master_line("@TLM mod=FL deg=0 tgt=0 moving=0 cal=1 home=manual fw=2")
+    assert manual["manualZero"] is True and manual["home"] == "manual"
+    # Старая строка без home= — ноль мог быть только ручным.
+    legacy = backend.parse_master_line("@TLM mod=FL deg=0 tgt=0 moving=0 cal=1")
+    assert legacy["home"] == "manual" and legacy["firmware"] is None
+    assert backend.parse_master_line("@TLM mod=FL deg=0 home=elsewhere") is None
+    assert backend.parse_master_line("@TLM mod=FL deg=0 err=99") is None
+
+
+def _bare_master_source(backend, maxsize=4):
+    import queue
+    import threading
+
+    src = object.__new__(backend.MasterSource)
+    src.lock = threading.Lock()
+    src.frames = {}
+    src.drive_percent = 0
+    src.drive_last_command = 0.0
+    src.commands = queue.Queue(maxsize=maxsize)
+    src.serial_ready = threading.Event()
+    src.serial_ready.set()
+    src.messages = []
+    src.on_message = None
+    return src
+
+
+def test_master_source_calibration_command_is_guarded():
+    """Калибровка по датчику: один модуль «w FR calib», все — «k»; не при тяге и не на ходу."""
+    backend = _load_backend()
+    src = _bare_master_source(backend)
+    line = "@TLM mod=%s deg=0 tgt=0 moving=0 cal=0 cycle=0 calib=0 opto=0 home=none err=0 rpm=0 drive=0 fw=2"
+    src.feed(line % "FR", now=100.0)
+    assert src.calibrate_module("fr", now=100.2) == {"ok": True, "queued": True, "module": "FR",
+                                                     "offline": []}
+    assert src.commands.get_nowait() == b"w FR calib\n"
+    assert src.calibrate_module("FL", now=100.2)["reason"] == "module_offline"
+    assert src.calibrate_module("XX", now=100.2)["reason"] == "invalid_module"
+    result = src.calibrate_module("all", now=100.2)
+    assert result["ok"] is True and result["offline"] == ["FL", "RL", "RR"]
+    assert src.commands.get_nowait() == b"k\n"
+    src.feed(line.replace("calib=0", "calib=1") % "FR", now=100.3)
+    assert src.calibrate_module("FR", now=100.4)["reason"] == "module_busy"
+    src.feed(line % "FR", now=100.5)
+    src.drive_percent = 8
+    assert src.calibrate_module("FR", now=100.6)["reason"] == "module_busy"
+    src.drive_percent = 0
+    src.serial_ready.clear()
+    assert src.calibrate_module("FR", now=100.6)["reason"] == "serial_unavailable"
+
+
+def test_master_source_keeps_firmware_messages_for_the_journal():
+    backend = _load_backend()
+    src = _bare_master_source(backend)
+    seen = []
+    src.on_message = seen.append
+    assert src.feed("# FR: Калибровка ЗАВЕРШЕНА! Точка 0 установлена по датчику.\r\n", now=5.0) is False
+    assert src.feed("просто текст", now=5.1) is False
+    assert seen == ["FR: Калибровка ЗАВЕРШЕНА! Точка 0 установлена по датчику."]
+    assert src.recent_messages() == [{"ts": 5.0, "text": seen[0]}]
+    for index in range(60):
+        src.feed("# FL: строка %d" % index, now=6.0 + index)
+    assert len(src.messages) == backend.MasterSource.MESSAGE_LIMIT
+    assert src.recent_messages(2)[-1]["text"] == "FL: строка 59"
+
+
+def test_steering_control_info_reports_opto_calibration_for_master():
+    from robot_control.slam import steering_control_info
+
+    backend = _load_backend()
+    info = steering_control_info(_bare_master_source(backend))
+    assert info["optoUsed"] is True and info["calibration"] is True and info["zeroMode"] == "opto"
+    assert info["manualZero"] is True
+    peer = steering_control_info(backend.MasterPeerSource.__new__(backend.MasterPeerSource))
+    assert peer["available"] is False and peer["calibration"] is False
 
 
 def test_master_source_reports_each_module_and_empty_for_silent_ones():
