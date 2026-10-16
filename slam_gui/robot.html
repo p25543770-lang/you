@@ -49,9 +49,28 @@
         <p id="lidar-block-reason" class="lidar-block-reason">Получаем статус датчика…</p>
         <p id="lidar-block-details" class="lidar-block-details" hidden></p>
         <p id="lidar-block-hint" class="lidar-block-hint" hidden></p>
+        <section id="lidar-ports" class="lidar-ports" aria-label="Порты на роботе">
+          <div class="lidar-ports-head">
+            <h2>Порты на роботе</h2>
+            <button type="button" id="lidar-find-btn" class="lidar-find-btn">Найти лидар</button>
+          </div>
+          <p id="lidar-find-status" class="lidar-find-status" hidden></p>
+          <ul id="lidar-ports-list" class="lidar-ports-list"></ul>
+          <p id="lidar-ports-empty" class="lidar-ports-empty" hidden></p>
+          <p id="lidar-ports-usb" class="lidar-ports-usb" hidden></p>
+          <p id="lidar-place-note" class="lidar-place-note" hidden></p>
+          <p class="lidar-ports-note">Где лидар стоит в роботе, программа знать не может: она видит только USB-порт. По пути <code>by-path</code> виден разъём или хаб; соответствие «разъём → место на роботе» пишет человек (<code>RC_LIDAR_PLACE_NOTE</code> в <code>.env</code>).</p>
+        </section>
+        <div class="lidar-block-actions">
+          <button type="button" id="lidar-continue-btn" class="lidar-continue-btn">Продолжить без лидара</button>
+          <span class="lidar-continue-note">Телеметрия откроется, но скана лидара не будет; предупреждение останется вверху экрана.</span>
+        </div>
         <small>Статистика и телеметрия скрыты до получения свежего реального скана. Экран проверяет подключение автоматически.</small>
       </div>
     </section>
+    <button type="button" id="lidar-warn-bar" class="lidar-warn-bar" hidden>
+      <b>ЛИДАР НЕ ГОТОВ</b> <span id="lidar-warn-text">скана нет</span> <u>открыть диагностику</u>
+    </button>
 
     <div class="cols">
       <!-- Левая колонка: АКБ + шасси -->

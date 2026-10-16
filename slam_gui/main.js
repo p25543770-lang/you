@@ -533,7 +533,33 @@
     const usb = st.usb_diagnostics;
     const ports = usb && Array.isArray(usb.ports) ? usb.ports.map(portNote).join(', ') : '';
     const diagnosis = usb ? [usb.summary, ports].filter(Boolean).join(': ') : '';
-    return [reason, hint, diagnosis].filter(Boolean).join(' — ');
+    // Где физически искать лидар: роль каждого порта и его by-path (разъём/хаб)
+    // из lidarStatus.ports — то же, что показывает бортовой экран.
+    const overview = st.ports && typeof st.ports === 'object' && !Array.isArray(st.ports) ? st.ports : null;
+    const where = overview ? portsWhere(overview) : '';
+    return [reason, hint, diagnosis, where].filter(Boolean).join(' — ');
+  }
+
+  function portsWhere(overview) {
+    const rows = Array.isArray(overview.ports) ? overview.ports : [];
+    const find = overview.find && typeof overview.find === 'object' ? overview.find : null;
+    const highlight = find && find.highlight ? String(find.highlight) : '';
+    const parts = rows.map((p) => {
+      const bits = [String(p.role_label || p.role || '')];
+      if (p.excluded_by) bits.push(p.excluded_by);
+      if (Array.isArray(p.by_path) && p.by_path.length) bits.push('by-path ' + String(p.by_path[0]).split('/').pop());
+      const mark = highlight && String(p.device) === highlight ? ' ← менялся при переподключении' : '';
+      return String(p.device || p.port) + ' [' + bits.filter(Boolean).join(', ') + ']' + mark;
+    });
+    if (!parts.length) {
+      const devices = Array.isArray(overview.usb_devices) ? overview.usb_devices : [];
+      return 'serial-портов нет — проверь кабель, питание, USB-переходник, lsusb' +
+        (devices.length ? ' (по USB ядро видит: ' + devices.map((d) => [d.id, d.product].filter(Boolean).join(' ')).join('; ') + ')' : ' (USB-устройств ядро не видит)');
+    }
+    let text = 'порты на роботе: ' + parts.join('; ');
+    if (find && find.active) text += ' · режим «найти лидар» включён: переподключи кабель лидара';
+    if (overview.place_note) text += ' · подсказка: ' + String(overview.place_note);
+    return text;
   }
 
   // Порт может быть одновременно недоступен (нет группы dialout) и исключён

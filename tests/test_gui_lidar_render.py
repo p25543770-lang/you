@@ -168,7 +168,49 @@ def empty_payload() -> dict:
 # ---------------------------------------------------------------------------
 
 
-def render(screen: str, payload: dict, tmp_path: Path, *, demo: bool = False) -> dict:
+def ports_overview_payload() -> dict:
+    """Блок ``lidarStatus.ports`` из robot_control/lidar.py: ports_overview()."""
+    return {
+        "ports": [
+            {"port": "/dev/serial/by-id/usb-Silicon_Labs_CP2102-if00-port0", "device": "/dev/ttyUSB1",
+             "by_id": ["/dev/serial/by-id/usb-Silicon_Labs_CP2102-if00-port0"],
+             "by_path": ["/dev/serial/by-path/platform-fd500000.pcie-pci-0000:01:00.0-usb-0:1.3:1.0-port0"],
+             "accessible": True, "excluded": False, "excluded_by": None, "chassis_module": False,
+             "candidate": True, "note": "нет данных", "role": "no_response",
+             "role_label": "не отвечает на протокол лидара", "why": "порт открылся, но лидар не ответил ни по одному протоколу"},
+            {"port": "/dev/ttyUSB0", "device": "/dev/ttyUSB0", "by_id": [],
+             "by_path": ["/dev/serial/by-path/platform-fd500000.pcie-pci-0000:01:00.0-usb-0:1.1:1.0-port0"],
+             "accessible": True, "excluded": True, "excluded_by": "RC_SLAM_MASTER_PORT",
+             "chassis_module": False, "candidate": False, "note": "", "role": "master",
+             "role_label": "мастер руля", "why": "исключён настройкой RC_SLAM_MASTER_PORT — лидар этот порт не открывает"},
+            {"port": "/dev/ttyACM0", "device": "/dev/ttyACM0", "by_id": [], "by_path": [],
+             "accessible": True, "excluded": False, "excluded_by": None, "chassis_module": True,
+             "candidate": False, "note": "модуль шасси", "role": "chassis_module",
+             "role_label": "модуль шасси", "why": "источник данных шасси подтвердил здесь телеметрию модулей — лидар этот порт не перебирает"},
+            {"port": "/dev/ttyUSB2", "device": "/dev/ttyUSB2", "by_id": [], "by_path": [],
+             "accessible": True, "excluded": False, "excluded_by": None, "chassis_module": False,
+             "candidate": True, "note": "занят", "role": "busy",
+             "role_label": "занят другим процессом", "why": "порт открыт другой программой"},
+        ],
+        "usb_devices": [],
+        "find": {"active": False, "started_at": None, "elapsed_s": None, "expires_in_s": 0.0,
+                 "stopped_reason": "", "baseline": [], "events": [], "highlight": None,
+                 "highlight_kind": None},
+        "place_note": "",
+    }
+
+
+def ports_payload(**overview_overrides) -> dict:
+    """Скана нет, но сервер прислал блок «Порты на роботе»."""
+    payload = empty_payload()
+    overview = ports_overview_payload()
+    overview.update(overview_overrides)
+    payload["data"]["lidarStatus"]["ports"] = overview
+    return payload
+
+
+def render(screen: str, payload: dict, tmp_path: Path, *, demo: bool = False,
+           click_find: bool = False, click_continue: bool = False) -> dict:
     """Прогоняет ``slam_gui/<screen>.js`` на заготовленном ответе API.
 
     ``demo=True`` — тот же экран с явно включённым демо-режимом (``?demo=1``):
@@ -180,6 +222,10 @@ def render(screen: str, payload: dict, tmp_path: Path, *, demo: bool = False) ->
     env = dict(os.environ)
     if demo:
         env["HARNESS_DEMO"] = "1"
+    if click_find:
+        env["HARNESS_CLICK_FIND"] = "1"
+    if click_continue:
+        env["HARNESS_CLICK_CONTINUE"] = "1"
     result = subprocess.run(
         [NODE, str(HARNESS), screen, str(payload_file)],
         cwd=str(ROOT), capture_output=True, text=True, timeout=120, env=env,
@@ -471,3 +517,144 @@ def test_screen_survives_payload_without_lidar(tmp_path):
     assert report["emptyHidden"] is False
     assert report["meta"] == "нет скана"
     assert report["_stderr"] == ""
+
+
+# ---------------------------------------------------------------------------
+# Блок «Порты на роботе»: где физически искать лидар
+# ---------------------------------------------------------------------------
+
+
+def test_kiosk_lists_ports_with_roles_and_physical_paths(tmp_path):
+    """Каждый порт — с ролью, причиной исключения и путём by-path (разъём/хаб)."""
+    report = render("robot", ports_payload(), tmp_path)
+    assert report["lidarBlocked"] is True
+    rows = {row["text"].split(" ")[0]: row for row in report["lidarPorts"]}
+    assert set(rows) == {"/dev/ttyUSB1", "/dev/ttyUSB0", "/dev/ttyACM0", "/dev/ttyUSB2"}
+    assert "не отвечает на протокол лидара" in rows["/dev/ttyUSB1"]["text"]
+    assert "usb-0:1.3:1.0-port0" in rows["/dev/ttyUSB1"]["text"]          # by-path
+    assert "usb-Silicon_Labs_CP2102" in rows["/dev/ttyUSB1"]["text"]      # by-id
+    assert "мастер руля" in rows["/dev/ttyUSB0"]["text"]
+    assert "RC_SLAM_MASTER_PORT" in rows["/dev/ttyUSB0"]["text"]          # чем исключён
+    assert "модуль шасси" in rows["/dev/ttyACM0"]["text"]
+    assert "by-path: нет" in rows["/dev/ttyACM0"]["text"]                 # нет данных — так и написано
+    assert "занят другим процессом" in rows["/dev/ttyUSB2"]["text"]
+    assert "role-master" in rows["/dev/ttyUSB0"]["className"]
+    assert report["lidarPortsEmpty"] == ""
+    assert "Найти лидар" in report["lidarFindButton"]
+    assert report["renderErrors"] == []
+
+
+def test_kiosk_highlights_the_port_that_changed_in_find_mode(tmp_path):
+    """Режим «найти лидар»: порт, который появился при подключении кабеля, подсвечен."""
+    find = {"active": True, "started_at": 1_800_000_000.0, "elapsed_s": 12.0, "expires_in_s": 168.0,
+            "stopped_reason": "", "baseline": ["/dev/ttyUSB0", "/dev/ttyUSB1"],
+            "events": [{"kind": "disappeared", "device": "/dev/ttyUSB1", "at": 1_800_000_005.0,
+                        "by_id": [], "by_path": ["/dev/serial/by-path/pci-usb-0:1.3:1.0-port0"]},
+                       {"kind": "appeared", "device": "/dev/ttyUSB1", "at": 1_800_000_010.0,
+                        "by_id": [], "by_path": ["/dev/serial/by-path/pci-usb-0:1.3:1.0-port0"]}],
+            "highlight": "/dev/ttyUSB1", "highlight_kind": "appeared"}
+    report = render("robot", ports_payload(find=find), tmp_path)
+    lit = [row for row in report["lidarPorts"] if "is-highlight" in row["className"]]
+    assert [row["text"].split(" ")[0] for row in lit] == ["/dev/ttyUSB1"]
+    assert "появился" in lit[0]["text"]
+    assert "Режим «найти лидар» включён" in report["lidarFindStatus"]
+    assert "переподключ" in report["lidarFindStatus"] or "подключи кабель" in report["lidarFindStatus"]
+    assert "Остановить поиск" in report["lidarFindButton"]
+    assert report["renderErrors"] == []
+
+
+def test_kiosk_shows_disappeared_port_even_when_it_is_gone(tmp_path):
+    """Кабель отключили: порта в списке нет, но он показан как исчезнувший с его by-path."""
+    overview = ports_overview_payload()
+    overview["ports"] = [p for p in overview["ports"] if p["device"] != "/dev/ttyUSB1"]
+    overview["find"] = {"active": True, "started_at": 1.0, "elapsed_s": 3.0, "expires_in_s": 177.0,
+                        "stopped_reason": "", "baseline": [],
+                        "events": [{"kind": "disappeared", "device": "/dev/ttyUSB1", "at": 2.0,
+                                    "by_id": [], "by_path": ["/dev/serial/by-path/pci-usb-0:1.3:1.0-port0"]}],
+                        "highlight": "/dev/ttyUSB1", "highlight_kind": "disappeared"}
+    report = render("robot", ports_payload(**overview), tmp_path)
+    gone = [row for row in report["lidarPorts"] if row["text"].startswith("/dev/ttyUSB1")]
+    assert len(gone) == 1
+    assert "исчез" in gone[0]["text"] and "usb-0:1.3:1.0-port0" in gone[0]["text"]
+    assert "is-highlight" in gone[0]["className"]
+
+
+def test_kiosk_find_button_asks_the_server_to_watch_ports(tmp_path):
+    report = render("robot", ports_payload(), tmp_path, click_find=True)
+    posts = [c for c in report["fetchCalls"] if c["method"] == "POST" and "lidar/find" in c["url"]]
+    assert len(posts) == 1
+    assert json.loads(posts[0]["body"]) == {"action": "start"}
+
+
+def test_kiosk_without_ports_tells_what_to_check(tmp_path):
+    """Портов нет совсем — чек-лист (кабель, питание, переходник, lsusb), без выдумок."""
+    report = render("robot", ports_payload(ports=[], usb_devices=[]), tmp_path)
+    assert report["lidarPorts"] == []
+    text = report["lidarPortsEmpty"]
+    for word in ("кабель", "итание", "переходник", "lsusb"):
+        assert word in text, word
+    assert "не обнаружено" in text
+    assert "ls /dev/tty*: сервер не передал" in text        # нет данных — так и написано
+
+    listed = render("robot", ports_payload(
+        ports=[], usb_devices=[],
+        tty={"count": 71, "usb_like": [], "names": ["tty0", "ttyS0"]},
+        lsusb={"available": True, "lines": ["Bus 001 Device 002: ID 2109:3431 VIA Labs Hub"], "error": None},
+    ), tmp_path)
+    assert "ls /dev/tty*: 71 записей" in listed["lidarPortsEmpty"]
+    assert "устройств не обнаружено" in listed["lidarPortsEmpty"]
+    assert "lsusb: Bus 001 Device 002: ID 2109:3431" in listed["lidarPortsEmpty"]
+    absent = render("robot", ports_payload(ports=[], usb_devices=[],
+                                           lsusb={"available": False, "lines": [], "error": "lsusb не установлен"}), tmp_path)
+    assert "lsusb: lsusb не установлен" in absent["lidarPortsEmpty"]
+
+    seen = render("robot", ports_payload(ports=[], usb_devices=[
+        {"bus_path": "1-1.3", "id": "10c4:ea60", "manufacturer": "Silicon Labs", "product": "CP2102 USB to UART"}]), tmp_path)
+    assert "10c4:ea60" in seen["lidarPortsEmpty"] and "драйвер" in seen["lidarPortsEmpty"]
+
+
+def test_kiosk_says_so_when_server_has_no_ports_block(tmp_path):
+    """Старый сервер без поля ports: экран не рисует демо-список, а пишет, что данных нет."""
+    report = render("robot", empty_payload(), tmp_path)
+    assert report["lidarPorts"] == []
+    assert "не передал список портов" in report["lidarPortsEmpty"]
+    assert report["renderErrors"] == []
+
+
+def test_kiosk_shows_human_place_note_only_when_given(tmp_path):
+    assert render("robot", ports_payload(), tmp_path)["lidarPlaceNote"] == ""
+    report = render("robot", ports_payload(place_note="разъём 1.3 — хаб под крышкой, лидар сверху"), tmp_path)
+    assert "хаб под крышкой" in report["lidarPlaceNote"]
+
+
+def test_console_names_port_roles_and_paths(tmp_path):
+    """Пульт (main.js): роли и by-path тех же портов — в причине под картой."""
+    report = render("main", ports_payload(), tmp_path)
+    text = report["emptyText"]
+    assert "порты на роботе" in text
+    assert "/dev/ttyUSB0 [мастер руля, RC_SLAM_MASTER_PORT" in text
+    assert "by-path platform-fd500000.pcie-pci-0000:01:00.0-usb-0:1.3:1.0-port0" in text
+    assert "модуль шасси" in text and "занят другим процессом" in text
+    assert report["renderErrors"] == []
+
+
+def test_kiosk_continue_button_opens_telemetry_but_keeps_the_warning(tmp_path):
+    """«Продолжить без лидара»: плашка уходит, предупреждение остаётся, скан не выдумывается."""
+    report = render("robot", ports_payload(), tmp_path, click_continue=True)
+    assert report["lidarBlocked"] is True            # до нажатия экран закрыт
+    after, back = report["continueFlow"]
+    assert after["blocked"] is False
+    assert after["warn"] is True
+    assert "порт" in after["warnText"] or "лидар" in after["warnText"]
+    assert after["dots"] == 0 and after["emptyText"] == "скана лидара нет"
+    # Клик по предупреждению возвращает диагностику.
+    assert back["blocked"] is True and back["warn"] is False
+    assert report["renderErrors"] == []
+
+
+def test_kiosk_warning_bar_is_hidden_by_default(tmp_path):
+    report = render("robot", ports_payload(), tmp_path)
+    assert report["continueFlow"] == []
+    working = render("robot", real_payload(), tmp_path, click_continue=True)
+    # С рабочим лидаром ни плашки, ни предупреждения нет — кнопка ничего не меняет.
+    assert all(step["blocked"] is False and step["warn"] is False for step in working["continueFlow"])

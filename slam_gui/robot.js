@@ -320,6 +320,13 @@
 
   // Подробная диагностика берётся только из статуса сервера: экран не угадывает
   // причину отказа. Без свежих реальных точек телеметрия закрывается блокером.
+  // «Продолжить без лидара»: оператор сам закрыл плашку. Телеметрия
+  // открывается, скан лидара при этом не выдумывается (карта пустая, «скана
+  // нет»), а внизу экрана остаётся предупреждение — по нему плашка открывается
+  // снова. Как только лидар заработал, флаг сбрасывается: следующая потеря
+  // скана снова закроет экран.
+  let lidarDismissed = false;
+
   function renderLidarBlocker(d) {
     const blocker = $('lidar-blocker');
     if (!blocker) return;
@@ -327,7 +334,15 @@
     const pts = d ? lidarPoints(d) : [];
     const demo = d ? lidarIsDemo(d) : false;
     const working = live && d.linkOk !== false && st && st.connected === true && pts.length > 0 && !demo;
-    blocker.hidden = !!working;
+    if (working) lidarDismissed = false;
+    const warnBar = $('lidar-warn-bar');
+    if (warnBar) {
+      warnBar.hidden = !!working || !lidarDismissed;
+      if (!working && lidarDismissed) {
+        setText($('lidar-warn-text'), st && st.reason ? String(st.reason) : (live ? 'скана нет' : 'нет связи с сервером'));
+      }
+    }
+    blocker.hidden = !!working || lidarDismissed;
     if (working) return;
 
     const title = $('lidar-block-title');
@@ -373,6 +388,283 @@
     if (hintEl) {
       hintEl.hidden = !hint;
       setText(hintEl, hint);
+    }
+    renderLidarPorts(st);
+  }
+
+  // ---------------------------------------------------------------------
+  // Блок «Порты на роботе»: где физически искать лидар.
+  //
+  // Всё берётся из статуса сервера (lidarStatus.ports): список serial-портов с
+  // ролью каждого (кандидат / мастер руля / модуль шасси / занят / не отвечает),
+  // пути by-id и by-path (по by-path виден разъём или хаб), и режим «найти
+  // лидар» — сервер следит, какой порт появился или исчез при переподключении
+  // кабеля. Экран ничего не угадывает: нет данных — так и пишет.
+  // ---------------------------------------------------------------------
+  let findRequestPending = false;
+  let findLastHighlight = null;
+
+  function shortPath(path) {
+    const text = String(path || '');
+    const idx = text.lastIndexOf('/');
+    return idx >= 0 ? text.slice(idx + 1) : text;
+  }
+
+  function addPath(li, label, paths) {
+    if (!Array.isArray(paths) || !paths.length) return;
+    paths.forEach((path) => {
+      const span = document.createElement('span');
+      span.className = 'lidar-port-path';
+      const b = document.createElement('b');
+      b.textContent = label + ': ';
+      span.appendChild(b);
+      span.appendChild(document.createTextNode(String(path)));
+      li.appendChild(span);
+    });
+  }
+
+  function findEventText(ev) {
+    if (!ev || typeof ev !== 'object') return '';
+    const kind = ev.kind === 'appeared' ? 'появился' : (ev.kind === 'disappeared' ? 'исчез' : String(ev.kind || ''));
+    const where = Array.isArray(ev.by_path) && ev.by_path.length ? ' · ' + shortPath(ev.by_path[0]) : '';
+    return shortPath(ev.device) + ' ' + kind + where;
+  }
+
+  function renderLidarPorts(st) {
+    const box = $('lidar-ports');
+    if (!box) return;
+    const list = $('lidar-ports-list');
+    const emptyEl = $('lidar-ports-empty');
+    const usbEl = $('lidar-ports-usb');
+    const findStatus = $('lidar-find-status');
+    const findBtn = $('lidar-find-btn');
+    const placeEl = $('lidar-place-note');
+    const overview = st && st.ports && typeof st.ports === 'object' && !Array.isArray(st.ports) ? st.ports : null;
+
+    if (!overview) {
+      box.hidden = false;
+      if (list) list.innerHTML = '';
+      if (emptyEl) {
+        emptyEl.hidden = false;
+        setText(emptyEl, st
+          ? 'Сервер не передал список портов (старая версия сервера или статус без поля ports). Проверить вручную: ls -l /dev/ttyUSB* /dev/ttyACM* /dev/serial/by-path/'
+          : 'Список портов недоступен: нет статуса лидара от сервера.');
+      }
+      if (usbEl) usbEl.hidden = true;
+      if (findStatus) findStatus.hidden = true;
+      if (findBtn) findBtn.disabled = true;
+      if (placeEl) placeEl.hidden = true;
+      return;
+    }
+    box.hidden = false;
+    if (findBtn) findBtn.disabled = false;
+
+    const find = overview.find && typeof overview.find === 'object' ? overview.find : null;
+    const highlight = find && find.highlight ? String(find.highlight) : null;
+    const events = find && Array.isArray(find.events) ? find.events : [];
+    const eventByDevice = {};
+    events.forEach((ev) => { if (ev && ev.device) eventByDevice[String(ev.device)] = ev; });
+
+    const ports = Array.isArray(overview.ports) ? overview.ports : [];
+    if (list) {
+      list.innerHTML = '';
+      ports.forEach((port) => {
+        const li = document.createElement('li');
+        const role = String(port.role || 'candidate');
+        li.className = 'lidar-port role-' + role + (highlight && String(port.device) === highlight ? ' is-highlight' : '');
+        const line = document.createElement('div');
+        line.className = 'lidar-port-line';
+        const name = document.createElement('span');
+        name.className = 'lidar-port-name';
+        name.textContent = String(port.device || port.port || 'порт');
+        line.appendChild(name);
+        const roleEl = document.createElement('span');
+        roleEl.className = 'lidar-port-role';
+        roleEl.textContent = String(port.role_label || role);
+        line.appendChild(roleEl);
+        const ev = eventByDevice[String(port.device)];
+        if (ev) {
+          const change = document.createElement('span');
+          change.className = 'lidar-port-change';
+          change.textContent = ev.kind === 'appeared' ? '← только что появился' : '← только что исчез';
+          line.appendChild(change);
+        }
+        li.appendChild(line);
+        const whyParts = [];
+        if (port.why) whyParts.push(String(port.why));
+        if (port.accessible === false && role !== 'no_access' && role !== 'missing') whyParts.push('нет доступа (группа dialout)');
+        if (port.note && role === 'candidate') whyParts.push('последняя попытка: ' + String(port.note));
+        if (whyParts.length) {
+          const why = document.createElement('div');
+          why.className = 'lidar-port-why';
+          why.textContent = whyParts.join(' · ');
+          li.appendChild(why);
+        }
+        addPath(li, 'by-path (разъём/хаб)', port.by_path);
+        addPath(li, 'by-id', port.by_id);
+        if ((!port.by_path || !port.by_path.length) && role !== 'missing') {
+          const none = document.createElement('span');
+          none.className = 'lidar-port-path';
+          none.textContent = 'by-path: нет (система не дала физический USB-путь)';
+          li.appendChild(none);
+        }
+        list.appendChild(li);
+      });
+      // Порт, который исчез при отключении кабеля: в списке его уже нет, но
+      // именно он и есть ответ на вопрос «где лидар» — показываем отдельно.
+      events.slice().reverse().forEach((ev) => {
+        if (!ev || ev.kind !== 'disappeared') return;
+        if (ports.some((port) => String(port.device) === String(ev.device))) return;
+        const li = document.createElement('li');
+        li.className = 'lidar-port role-missing' + (highlight === String(ev.device) ? ' is-highlight' : '');
+        const line = document.createElement('div');
+        line.className = 'lidar-port-line';
+        const name = document.createElement('span');
+        name.className = 'lidar-port-name';
+        name.textContent = String(ev.device);
+        line.appendChild(name);
+        const change = document.createElement('span');
+        change.className = 'lidar-port-change';
+        change.textContent = '← исчез при отключении кабеля';
+        line.appendChild(change);
+        li.appendChild(line);
+        addPath(li, 'by-path (разъём/хаб)', ev.by_path);
+        addPath(li, 'by-id', ev.by_id);
+        list.appendChild(li);
+      });
+    }
+
+    if (emptyEl) {
+      if (!ports.length) {
+        emptyEl.hidden = false;
+        const devices = Array.isArray(overview.usb_devices) ? overview.usb_devices : [];
+        const checks = [
+          'Serial-портов в системе нет (/dev/ttyUSB*, /dev/ttyACM*, /dev/serial/by-*). Что проверить:',
+          '1. Кабель лидара и USB-переходника вставлен до конца с обеих сторон; кабель с передачей данных, не только зарядный.',
+          '2. Питание лидара: мотор крутится? Если нет — питание или разъём питания.',
+          '3. USB-переходник (CP2102/CH340/FTDI): переткнуть в другой разъём, проверить светодиод.',
+          '4. В терминале: lsusb и ls -l /dev/serial/by-path/ — ниже то, что видит ядро по USB.',
+        ];
+        const tty = overview.tty && typeof overview.tty === 'object' ? overview.tty : null;
+        if (tty && Array.isArray(tty.names)) {
+          const usbLike = Array.isArray(tty.usb_like) ? tty.usb_like : [];
+          checks.push('ls /dev/tty*: ' + tty.count + ' записей' + (usbLike.length
+            ? ', из них последовательные порты: ' + usbLike.join(', ')
+            : ', USB/UART-портов (ttyUSB*, ttyACM*, ttyAMA*) среди них нет — устройств не обнаружено'));
+        } else {
+          checks.push('ls /dev/tty*: сервер не передал результат.');
+        }
+        const lsusb = overview.lsusb && typeof overview.lsusb === 'object' ? overview.lsusb : null;
+        if (lsusb && lsusb.available && Array.isArray(lsusb.lines) && lsusb.lines.length) {
+          checks.push('lsusb: ' + lsusb.lines.join(' | '));
+        } else if (lsusb && lsusb.available) {
+          checks.push('lsusb: устройств не обнаружено' + (lsusb.error ? ' (' + lsusb.error + ')' : ''));
+        } else if (lsusb) {
+          checks.push('lsusb: ' + (lsusb.error || 'недоступен'));
+        }
+        if (devices.length) {
+          checks.push('USB-устройства по sysfs (без serial-драйвера): ' + devices.map((dev) => [dev.id, dev.manufacturer, dev.product].filter(Boolean).join(' ')).join('; ') + ' — если среди них переходник лидара, не загружен драйвер tty (dmesg | tail).');
+        } else {
+          checks.push('USB-устройств (кроме хабов) по sysfs не обнаружено: до USB лидар не доходит — кабель, питание или переходник.');
+        }
+        setText(emptyEl, checks.join('\n'));
+      } else {
+        emptyEl.hidden = true;
+      }
+    }
+    if (usbEl) usbEl.hidden = true;
+
+    if (findStatus) {
+      findStatus.hidden = false;
+      if (find && find.active) {
+        const left = Number.isFinite(+find.expires_in_s) ? Math.round(+find.expires_in_s) : null;
+        let text = 'Режим «найти лидар» включён' + (left != null ? ' (ещё ' + left + ' с)' : '') +
+          '. Отключи и снова подключи кабель лидара — порт, который исчезнет и появится, подсветится в списке. ' +
+          'Это единственный способ по программе определить, в каком разъёме лидар.';
+        if (events.length) text += ' Последнее: ' + findEventText(events[events.length - 1]) + '.';
+        else text += ' Изменений портов пока нет.';
+        setText(findStatus, text);
+      } else if (find && events.length) {
+        setText(findStatus, 'Режим «найти лидар» завершён' + (find.stopped_reason ? ' (' + find.stopped_reason + ')' : '') +
+          '. Последнее изменение: ' + findEventText(events[events.length - 1]) + '. Подсвеченный порт — тот, что менялся при переподключении.');
+      } else if (find && find.stopped_reason) {
+        setText(findStatus, 'Режим «найти лидар» завершён (' + find.stopped_reason + '): порты не менялись — кабель, который переподключали, система не заметила.');
+      } else {
+        setText(findStatus, 'Нажми «Найти лидар», затем отключи и подключи кабель лидара: сервер покажет, какой порт при этом исчез и появился.');
+      }
+    }
+    if (findBtn) {
+      const active = !!(find && find.active);
+      findBtn.classList.toggle('is-active', active);
+      findBtn.textContent = active ? 'Остановить поиск' : 'Найти лидар';
+      findBtn.dataset.action = active ? 'stop' : 'start';
+    }
+    if (placeEl) {
+      const note = overview.place_note ? String(overview.place_note) : '';
+      placeEl.hidden = !note;
+      setText(placeEl, note ? 'Подсказка (RC_LIDAR_PLACE_NOTE): ' + note : '');
+    }
+    if (highlight && highlight !== findLastHighlight) {
+      findLastHighlight = highlight;
+      try { if (navigator.vibrate) navigator.vibrate(60); } catch (e) { /* не везде есть */ }
+    }
+  }
+
+  async function toggleLidarFind() {
+    if (findRequestPending) return;
+    const btn = $('lidar-find-btn');
+    const action = btn && btn.dataset && btn.dataset.action === 'stop' ? 'stop' : 'start';
+    findRequestPending = true;
+    if (btn) btn.disabled = true;
+    try {
+      const r = await fetch('api/lidar/find', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action }),
+      });
+      const j = await r.json().catch(() => null);
+      if (!r.ok || !j || !j.ok) throw new Error((j && j.error) || ('http ' + r.status));
+      if (j.find && lastData && lastData.lidarStatus && lastData.lidarStatus.ports) {
+        lastData.lidarStatus.ports.find = j.find;
+      }
+      fetchState();
+    } catch (e) {
+      const statusEl = $('lidar-find-status');
+      if (statusEl) {
+        statusEl.hidden = false;
+        setText(statusEl, 'Режим «найти лидар» не включился: ' + (e && e.message ? e.message : e) + '. Сервер не поддерживает api/lidar/find или недоступен.');
+      }
+    } finally {
+      findRequestPending = false;
+      if (btn) btn.disabled = false;
+    }
+  }
+
+  function initLidarFind() {
+    const btn = $('lidar-find-btn');
+    if (!btn) return;
+    btn.addEventListener('click', (ev) => {
+      if (ev && ev.preventDefault) ev.preventDefault();
+      toggleLidarFind();
+    });
+  }
+
+  function initLidarContinue() {
+    const btn = $('lidar-continue-btn');
+    if (btn) {
+      btn.addEventListener('click', (ev) => {
+        if (ev && ev.preventDefault) ev.preventDefault();
+        lidarDismissed = true;
+        renderLidarBlocker(lastData || {});
+      });
+    }
+    const bar = $('lidar-warn-bar');
+    if (bar) {
+      bar.addEventListener('click', (ev) => {
+        if (ev && ev.preventDefault) ev.preventDefault();
+        lidarDismissed = false;
+        renderLidarBlocker(lastData || {});
+      });
     }
   }
 
@@ -468,6 +760,8 @@
     setInterval(fetchState, POLL_MS);
     loop();
     initKioskControls();
+    initLidarFind();
+    initLidarContinue();
     initSwipePage();
     initSteeringControls();
   }

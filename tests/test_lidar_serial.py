@@ -1428,3 +1428,246 @@ def test_usb_diagnostics_access_and_exclusion(monkeypatch, accessible, excluded,
     assert expected in result["summary"]
     assert result["ports"][0]["accessible"] is accessible
     assert result["ports"][0]["excluded"] is excluded
+
+
+# ---------------------------------------------------------------------------
+# Где физически искать лидар: роли портов, by-path и режим «найти лидар»
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def fake_dev(tmp_path, monkeypatch):
+    """Поддельный /dev: tty-устройства и symlink'и by-id/by-path во временной папке.
+
+    ``glob`` подменяется так, что шаблоны ``/dev/ttyUSB*``, ``/dev/ttyACM*`` и
+    ``/dev/serial/by-*`` смотрят в неё — путь открытия тот же, что на роботе.
+    """
+    dev = tmp_path / "dev"
+    (dev / "serial" / "by-id").mkdir(parents=True)
+    (dev / "serial" / "by-path").mkdir(parents=True)
+
+    def add(name: str, by_id: str = "", by_path: str = "") -> str:
+        target = dev / name
+        target.write_text("")
+        if by_id:
+            (dev / "serial" / "by-id" / by_id).symlink_to(target)
+        if by_path:
+            (dev / "serial" / "by-path" / by_path).symlink_to(target)
+        return str(target)
+
+    real_glob = lidar.glob.glob
+
+    def fake_glob(pattern, **kwargs):
+        if pattern.startswith("/dev/"):
+            pattern = str(dev) + pattern[len("/dev"):]
+        return real_glob(pattern, **kwargs)
+
+    monkeypatch.setattr(lidar.glob, "glob", fake_glob)
+    for name in ("RC_LIDAR_PORT", "RC_SLAM_PORT", "RC_SLAM_MASTER_PORT", "RC_SLAM_PORTS",
+                 "RC_LIDAR_EXCLUDE", "RC_BMS_PORT", "RC_LIDAR_PLACE_NOTE"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(lidar, "chassis_module_ports", lambda: set())
+    add.dev = dev  # type: ignore[attr-defined]
+    return add
+
+
+def test_port_inventory_names_roles_and_physical_paths(fake_dev, monkeypatch):
+    """Каждый порт получает роль по факту и оба постоянных имени (by-id, by-path)."""
+    master = fake_dev("ttyUSB0", by_path="pci-0000:01:00.0-usb-0:1.1:1.0-port0")
+    cand = fake_dev("ttyUSB1", by_id="usb-Silicon_Labs_CP2102-if00-port0",
+                    by_path="pci-0000:01:00.0-usb-0:1.3:1.0-port0")
+    module = fake_dev("ttyACM0")
+    busy = fake_dev("ttyUSB2", by_path="pci-0000:01:00.0-usb-0:1.4:1.0-port0")
+    monkeypatch.setenv("RC_SLAM_MASTER_PORT", master)
+    monkeypatch.setattr(lidar, "chassis_module_ports", lambda: {module})
+
+    rows = {row["device"]: row for row in lidar.port_inventory(
+        tried=[{"port": busy, "ok": False, "note": "занят"},
+               {"port": cand, "ok": False, "note": "нет данных"}],
+        candidates=[cand, busy],
+    )}
+    assert set(rows) == {master, cand, module, busy}
+
+    assert rows[master]["role"] == "master"
+    assert rows[master]["excluded"] is True
+    assert rows[master]["excluded_by"] == "RC_SLAM_MASTER_PORT"
+    assert "RC_SLAM_MASTER_PORT" in rows[master]["why"]
+    assert rows[master]["by_path"] == [str(fake_dev.dev / "serial/by-path/pci-0000:01:00.0-usb-0:1.1:1.0-port0")]
+
+    assert rows[cand]["role"] == "no_response"      # открылся, но лидар не ответил
+    assert rows[cand]["candidate"] is True
+    assert rows[cand]["by_id"] == [str(fake_dev.dev / "serial/by-id/usb-Silicon_Labs_CP2102-if00-port0")]
+    assert rows[cand]["port"] == rows[cand]["by_id"][0]
+
+    assert rows[module]["role"] == "chassis_module"
+    assert rows[module]["chassis_module"] is True
+    assert rows[module]["by_path"] == [] and rows[module]["by_id"] == []
+
+    assert rows[busy]["role"] == "busy"
+    assert "другой программой" in rows[busy]["why"]
+    # Подписи ролей — ровно те, что просят на экране.
+    labels = {rows[p]["role_label"] for p in rows}
+    assert {"мастер руля", "модуль шасси", "занят другим процессом",
+            "не отвечает на протокол лидара"} <= labels
+
+
+def test_port_inventory_untried_port_is_a_candidate(fake_dev):
+    port = fake_dev("ttyUSB5")
+    (row,) = lidar.port_inventory(candidates=[port])
+    assert row["role"] == "candidate"
+    assert row["role_label"] == "кандидат на лидар"
+
+
+def test_port_inventory_marks_chassis_ports_and_bms(fake_dev, monkeypatch):
+    chassis = fake_dev("ttyUSB0")
+    bms = fake_dev("ttyUSB1")
+    monkeypatch.setenv("RC_SLAM_PORTS", chassis)
+    monkeypatch.setenv("RC_BMS_PORT", bms)
+    rows = {row["device"]: row for row in lidar.port_inventory()}
+    assert rows[chassis]["role"] == "chassis" and rows[chassis]["excluded_by"] == "RC_SLAM_PORTS"
+    assert rows[bms]["role"] == "bms" and rows[bms]["excluded_by"] == "RC_BMS_PORT"
+
+
+def test_port_inventory_matches_exclusion_by_symlink(fake_dev, monkeypatch):
+    """RC_SLAM_PORT задан symlink'ом by-id — исключение действует на устройство."""
+    device = fake_dev("ttyUSB0", by_id="usb-FTDI_FT232R-if00-port0")
+    monkeypatch.setenv("RC_SLAM_PORT", str(fake_dev.dev / "serial/by-id/usb-FTDI_FT232R-if00-port0"))
+    (row,) = lidar.port_inventory()
+    assert row["device"] == device
+    assert row["role"] == "master"
+
+
+def test_port_inventory_reports_configured_port_that_is_missing(fake_dev):
+    fake_dev("ttyUSB0")
+    rows = lidar.port_inventory(configured="/dev/ttyACM0")
+    missing = [row for row in rows if row["role"] == "missing"]
+    assert [row["port"] for row in missing] == ["/dev/ttyACM0"]
+    assert "RC_LIDAR_PORT" in missing[0]["why"]
+
+
+def test_port_inventory_connected_lidar_is_marked(fake_dev):
+    port = fake_dev("ttyUSB1")
+    (row,) = lidar.port_inventory(detected={"port": port}, connected=True)
+    assert row["role"] == "lidar"
+
+
+def test_port_watch_sees_cable_unplugged_and_plugged_back(fake_dev, monkeypatch):
+    """Режим «найти лидар»: исчезновение и появление порта — событие с его by-path."""
+    fake_dev("ttyUSB0")
+    lidar_port = fake_dev("ttyUSB1", by_path="pci-0000:01:00.0-usb-0:1.3:1.0-port0")
+    by_path = str(fake_dev.dev / "serial/by-path/pci-0000:01:00.0-usb-0:1.3:1.0-port0")
+    watch = lidar.PortWatch()
+    status = watch.start()
+    assert status["active"] is True
+    assert status["events"] == [] and status["highlight"] is None
+    assert sorted(status["baseline"]) == sorted(lidar.list_serial_devices())
+
+    watch.poll()
+    assert watch.status()["events"] == []        # ничего не менялось — ничего не выдумано
+
+    os.unlink(by_path)
+    os.unlink(lidar_port)
+    watch.poll()
+    status = watch.status()
+    assert [e["kind"] for e in status["events"]] == ["disappeared"]
+    assert status["events"][0]["device"] == lidar_port
+    assert status["events"][0]["by_path"] == [by_path]
+    assert status["highlight"] == lidar_port and status["highlight_kind"] == "disappeared"
+
+    fake_dev("ttyUSB1", by_path="pci-0000:01:00.0-usb-0:1.3:1.0-port0")
+    watch.poll()
+    status = watch.status()
+    assert [e["kind"] for e in status["events"]] == ["disappeared", "appeared"]
+    assert status["highlight_kind"] == "appeared"
+
+    assert watch.stop()["active"] is False
+    os.unlink(lidar_port)
+    watch.poll()
+    assert len(watch.status()["events"]) == 2    # после остановки не следим
+
+
+def test_port_watch_expires(fake_dev, monkeypatch):
+    watch = lidar.PortWatch()
+    watch.start()
+    monkeypatch.setattr(lidar, "PORT_WATCH_TTL_S", 0.0)
+    watch.poll()
+    status = watch.status()
+    assert status["active"] is False
+    assert "время вышло" in status["stopped_reason"]
+
+
+def test_ports_overview_in_manager_status(fake_dev, monkeypatch):
+    """Статус менеджера несёт блок ports: экран берёт его из /api/kiosk_state."""
+    port = fake_dev("ttyUSB1", by_path="pci-usb-0:1.3:1.0-port0")
+    monkeypatch.setenv("RC_LIDAR_PLACE_NOTE", "разъём 1.3 — хаб под крышкой")
+    manager = lidar.LidarManager()
+    try:
+        status = manager.get_status()
+    finally:
+        manager.stop()
+    overview = status["ports"]
+    assert [row["device"] for row in overview["ports"]] == [port]
+    assert overview["find"]["active"] in (False, True)
+    assert overview["place_note"] == "разъём 1.3 — хаб под крышкой"
+    assert isinstance(overview["usb_devices"], list)
+    # Прежние поля никуда не делись: исключение портов мастера/шасси не ослаблено.
+    assert "candidates" in status and "chassis_ports" in status and "configured_port" in status
+
+
+def test_usb_devices_reads_sysfs_without_hubs(tmp_path, monkeypatch):
+    root = tmp_path / "usb"
+    for name, attrs in {
+        "1-1": {"idVendor": "2109", "idProduct": "3431", "bDeviceClass": "09", "product": "USB2.0 Hub"},
+        "1-1.3": {"idVendor": "10c4", "idProduct": "ea60", "bDeviceClass": "00",
+                  "manufacturer": "Silicon Labs", "product": "CP2102 USB to UART Bridge Controller"},
+        "1-1.3:1.0": {"idVendor": "10c4", "idProduct": "ea60"},   # интерфейс, не устройство
+        "usb1": {"idVendor": "1d6b", "idProduct": "0002", "bDeviceClass": "09"},
+    }.items():
+        (root / name).mkdir(parents=True)
+        for attr, value in attrs.items():
+            (root / name / attr).write_text(value + "\n")
+    real_listdir = os.listdir
+    monkeypatch.setattr(lidar.os, "listdir", lambda p: real_listdir(root) if p == "/sys/bus/usb/devices" else real_listdir(p))
+    real_join = os.path.join
+    monkeypatch.setattr(lidar.os.path, "join",
+                        lambda a, *rest: real_join(str(root), *rest) if a == "/sys/bus/usb/devices" else real_join(a, *rest))
+    devices = lidar.usb_devices()
+    assert devices == [{"bus_path": "1-1.3", "id": "10c4:ea60", "manufacturer": "Silicon Labs",
+                        "product": "CP2102 USB to UART Bridge Controller"}]
+
+
+def test_ports_overview_without_ports_reports_real_tty_and_lsusb(fake_dev, monkeypatch):
+    """Портов нет — в блоке реальный результат ls /dev/tty* и lsusb, не выдумка."""
+    monkeypatch.setattr(lidar, "lsusb_output",
+                        lambda: {"available": False, "lines": [], "error": "lsusb не установлен (пакет usbutils)"})
+    overview = lidar.ports_overview(None)
+    assert overview["ports"] == []
+    assert overview["tty"]["usb_like"] == []
+    assert overview["tty"]["count"] == len(overview["tty"]["names"])
+    assert overview["lsusb"]["available"] is False
+    assert "lsusb" in overview["lsusb"]["error"]
+    # С портами листинг tty не нужен — его нет (экран не показывает лишнего).
+    fake_dev("ttyUSB0")
+    assert "tty" not in lidar.ports_overview(None)
+
+
+def test_lsusb_output_is_honest_when_tool_is_missing(monkeypatch):
+    import shutil
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    result = lidar.lsusb_output()
+    assert result == {"available": False, "lines": [], "error": "lsusb не установлен (пакет usbutils)"}
+
+
+def test_ports_block_is_real_only(fake_dev, monkeypatch):
+    """Блок «Порты на роботе» — только реальное состояние, даже при RC_SLAM_SOURCE=sim."""
+    monkeypatch.setenv("RC_SLAM_SOURCE", "sim")
+    monkeypatch.setenv("RC_LIDAR_SOURCE", "serial")
+    port = fake_dev("ttyUSB3", by_path="pci-usb-0:1.2:1.0-port0")
+    overview = lidar.ports_overview(None)
+    assert overview["real_only"] is True
+    assert [row["device"] for row in overview["ports"]] == [port]     # ровно то, что есть в системе
+    blob = json.dumps(overview, ensure_ascii=False).lower()
+    for word in ("demo", "демо", "sim", "симул", "example", "пример"):
+        assert word not in blob, word
+    for row in overview["ports"]:
+        assert row["by_path"] and all(os.path.islink(p) for p in row["by_path"])

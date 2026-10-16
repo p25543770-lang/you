@@ -84,6 +84,12 @@ class El {
   }
   /* Панель логов чистит список через `innerHTML = ''` — в браузере это
    * снимает прежние строки, поэтому и здесь они не должны накапливаться. */
+  /* `el.className = 'a b'` в браузере заменяет classList — здесь так же,
+   * иначе роль и подсветка порта в блоке «Порты на роботе» не читались бы. */
+  get className() { return Array.from(this.classList.set).join(' '); }
+  set className(value) {
+    this.classList.set = new Set(String(value || '').split(/\s+/).filter(Boolean));
+  }
   get innerHTML() { return this._innerHTML; }
   set innerHTML(value) {
     this._innerHTML = value;
@@ -193,8 +199,13 @@ const emptyJournal = {
           levels: { info: 0, ok: 0, warn: 0, err: 0, debug: 0 },
           uptimeSec: 0, source: null, demo: false, journal: 'robot' },
 };
-global.fetch = async (url) => {
+const fetchCalls = [];
+global.fetch = async (url, options) => {
   const text = String(url);
+  fetchCalls.push({ url: text, method: (options && options.method) || 'GET', body: options && options.body ? String(options.body) : null });
+  if (/lidar\/find/.test(text)) {
+    return { ok: true, status: 200, json: async () => ({ ok: true, find: { active: true, events: [], expires_in_s: 180 } }) };
+  }
   if (/camera/.test(text)) {
     return { ok: true, status: 200, json: async () => ({ ok: true, cameras: [] }) };
   }
@@ -264,9 +275,41 @@ const sleep = (ms) => new Promise((resolve) => originalSetTimeout(resolve, ms));
     .map((row) => (row.children || []).map((cell) => cell.textContent))
     .filter((parts) => parts.length)
     .map((parts) => ({ time: parts[0], level: parts[1], msg: parts.slice(2).join(' ') }));
+  /* Блок «Порты на роботе» (бортовой экран): по строке на порт — текст всех
+   * вложенных элементов и классы (роль, подсветка режима «найти лидар»). */
+  function textOf(el) {
+    if (!el) return '';
+    const own = el.textContent ? [String(el.textContent)] : [];
+    return own.concat((el.children || []).map(textOf)).filter(Boolean).join(' ');
+  }
+  const lidarPorts = (byId('lidar-ports-list').children || []).map((li) => ({
+    className: Array.from(li.classList.set).join(' '),
+    text: textOf(li),
+  }));
+  /* «Продолжить без лидара»: клик, кадр отрисовки, затем — состояние плашки
+   * и предупреждения; второй клик по предупреждению возвращает плашку. */
+  const continueFlow = [];
+  if (screen === 'robot' && process.env.HARNESS_CLICK_CONTINUE === '1') {
+    const snap = () => ({ blocked: !byId('lidar-blocker').hidden, warn: !byId('lidar-warn-bar').hidden,
+                          warnText: byId('lidar-warn-text').textContent, emptyText: byId('lidar-empty').textContent,
+                          dots: byId('lidar-canvas').dots.length });
+    byId('lidar-continue-btn').click(); continueFlow.push(snap());
+    byId('lidar-warn-bar').click(); continueFlow.push(snap());
+  }
+  if (screen === 'robot' && process.env.HARNESS_CLICK_FIND === '1') {
+    byId('lidar-find-btn').click();
+    await sleep(10);
+  }
   console.log(JSON.stringify({
     screen,
     navigation,
+    lidarPorts,
+    continueFlow,
+    lidarFindStatus: byId('lidar-find-status').textContent,
+    lidarFindButton: byId('lidar-find-btn').textContent,
+    lidarPortsEmpty: byId('lidar-ports-empty').hidden ? '' : byId('lidar-ports-empty').textContent,
+    lidarPlaceNote: byId('lidar-place-note').hidden ? '' : byId('lidar-place-note').textContent,
+    fetchCalls,
     soc: byId('k-soc').textContent,
     volts: byId('k-volts').textContent,
     batteryState: byId('k-soc-state').textContent,
