@@ -1909,6 +1909,353 @@ def usb_diagnostics() -> dict[str, Any]:
     }
 
 
+# ---------------------------------------------------------------------------
+# Где физически искать лидар: порты робота с ролями, USB-пути, режим «найти»
+# ---------------------------------------------------------------------------
+#
+# Программа не знает, где лидар стоит в роботе. Она видит только USB-порт, а
+# по ``/dev/serial/by-path/…`` — физический USB-путь (разъём/хаб), в который
+# включён переходник. Соответствие «разъём → место на роботе» пишет человек
+# (``RC_LIDAR_PLACE_NOTE`` в ``.env``); ниже — только то, что видно из системы.
+
+#: Каталоги постоянных имён serial-портов: by-id — по серийнику переходника,
+#: by-path — по физическому USB-пути (разъём, хаб).
+SERIAL_LINK_DIRS = ("/dev/serial/by-id", "/dev/serial/by-path")
+#: Сколько секунд живёт режим «найти лидар» без явной остановки.
+PORT_WATCH_TTL_S = 180.0
+#: Сколько последних событий «порт появился/исчез» отдаётся в статусе.
+PORT_WATCH_EVENTS = 12
+
+#: Переменные настроек, из-за которых порт исключён, и роль порта по ним.
+_EXCLUDE_ENV_ROLES = (
+    ("RC_SLAM_MASTER_PORT", "master", "мастер руля"),
+    ("RC_SLAM_PORT", "master", "мастер руля"),
+    ("RC_SLAM_PORTS", "chassis", "модуль шасси"),
+    ("RC_LIDAR_EXCLUDE", "excluded", "исключён настройкой"),
+)
+
+#: Роль порта → подпись для экрана (одно место, чтобы оба экрана писали одинаково).
+PORT_ROLE_LABELS = {
+    "lidar": "лидар (скан идёт)",
+    "candidate": "кандидат на лидар",
+    "master": "мастер руля",
+    "chassis": "модуль шасси",
+    "chassis_module": "модуль шасси",
+    "bms": "BMS (RC_BMS_PORT)",
+    "excluded": "исключён настройкой",
+    "busy": "занят другим процессом",
+    "no_access": "нет доступа",
+    "no_response": "не отвечает",
+    "missing": "нет в системе",
+}
+
+
+def _split_port_list(raw: Optional[str]) -> list[str]:
+    return [chunk.strip() for chunk in (raw or "").replace(";", ",").split(",") if chunk.strip()]
+
+
+def _env_port_entries(name: str) -> list[str]:
+    return _split_port_list(os.environ.get(name))
+
+
+def _safe_realpath(path: str) -> str:
+    try:
+        return os.path.realpath(path) or path
+    except OSError:
+        return path
+
+
+def serial_port_aliases() -> dict[str, dict[str, list[str]]]:
+    """Устройство (``/dev/ttyUSB1``) → его имена в by-id и by-path.
+
+    Имя из by-path — единственное, по чему программа может сказать, в какой
+    USB-разъём или хаб включён переходник; by-id — какой именно переходник.
+    """
+    aliases: dict[str, dict[str, list[str]]] = {}
+    for directory in SERIAL_LINK_DIRS:
+        key = "by_id" if directory.endswith("by-id") else "by_path"
+        for link in sorted(glob.glob(directory + "/*"), key=_natural_key):
+            real = _safe_realpath(link)
+            entry = aliases.setdefault(real, {"by_id": [], "by_path": []})
+            if link not in entry[key]:
+                entry[key].append(link)
+    return aliases
+
+
+def list_serial_devices() -> list[str]:
+    """Все serial-устройства системы (realpath), включая цели symlink'ов."""
+    devices: set[str] = set()
+    for pattern in ("/dev/ttyUSB*", "/dev/ttyACM*", "/dev/serial/by-id/*", "/dev/serial/by-path/*"):
+        for path in glob.glob(pattern):
+            if os.path.exists(path):
+                devices.add(_safe_realpath(path))
+    return sorted(devices, key=_natural_key)
+
+
+def usb_devices() -> list[dict[str, Any]]:
+    """USB-устройства по sysfs — то же, что показал бы ``lsusb`` (без хабов).
+
+    Нужно, когда serial-портов нет совсем: видно, замечен ли переходник лидара
+    ядром вообще (тогда дело в драйвере/правах), или USB-устройства нет (кабель,
+    питание, переходник).
+    """
+    found: list[dict[str, Any]] = []
+    root = "/sys/bus/usb/devices"
+    try:
+        names = sorted(os.listdir(root))
+    except OSError:
+        return found
+    for name in names:
+        if name.startswith("usb") or ":" in name:
+            continue
+        base = os.path.join(root, name)
+
+        def read(attr: str) -> str:
+            try:
+                with open(os.path.join(base, attr), "r", encoding="utf-8", errors="replace") as fh:
+                    return fh.read().strip()
+            except OSError:
+                return ""
+
+        vendor, product = read("idVendor"), read("idProduct")
+        if not vendor or not product:
+            continue
+        if read("bDeviceClass") == "09":  # хаб
+            continue
+        found.append({
+            "bus_path": name,
+            "id": "%s:%s" % (vendor, product),
+            "manufacturer": read("manufacturer"),
+            "product": read("product"),
+        })
+    return found
+
+
+def excluded_by_settings(path: str) -> Optional[dict[str, str]]:
+    """Какой настройкой исключён порт: ``{"env", "role", "label"}`` или None."""
+    real = _safe_realpath(path)
+    for env_name, role, label in _EXCLUDE_ENV_ROLES:
+        for entry in _env_port_entries(env_name):
+            if entry == path or _safe_realpath(entry) == real:
+                return {"env": env_name, "role": role, "label": label}
+    return None
+
+
+def _note_role(note: str) -> Optional[str]:
+    if not note:
+        return None
+    if note == "занят":
+        return "busy"
+    if note == "нет доступа":
+        return "no_access"
+    if note == "модуль шасси":
+        return "chassis_module"
+    if note in ("нет данных", "не открылся", "обрыв"):
+        return "no_response"
+    return None
+
+
+def port_inventory(*, tried: Iterable[dict] = (), candidates: Iterable[str] = (),
+                   detected: Optional[dict] = None, connected: bool = False,
+                   configured: Optional[str] = None) -> list[dict[str, Any]]:
+    """Все serial-порты робота с ролью каждого — для экрана «Лидар не готов».
+
+    Роль — факт, а не догадка: ``master``/``chassis``/``excluded`` — по
+    настройкам (с именем переменной), ``chassis_module`` — порт, подтверждённый
+    телеметрией шасси, ``busy``/``no_access``/``no_response`` — итог последней
+    попытки перебора, ``candidate`` — порт, который перебор ещё проверяет.
+    Порт из ``RC_LIDAR_PORT``, которого нет в системе, показан как ``missing``.
+    """
+    from .battery import reserved_ports
+    aliases = serial_port_aliases()
+    modules_real = {_safe_realpath(p) for p in chassis_module_ports()}
+    bms_real = {_safe_realpath(p) for p in reserved_ports() if p}
+    candidates_real = {_safe_realpath(p) for p in candidates if p}
+    notes_real: dict[str, str] = {}
+    for item in tried:
+        if isinstance(item, dict) and item.get("port"):
+            notes_real[_safe_realpath(str(item["port"]))] = str(item.get("note") or "")
+    detected_real = _safe_realpath(str(detected.get("port"))) if detected and detected.get("port") else ""
+
+    rows: list[dict[str, Any]] = []
+    for device in list_serial_devices():
+        names = aliases.get(device, {"by_id": [], "by_path": []})
+        by_id = list(names["by_id"])
+        by_path = list(names["by_path"])
+        row: dict[str, Any] = {
+            "port": by_id[0] if by_id else device,
+            "device": device,
+            "by_id": by_id,
+            "by_path": by_path,
+            "accessible": os.access(device, os.R_OK | os.W_OK),
+            "excluded": False,
+            "excluded_by": None,
+            "chassis_module": device in modules_real,
+            "candidate": device in candidates_real,
+            "note": notes_real.get(device, ""),
+        }
+        rule = excluded_by_settings(device) or next(
+            (excluded_by_settings(name) for name in by_id + by_path if excluded_by_settings(name)), None)
+        why = ""
+        if connected and detected_real and device == detected_real:
+            role = "lidar"
+        elif rule:
+            role = rule["role"]
+            row["excluded"] = True
+            row["excluded_by"] = rule["env"]
+            why = "исключён настройкой %s — лидар этот порт не открывает" % rule["env"]
+        elif device in bms_real:
+            role = "bms"
+            row["excluded"] = True
+            row["excluded_by"] = "RC_BMS_PORT"
+            why = "порт BMS (RC_BMS_PORT) — лидар этот порт не открывает"
+        elif device in modules_real:
+            role = "chassis_module"
+            why = ("источник данных шасси подтвердил здесь телеметрию модулей — "
+                   "лидар этот порт не перебирает")
+        elif not row["accessible"]:
+            role = "no_access"
+            why = "нет прав чтения/записи — нужна группа dialout"
+        else:
+            role = _note_role(row["note"]) or "candidate"
+            if role == "busy":
+                why = "порт открыт другой программой (источник шасси, второй процесс, rplidar_ros, Serial Monitor)"
+            elif role == "no_response":
+                why = "порт открылся, но лидар не ответил ни по одному протоколу"
+        row["role"] = role
+        row["role_label"] = PORT_ROLE_LABELS.get(role, role)
+        row["why"] = why
+        rows.append(row)
+
+    if configured:
+        present_real = {row["device"] for row in rows}
+        for entry in _split_port_list(configured):
+            if any(ch in entry for ch in "*?["):
+                continue
+            if _safe_realpath(entry) in present_real or os.path.exists(entry):
+                continue
+            rows.append({
+                "port": entry, "device": entry, "by_id": [], "by_path": [],
+                "accessible": False, "excluded": False, "excluded_by": None,
+                "chassis_module": False, "candidate": False, "note": "",
+                "role": "missing", "role_label": PORT_ROLE_LABELS["missing"],
+                "why": "задан в RC_LIDAR_PORT, но такого устройства в системе нет",
+            })
+    return rows
+
+
+def place_note() -> str:
+    """Подсказка человека «разъём → место на роботе» (``RC_LIDAR_PLACE_NOTE``)."""
+    return (os.environ.get("RC_LIDAR_PLACE_NOTE") or "").strip()
+
+
+class PortWatch:
+    """Режим «найти лидар»: следит, какой порт появился или исчез.
+
+    Это единственный способ по программе определить физическое место лидара:
+    кабель выдёргивают/вставляют, а здесь видно, какой порт (и какой by-path)
+    при этом пропал или появился. Ничего не открывает и не отправляет в порты.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self.active = False
+        self.started_at = 0.0
+        self.stopped_reason = ""
+        self._baseline: dict[str, dict[str, list[str]]] = {}
+        self.events: list[dict[str, Any]] = []
+
+    @staticmethod
+    def _snapshot() -> dict[str, dict[str, list[str]]]:
+        aliases = serial_port_aliases()
+        return {
+            device: dict(aliases.get(device, {"by_id": [], "by_path": []}))
+            for device in list_serial_devices()
+        }
+
+    def start(self) -> dict[str, Any]:
+        with self._lock:
+            self._baseline = self._snapshot()
+            self.events = []
+            self.active = True
+            self.started_at = time.time()
+            self.stopped_reason = ""
+        log.info("Лидар: режим «найти лидар» включён — слежу за появлением/исчезновением портов")
+        return self.status()
+
+    def stop(self, reason: str = "остановлен") -> dict[str, Any]:
+        with self._lock:
+            was = self.active
+            self.active = False
+            self.stopped_reason = reason if was else self.stopped_reason
+        return self.status()
+
+    def poll(self) -> None:
+        """Сравнивает набор портов с прошлым и записывает разницу."""
+        with self._lock:
+            if not self.active:
+                return
+            if time.time() - self.started_at > PORT_WATCH_TTL_S:
+                self.active = False
+                self.stopped_reason = "время вышло (%d с)" % int(PORT_WATCH_TTL_S)
+                return
+            current = self._snapshot()
+            now = time.time()
+            for device, names in current.items():
+                if device not in self._baseline:
+                    self.events.append({"kind": "appeared", "device": device, "at": now,
+                                        "by_id": names["by_id"], "by_path": names["by_path"]})
+            for device, names in self._baseline.items():
+                if device not in current:
+                    self.events.append({"kind": "disappeared", "device": device, "at": now,
+                                        "by_id": names["by_id"], "by_path": names["by_path"]})
+            self._baseline = current
+            if len(self.events) > PORT_WATCH_EVENTS:
+                self.events = self.events[-PORT_WATCH_EVENTS:]
+
+    def status(self) -> dict[str, Any]:
+        with self._lock:
+            now = time.time()
+            last = self.events[-1] if self.events else None
+            return {
+                "active": self.active,
+                "started_at": self.started_at or None,
+                "elapsed_s": round(now - self.started_at, 1) if self.started_at else None,
+                "expires_in_s": (max(0.0, round(PORT_WATCH_TTL_S - (now - self.started_at), 1))
+                                 if self.active else 0.0),
+                "stopped_reason": self.stopped_reason,
+                "baseline": sorted(self._baseline),
+                "events": [dict(e) for e in self.events],
+                # Порт, который менялся последним: его экран подсвечивает.
+                "highlight": last["device"] if last else None,
+                "highlight_kind": last["kind"] if last else None,
+            }
+
+
+#: Один режим поиска на процесс: оба экрана видят одни и те же события.
+PORT_WATCH = PortWatch()
+
+
+def ports_overview(manager: Optional["LidarManager"] = None,
+                   *, connected: bool = False) -> dict[str, Any]:
+    """Блок «Порты на роботе» для статуса лидара."""
+    PORT_WATCH.poll()
+    tried = list(getattr(manager, "tried", []) or []) if manager else []
+    rows = port_inventory(
+        tried=tried,
+        candidates=list(getattr(manager, "candidates", []) or []) if manager else [],
+        detected=getattr(manager, "detected", None) if manager else None,
+        connected=connected,
+        configured=getattr(manager, "port", None) if manager else os.environ.get("RC_LIDAR_PORT"),
+    )
+    return {
+        "ports": rows,
+        "usb_devices": usb_devices(),
+        "find": PORT_WATCH.status(),
+        "place_note": place_note(),
+    }
+
+
 def startup_summary() -> list[str]:
     """Строки журнала запуска: с чем лидар собирается читать порт.
 
@@ -2613,6 +2960,9 @@ class LidarManager:
             "python": sys.executable,
             "pyserial": pyserial_version(),
             "usb_diagnostics": usb_diagnostics() if not is_fresh else None,
+            # Порты робота с ролями, by-id/by-path и режим «найти лидар»:
+            # экран показывает, где физически искать лидар (см. ports_overview).
+            "ports": ports_overview(self, connected=is_fresh),
             "reason": reason,
             "hint": self.hint,
             "detected": dict(self.detected) if self.detected else None,

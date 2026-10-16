@@ -72,6 +72,7 @@ from robot_control.slam import (
     dispatch_steering_command,
     dispatch_steering_zero,
     kiosk_log_payload,
+    lidar_find_action,
     lidar_for_screen,
     lidar_status_payload,
     start_lidar,
@@ -785,6 +786,18 @@ def create_kiosk_app(config: Config | None = None) -> Flask:
         except ValueError as exc:
             return jsonify({"ok": False, "error": str(exc)}), 400
         return jsonify(result)
+
+    @app.post("/api/lidar/find")
+    def api_kiosk_lidar_find():
+        """Режим «найти лидар» с бортового экрана (без PIN: порты не открываются)."""
+        payload, status = lidar_find_action(request.get_json(silent=True))
+        return jsonify(payload), status
+
+    @app.get("/api/lidar/find")
+    def api_kiosk_lidar_find_get():
+        from robot_control.lidar import PORT_WATCH
+        PORT_WATCH.poll()
+        return jsonify({"ok": True, "find": PORT_WATCH.status()})
 
     @app.post("/api/lidar/rescan")
     def api_kiosk_lidar_rescan():

@@ -1040,3 +1040,55 @@ def test_state_stays_fresh_while_the_scan_goes(state_dir, manager):
     assert lidar.lidar_active_port() == str(port)
     written = json.loads(lidar.lidar_state_file().read_text("utf-8"))
     assert time.time() - written["at"] < lidar.LIDAR_STATE_TTL_S
+
+
+# ---------------------------------------------------------------------------
+# 6. Режим «найти лидар» и блок «Порты на роботе» в API обоих экранов
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def port_watch_reset():
+    lidar.PORT_WATCH.stop()
+    lidar.PORT_WATCH.events = []
+    yield lidar.PORT_WATCH
+    lidar.PORT_WATCH.stop()
+    lidar.PORT_WATCH.events = []
+
+
+def test_kiosk_state_carries_ports_overview(client, operator, manager, port_watch_reset):
+    """Бортовой экран на 8080 получает порты с ролями и состояние режима «найти лидар»."""
+    status = client.get("/api/kiosk_state").get_json()["data"]["lidarStatus"]
+    overview = status["ports"]
+    assert isinstance(overview["ports"], list)
+    for row in overview["ports"]:
+        assert {"device", "by_id", "by_path", "role", "role_label", "why"} <= set(row)
+    assert overview["find"]["active"] is False
+    assert "place_note" in overview
+
+
+def test_find_mode_is_switched_from_both_screens(client, kiosk_client, operator, manager, port_watch_reset):
+    """POST /api/lidar/find включает слежение на пульте и бортовом экране — без PIN."""
+    body = kiosk_client.post("/api/lidar/find", json={"action": "start"}).get_json()
+    assert body["ok"] is True and body["find"]["active"] is True
+    assert lidar.PORT_WATCH.active is True
+
+    seen = kiosk_client.get("/api/kiosk_state").get_json()["data"]["lidarStatus"]["ports"]["find"]
+    assert seen["active"] is True
+
+    body = client.get("/api/lidar/find").get_json()
+    assert body["find"]["active"] is True
+
+    assert client.post("/api/lidar/find", json={"action": "bogus"}).status_code == 400
+
+    body = client.post("/api/lidar/find", json={"action": "stop"}).get_json()
+    assert body["find"]["active"] is False
+    assert lidar.PORT_WATCH.active is False
+
+
+def test_find_mode_start_is_a_journal_event(kiosk_client, manager, port_watch_reset):
+    from robot_control import eventlog
+
+    kiosk_client.post("/api/lidar/find", json={})
+    messages = [entry["msg"] for entry in eventlog.payload(50)["entries"]]
+    assert any("найти лидар" in msg for msg in messages)

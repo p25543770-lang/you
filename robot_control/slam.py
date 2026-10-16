@@ -36,6 +36,7 @@ from flask import Blueprint, Response, jsonify, request, send_from_directory, se
 from robot_control import eventlog
 from robot_control.camera import CameraManager, feed_denied_reason
 from robot_control.lidar import (
+    PORT_WATCH,
     LidarManager,
     lidar_holds_port,
     lidar_reserved_ports,
@@ -807,6 +808,26 @@ def lidar_for_screen(manager, snap):
     return None, False
 
 
+def lidar_find_action(body) -> tuple[dict, int]:
+    """Режим «найти лидар»: следить, какой порт появится/исчезнет при переподключении кабеля.
+
+    Это единственный способ по программе определить физическое место лидара:
+    программа видит только USB-порт, а по ``/dev/serial/by-path`` — разъём или
+    хаб. Ничего не открывает и в порты не пишет, поэтому доступен с бортового
+    экрана без PIN. ``action``: ``start`` | ``stop``. Общий для пульта (8080) и
+    бортового экрана (8090).
+    """
+    body = body if isinstance(body, dict) else {}
+    action = str(body.get("action") or "start").strip().lower()
+    if action == "start":
+        eventlog.record("info", "лидар: включён режим «найти лидар» — переподключи кабель лидара",
+                        source="лидар")
+        return {"ok": True, "find": PORT_WATCH.start()}, 200
+    if action == "stop":
+        return {"ok": True, "find": PORT_WATCH.stop()}, 200
+    return {"ok": False, "error": "action: start | stop"}, 400
+
+
 def lidar_status_payload(manager, points, demo):
     """Единый статус лидара для ``/api/lidar``, ``/api/state`` и киоска.
 
@@ -1121,6 +1142,16 @@ def create_blueprint(state, guard=None) -> Blueprint:
             )
             return jsonify({"ok": True, "count": count})
         return jsonify({"ok": False, "error": "expected 'points' or 'ranges'"}), 400
+
+    @bp.post("/api/lidar/find")
+    def api_lidar_find():
+        payload, status = lidar_find_action(request.get_json(silent=True))
+        return jsonify(payload), status
+
+    @bp.get("/api/lidar/find")
+    def api_lidar_find_get():
+        PORT_WATCH.poll()
+        return jsonify({"ok": True, "find": PORT_WATCH.status()})
 
     # ---------------------------- КАМЕРЫ --------------------------------- #
     @bp.get("/api/cameras")
