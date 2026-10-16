@@ -318,9 +318,66 @@
     return pts;
   }
 
-  // На основной карте остаётся короткая подпись, а подробная диагностика,
-  // причина отсутствия скана и список USB-портов обновляются в панели настроек.
+  // Подробная диагностика берётся только из статуса сервера: экран не угадывает
+  // причину отказа. Без свежих реальных точек телеметрия закрывается блокером.
+  function renderLidarBlocker(d) {
+    const blocker = $('lidar-blocker');
+    if (!blocker) return;
+    const st = d && d.lidarStatus && typeof d.lidarStatus === 'object' ? d.lidarStatus : null;
+    const pts = d ? lidarPoints(d) : [];
+    const demo = d ? lidarIsDemo(d) : false;
+    const working = live && d.linkOk !== false && st && st.connected === true && pts.length > 0 && !demo;
+    blocker.hidden = !!working;
+    if (working) return;
 
+    const title = $('lidar-block-title');
+    const reasonEl = $('lidar-block-reason');
+    const detailsEl = $('lidar-block-details');
+    const hintEl = $('lidar-block-hint');
+    let reason;
+    if (!live) {
+      reason = 'Нет связи с сервером киоска — получить фактическую диагностику лидара не удалось.';
+    } else if (!st) {
+      reason = 'Сервер не передал статус лидара.';
+    } else if (demo || st.demo) {
+      reason = st.reason || 'Получены только демонстрационные данные; реальный лидар не подтверждён.';
+    } else if (st.reason) {
+      reason = String(st.reason);
+    } else if (st.connected !== true) {
+      reason = 'Сервер сообщает, что лидар не подключён.';
+    } else {
+      reason = 'Статус подключения есть, но свежих точек скана нет.';
+    }
+    setText(title, working ? 'Лидар работает' : (!live ? 'Нет связи с сервером' : 'Лидар не готов'));
+    setText(reasonEl, reason);
+
+    const details = [];
+    if (st) {
+      if (st.last_error) details.push('Ошибка драйвера: ' + String(st.last_error));
+      const usb = st.usb_diagnostics;
+      if (usb && usb.summary) details.push(String(usb.summary));
+      if (usb && Array.isArray(usb.ports)) {
+        usb.ports.forEach((port) => {
+          const flags = [];
+          if (port.accessible === false) flags.push('нет доступа');
+          if (port.excluded) flags.push('исключён настройками');
+          details.push(String(port.port || port.device || 'USB-порт') + (flags.length ? ' — ' + flags.join(', ') : ''));
+        });
+      }
+    }
+    if (detailsEl) {
+      detailsEl.hidden = details.length === 0;
+      setText(detailsEl, details.join(' · '));
+    }
+    const hint = st && st.hint ? String(st.hint) : '';
+    if (hintEl) {
+      hintEl.hidden = !hint;
+      setText(hintEl, hint);
+    }
+  }
+
+  // На основной карте остаётся короткая подпись; при отсутствии лидара
+  // блокер показывает оператору серверную причину и не выдаёт демо за реальный скан.
   function renderLidar(d) {
     const canvas = $('lidar-canvas');
     let pts = lidarPoints(d);
@@ -392,6 +449,7 @@
     step('battery', () => renderBattery(d));
     step('chassis', () => renderChassis(d));
     step('lidar', () => renderLidar(d));
+    step('lidar-blocker', () => renderLidarBlocker(d));
     step('steering', () => renderSteeringControls(d));
   }
 
