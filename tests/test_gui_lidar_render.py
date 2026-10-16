@@ -210,11 +210,20 @@ def ports_payload(**overview_overrides) -> dict:
 
 
 def render(screen: str, payload: dict, tmp_path: Path, *, demo: bool = False,
-           click_find: bool = False, click_continue: bool = False) -> dict:
+           click_find: bool = False, click_continue: bool = False,
+           window: str | None = None, map_area: str | None = None,
+           resize_window: str | None = None, resize_map: str | None = None) -> dict:
     """Прогоняет ``slam_gui/<screen>.js`` на заготовленном ответе API.
 
     ``demo=True`` — тот же экран с явно включённым демо-режимом (``?demo=1``):
     только в нём панель логов имеет право рисовать выдуманные строки.
+
+    ``window``/``map_area`` задают геометрию окна киоска и области карты лидара
+    (``"1430x1300"``, ``"560x1100"``): экран читает размеры из DOM, поэтому
+    проверка раскладки подставляет их так же, как это сделала бы страница.
+    ``resize_window``/``resize_map`` — та же геометрия после «поворота экрана»:
+    harness меняет прямоугольники, шлёт ``resize``/``orientationchange`` и
+    отрисовывает новые кадры (результат — в ``report["layout"]["after"]``).
     """
     assert screen in SCREENS
     payload_file = tmp_path / ("payload_%s.json" % screen)
@@ -226,6 +235,10 @@ def render(screen: str, payload: dict, tmp_path: Path, *, demo: bool = False,
         env["HARNESS_CLICK_FIND"] = "1"
     if click_continue:
         env["HARNESS_CLICK_CONTINUE"] = "1"
+    for name, value in (("WINDOW", window), ("MAP_AREA", map_area),
+                        ("RESIZE_WINDOW", resize_window), ("RESIZE_MAP", resize_map)):
+        if value:
+            env[name] = value
     result = subprocess.run(
         [NODE, str(HARNESS), screen, str(payload_file)],
         cwd=str(ROOT), capture_output=True, text=True, timeout=120, env=env,
@@ -658,3 +671,151 @@ def test_kiosk_warning_bar_is_hidden_by_default(tmp_path):
     working = render("robot", real_payload(), tmp_path, click_continue=True)
     # С рабочим лидаром ни плашки, ни предупреждения нет — кнопка ничего не меняет.
     assert all(step["blocked"] is False and step["warn"] is False for step in working["continueFlow"])
+
+
+# ---------------------------------------------------------------------------
+# Раскладка панели «Лидар 360°» на бортовом экране
+#
+# Панель высокая, а карта — квадрат. Прежние `height: 100%; width: auto` в
+# `.lidar-map` считали квадрат от высоты панели: при высоком экране он выходил
+# шире правой колонки, `max-width: 100%` его не сжимал, и правая половина
+# колец с точками уезжала за край панели. Проверки ниже требуют, чтобы карта
+# вписывалась в меньшую сторону области и стояла по центру, а канва
+# перерисовывалась при смене раскладки (поворот экрана).
+# ---------------------------------------------------------------------------
+
+WINDOW_SIZES = ("1280x1300", "1430x1300", "1920x1300", "1920x1080")
+
+
+def canvas_square(before: dict) -> None:
+    """Общие требования к карте: квадрат, не больше меньшей стороны, по центру."""
+    assert before is not None, "harness не отдал геометрию панели лидара"
+    side = before["side"]
+    slot = before["slot"]
+    assert side == min(slot["w"], slot["h"]), before
+    # Карта — квадрат по меньшей стороне области (а не шире колонки).
+    assert before["map"]["w"] == before["map"]["h"] == side, before
+    assert before["map"]["w"] <= slot["w"] and before["map"]["h"] <= slot["h"], before
+    # И по центру области: центр карты совпадает с центром области.
+    assert before["map"]["x"] == slot["x"] + (slot["w"] - side) / 2, before
+    assert before["map"]["y"] == slot["y"] + (slot["h"] - side) / 2, before
+    # Сторона задана в пикселях: работает и на движках без CSS aspect-ratio,
+    # а fallback-высота через padding-bottom снята, иначе карта растянется.
+    assert before["mapStyle"]["width"] == before["mapStyle"]["height"] == "%dpx" % side, before
+    assert before["mapStyle"]["paddingBottom"] == "0px", before
+    # Канва — квадрат, вписанный в карту (рамка карты 1 px), и пересчитанный
+    # по фактическому размеру: атрибут канвы равен clientWidth × dpr.
+    canvas = before["canvas"]
+    assert canvas["clientW"] == canvas["clientH"], canvas
+    assert side - 4 <= canvas["clientW"] <= side, canvas
+    assert canvas["attrW"] == canvas["roundedW"], canvas
+    assert canvas["attrW"] == canvas["attrH"], canvas
+
+
+@pytest.mark.parametrize("window", WINDOW_SIZES)
+def test_kiosk_lidar_map_is_square_inside_the_panel(window, tmp_path):
+    """Ширина окна 1280/1430/1920: карта — квадрат внутри панели, точки нарисованы."""
+    report = render("robot", real_payload(), tmp_path, window=window)
+    canvas_square(report["layout"]["before"])
+    assert report["layout"]["before"]["dots"] > 0, "скан не нарисован"
+    assert report["renderErrors"] == [], report["renderErrors"]
+
+
+@pytest.mark.parametrize("area,side", [("560x1100", 560), ("1100x560", 560)])
+def test_kiosk_lidar_map_fits_the_smaller_side_of_the_area(area, side, tmp_path):
+    """Контейнер 560×1100 и «перевёрнутый» 1100×560 — карта по меньшей стороне.
+
+    Прежняя раскладка на первом случае (высокий контейнер) делала квадрат по
+    высоте: 1100 px ширины вместо 560 — точнее, во всю панель, и подпись
+    «скана лидара нет» с маркером уезжали за правый край.
+    """
+    report = render("robot", real_payload(), tmp_path, window="1430x1300", map_area=area)
+    before = report["layout"]["before"]
+    width, height = (int(value) for value in area.split("x"))
+    assert (before["slot"]["w"], before["slot"]["h"]) == (width, height), before
+    assert before["side"] == side, before
+    canvas_square(before)
+    assert before["dots"] > 0
+    assert report["renderErrors"] == [], report["renderErrors"]
+
+
+def test_kiosk_canvas_is_redrawn_when_the_map_area_changes(tmp_path):
+    """Размер области карты сменился (560×1100 вместо 1100×560) — канва за ним.
+
+    Сравнение canvas.width с clientWidth*dpr в drawLidar без перерисовки по
+    событию раскладки срабатывало только на следующем кадре телеметрии, а до
+    него карта оставалась растянутой на прежний размер.
+    """
+    report = render("robot", real_payload(), tmp_path,
+                    window="1430x1300", map_area="1100x560", resize_map="560x1100")
+    before, after = report["layout"]["before"], report["layout"]["after"]
+    assert after is not None, "harness не выполнил смену раскладки"
+    assert (before["slot"]["w"], before["slot"]["h"]) == (1100, 560), before
+    assert (after["slot"]["w"], after["slot"]["h"]) == (560, 1100), after
+    assert after["side"] == 560 and before["side"] == 560
+    canvas_square(after)
+    # После смены раскладки скан нарисован заново, а не остался прежним кадром.
+    assert after["dots"] > 0, after
+    assert report["renderErrors"] == [], report["renderErrors"]
+
+
+def test_kiosk_canvas_follows_window_resize(tmp_path):
+    """Окно изменилось (поворот экрана): 1430×1300 → 1920×1400 — канва пересчитана."""
+    report = render("robot", real_payload(), tmp_path,
+                    window="1430x1300", resize_window="1920x1400")
+    before, after = report["layout"]["before"], report["layout"]["after"]
+    assert after is not None, "harness не выполнил смену раскладки"
+    canvas_square(before)
+    canvas_square(after)
+    assert after["canvas"]["clientW"] != before["canvas"]["clientW"], (before, after)
+    assert after["dots"] > 0
+    assert report["renderErrors"] == [], report["renderErrors"]
+
+
+def test_kiosk_css_keeps_the_map_and_the_stats_inside_the_panel():
+    """Правила раскладки на месте: квадрат по меньшей стороне, три плитки в строку.
+
+    Проверка страхует CSS от возврата прежнего `height:100%; width:auto`, из-за
+    которого карта вылезала за правый край панели, а третья плитка показателей
+    («ДАЛЬНОСТЬ») уходила за край экрана.
+    """
+    css = (ROOT / "slam_gui" / "robot.css").read_text(encoding="utf-8")
+    html = (ROOT / "slam_gui" / "robot.html").read_text(encoding="utf-8")
+    js = (ROOT / "slam_gui" / "robot.js").read_text(encoding="utf-8")
+    # Три плитки показателей занимают ровно ширину панели.
+    assert "grid-template-columns: repeat(3, minmax(0, 1fr));" in css
+    # Старые движки без aspect-ratio получают запасной вариант.
+    assert "@supports not (aspect-ratio: 1 / 1)" in css
+    # Карта и панель ничего не выпускают за свои границы.
+    assert ".lidar-map-slot" in css and "place-items: center" in css
+    # Область карты и сама карта есть в разметке: по ней считается сторона.
+    for marker in ('id="lidar-map-slot"', 'id="lidar-map"', 'id="lidar-canvas"'):
+        assert marker in html, marker
+    # Экран ставит квадрату сторону в пикселях и следит за раскладкой.
+    assert "function sizeLidarMap()" in js
+    assert "ResizeObserver" in js and "orientationchange" in js
+    # Правила для узкой панели объявлены ПОСЛЕ базовых: у контейнерных правил та
+    # же специфичность, и объявленные ниже базовые значения (`font-size: 34px`
+    # у значения, `padding: 12px 16px` у плитки) перебивали их — из-за этого
+    # «БЛИЖАЙШЕЕ» переносилось по букве в строке и строка показателей
+    # растягивалась на сотни пикселей, отнимая высоту у карты.
+    assert css.index("@container (max-width: 300px)") > css.index(".lidar-stats dd {")
+    assert css.index("@container (max-width: 460px)") > css.index(".lidar-stats dd {")
+
+
+def test_kiosk_no_scan_caption_disappears_from_a_working_map():
+    """«скана лидара нет» исчезает, когда скан есть, и не лежит на маркере робота.
+
+    Разметка ставит подписи `hidden`, но авторский `display: flex` у
+    `.lidar-empty` перебивает браузерное `[hidden] { display: none }` — из-за
+    этого подпись оставалась висеть поверх живого скана и на маркере ▲. У
+    остальных переключаемых блоков экрана парное правило `[hidden]` есть,
+    у карты лидара его не было.
+    """
+    css = (ROOT / "slam_gui" / "robot.css").read_text(encoding="utf-8")
+    assert ".lidar-empty[hidden] { display: none !important; }" in css
+    # Подпись держится внутри карты: верхний отступ считается от размера карты
+    # (50% — её середина, маркер ▲ занимает центр), поля не дают ей выйти за край.
+    block = css.split(".lidar-empty {", 1)[1].split("}", 1)[0]
+    assert "padding:" in block and "50%" in block
+    assert "text-align: center" in block

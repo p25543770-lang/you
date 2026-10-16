@@ -118,6 +118,139 @@ function byId(id) {
   return elements.get(id);
 }
 
+/* ------------------------------------------------------- раскладка окна
+ * Экраны читают геометрию только через DOM (clientWidth/clientHeight,
+ * getBoundingClientRect), поэтому «настоящую» раскладку здесь заменяют
+ * прямоугольники: шапка сверху, ниже колонки, справа — панель лидара.
+ * Числа повторяют slam_gui/robot.css: .kiosk padding 22/30, .lidar padding
+ * 18/24/22, шапка панели ~46 px, строка показателей ~96 px, .lidar-body gap 14.
+ *
+ * Переменные окружения (без них геометрия прежняя — 320×320):
+ *   WINDOW=1430x1300   — окно киоска;
+ *   MAP_AREA=560x1100  — размер области карты лидара, как его посчитала
+ *                        страница (проверка «контейнер 560×1100 / 1100×560»);
+ *   RESIZE_WINDOW=WxH  — во время прогона окно меняют (поворот экрана);
+ *   RESIZE_MAP=WxH     — во время прогона меняют размер области карты.
+ */
+function parseSize(value) {
+  const match = /^(\d+)\s*[xх×]\s*(\d+)$/.exec(String(value || '').trim());
+  return match ? { w: Number(match[1]), h: Number(match[2]) } : null;
+}
+
+const PANEL_PAD = { x: 24, top: 18, bottom: 22 };
+const PANEL_HEAD = 46;      // заголовок панели: h2 + отступ
+const STATS_H = 96;         // строка трёх плиток показателей
+const BODY_GAP = 14;        // .lidar-body gap
+const HEAD_H = 96;          // шапка экрана
+const KIOSK_PAD = { x: 30, y: 22 };
+
+function layoutBoxes(win, area) {
+  /* Панель лидара — в правой колонке (окно шире 1200): слева шасси требует
+     своё, панели остаётся остаток. Узкое окно — одна колонка на всю ширину. */
+  const colsW = Math.max(0, win.w - 2 * KIOSK_PAD.x);
+  const wide = win.w > 1200;
+  let panelW = wide ? Math.max(140, Math.round(colsW * 0.2) - 40) : colsW;
+  if (area) panelW = area.w + 2 * PANEL_PAD.x;
+  const panelX = wide ? win.w - KIOSK_PAD.x - panelW : KIOSK_PAD.x;
+  const panelTop = KIOSK_PAD.y + HEAD_H + 18;
+  const slotW = area ? area.w : Math.max(0, panelW - 2 * PANEL_PAD.x);
+  const slotTop = panelTop + PANEL_PAD.top + PANEL_HEAD;
+  const slotH = area
+    ? area.h
+    : Math.max(0, win.h - KIOSK_PAD.y - panelTop - PANEL_PAD.bottom - STATS_H - BODY_GAP);
+  const panelH = PANEL_PAD.top + PANEL_HEAD + slotH + BODY_GAP + STATS_H + PANEL_PAD.bottom;
+  return {
+    win,
+    panel: { x: panelX, y: panelTop, w: panelW, h: panelH },
+    slot: { x: panelX + PANEL_PAD.x, y: slotTop, w: slotW, h: slotH },
+  };
+}
+
+const layoutRequest = {
+  window: parseSize(process.env.WINDOW),
+  area: parseSize(process.env.MAP_AREA),
+};
+const resizeRequest = {
+  window: parseSize(process.env.RESIZE_WINDOW),
+  area: parseSize(process.env.RESIZE_MAP),
+};
+const layoutEnabled = Boolean(layoutRequest.window || layoutRequest.area ||
+                               resizeRequest.window || resizeRequest.area);
+let layoutState = layoutEnabled
+  ? layoutBoxes(layoutRequest.window || { w: 1430, h: 1300 }, layoutRequest.area)
+  : null;
+
+function rectOf(box) {
+  return {
+    x: box.x, y: box.y, width: box.w, height: box.h,
+    top: box.y, left: box.x, right: box.x + box.w, bottom: box.y + box.h,
+  };
+}
+
+/* Внутри области карты лежит .lidar-map — квадрат: либо сторона, посчитанная
+   экраном (robot.js → sizeLidarMap ставит width/height в px), либо то, что
+   даёт CSS (aspect-ratio по меньшей стороне области, по центру области). */
+function mapBox() {
+  const slot = layoutState.slot;
+  const style = byId('lidar-map').style || {};
+  const cssSide = Math.min(slot.w, slot.h);
+  const w = parseFloat(style.width) || cssSide;
+  const h = parseFloat(style.height) || cssSide;
+  return { x: slot.x + (slot.w - w) / 2, y: slot.y + (slot.h - h) / 2, w, h };
+}
+
+function applyLayout() {
+  if (!layoutEnabled) return;
+  const boxes = {
+    'kiosk-root': { x: 0, y: 0, w: layoutState.win.w, h: layoutState.win.h },
+    'lidar-map-slot': layoutState.slot,
+    'lidar-map': mapBox(),
+  };
+  Object.keys(boxes).forEach((id) => {
+    const el = byId(id);
+    const box = boxes[id];
+    el.clientWidth = Math.floor(box.w);
+    el.clientHeight = Math.floor(box.h);
+    el.getBoundingClientRect = () => rectOf(box);
+  });
+  // Канва занимает всю карту (robot.css: #lidar-canvas width/height 100%), а у
+  // карты рамка 1 px — поэтому размеры канвы считаем от карты каждый раз
+  // заново: экран может только что задать ей сторону.
+  const canvas = byId('lidar-canvas');
+  const canvasBox = () => {
+    const map = mapBox();
+    return { x: map.x + 1, y: map.y + 1, w: Math.max(0, map.w - 2), h: Math.max(0, map.h - 2) };
+  };
+  Object.defineProperty(canvas, 'clientWidth', { get: () => Math.floor(canvasBox().w), configurable: true });
+  Object.defineProperty(canvas, 'clientHeight', { get: () => Math.floor(canvasBox().h), configurable: true });
+  canvas.getBoundingClientRect = () => rectOf(canvasBox());
+}
+
+function layoutSnapshot() {
+  if (!layoutEnabled) return null;
+  const slot = layoutState.slot;
+  const map = mapBox();
+  const canvas = byId('lidar-canvas');
+  const style = byId('lidar-map').style || {};
+  const dpr = global.devicePixelRatio || 1;
+  return {
+    window: layoutState.win,
+    area: { w: slot.w, h: slot.h },
+    side: Math.min(slot.w, slot.h),
+    slot: { x: slot.x, y: slot.y, w: slot.w, h: slot.h },
+    map: { w: map.w, h: map.h, x: map.x, y: map.y },
+    canvas: {
+      clientW: canvas.clientWidth, clientH: canvas.clientHeight,
+      attrW: canvas.width, attrH: canvas.height,
+      roundedW: Math.round(canvas.clientWidth * dpr), dpr,
+    },
+    mapStyle: { width: style.width, height: style.height, paddingBottom: style.paddingBottom },
+    dots: canvas.dots.length,
+  };
+}
+
+applyLayout();
+
 const body = new El('body');
 const documentElement = new El('html');
 global.document = {
@@ -159,9 +292,25 @@ console.error = (...args) => {
 global.window = global;
 global.self = global;
 global._kioskBms = payload.bms || null;
-// main.js вешает обработчики на window: в браузере это событие, здесь — заглушка.
-global.addEventListener = () => {};
-global.removeEventListener = () => {};
+// Обработчики window в браузере — события; здесь их запоминаем, чтобы
+// проверка раскладки могла в нужный момент выстрелить `resize` (поворот
+// экрана) и убедиться, что канва лидара перерисовалась по новому размеру.
+const windowHandlers = new Map();
+global.addEventListener = (name, listener) => {
+  if (typeof listener !== 'function') return;
+  if (!windowHandlers.has(name)) windowHandlers.set(name, []);
+  windowHandlers.get(name).push(listener);
+};
+global.removeEventListener = (name, listener) => {
+  const list = windowHandlers.get(name) || [];
+  const index = list.indexOf(listener);
+  if (index >= 0) list.splice(index, 1);
+};
+function fireWindowEvent(name) {
+  (windowHandlers.get(name) || []).slice().forEach((listener) => {
+    try { listener({ type: name }); } catch (err) { /* экран не должен падать */ }
+  });
+}
 global.dispatchEvent = () => true;
 /* HARNESS_DEMO=1 — экран с явно включённым демо-режимом (`?demo=1`). */
 global.location = {
@@ -226,10 +375,9 @@ vm.runInThisContext(fs.readFileSync(file, 'utf8'), { filename: file });
 
 const sleep = (ms) => new Promise((resolve) => originalSetTimeout(resolve, ms));
 
-(async function run() {
-  // Даём fetch из boot() завершиться, затем исполняем отложенные кадры
-  // отрисовки: и requestAnimationFrame, и setTimeout здесь под нашим контролем.
-  for (let i = 0; i < 6; i += 1) {
+/* Кадры отрисовки: и requestAnimationFrame, и setTimeout под нашим контролем. */
+async function flushFrames(rounds) {
+  for (let i = 0; i < rounds; i += 1) {
     await sleep(5);
     while (rafQueue.length) {
       const cb = rafQueue.shift();
@@ -239,6 +387,25 @@ const sleep = (ms) => new Promise((resolve) => originalSetTimeout(resolve, ms));
       const cb = timeouts.shift();
       try { cb(); } catch (err) { /* dito */ }
     }
+  }
+}
+
+(async function run() {
+  await flushFrames(6);
+
+  // Смена раскладки: окно повернули или контейнер стал другим (560×1100 ↔
+  // 1100×560). Экран узнаёт об этом событием resize, а не только кадром
+  // телеметрии, поэтому проверяем ровно это: размеры до и после.
+  let layoutBefore = layoutSnapshot();
+  let layoutAfter = null;
+  if (resizeRequest.area || resizeRequest.window) {
+    layoutState = layoutBoxes(resizeRequest.window || layoutRequest.window || { w: 1430, h: 1300 },
+                             resizeRequest.area || layoutRequest.area);
+    applyLayout();
+    fireWindowEvent('orientationchange');
+    fireWindowEvent('resize');
+    await flushFrames(4);
+    layoutAfter = layoutSnapshot();
   }
 
   const navigation = [];
@@ -302,6 +469,8 @@ const sleep = (ms) => new Promise((resolve) => originalSetTimeout(resolve, ms));
   }
   console.log(JSON.stringify({
     screen,
+    // Геометрия панели лидара — только когда её задали проверки раскладки.
+    layout: layoutEnabled ? { window: layoutState.win, before: layoutBefore, after: layoutAfter } : null,
     navigation,
     lidarPorts,
     continueFlow,

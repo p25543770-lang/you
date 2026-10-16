@@ -224,6 +224,57 @@
     return parts.join(' · ');
   }
 
+  /* ---------------- размер квадрата карты лидара ----------------
+     Панель лидара высокая, а карта — квадрат. Считать его от высоты
+     (height:100%; width:auto) нельзя: при высокой панели квадрат становится
+     шире колонки, и правая половина колец вместе с подписью уезжает за край.
+     Поэтому сторона квадрата = меньшая из сторон области карты, и ставится
+     она в пикселях: так квадрат гарантирован и на движках без CSS
+     aspect-ratio, а вписанная в область карта остаётся по центру
+     (центрирование — .lidar-map-slot, см. robot.css). */
+  function lidarMapArea() {
+    const map = $('lidar-map');
+    if (!map) return null;
+    const slot = $('lidar-map-slot') || map.parentElement || map;
+    const rect = slot.getBoundingClientRect ? slot.getBoundingClientRect() : null;
+    const w = slot.clientWidth || (rect && rect.width) || 0;
+    const h = slot.clientHeight || (rect && rect.height) || 0;
+    return { map, w, h };
+  }
+
+  // Последний нарисованный скан: по нему канва перерисовывается, когда
+  // раскладка поменялась между кадрами телеметрии (поворот экрана, свайп).
+  let lastLidarPts = [];
+
+  function redrawLidar() {
+    drawLidar($('lidar-canvas'), lastLidarPts);
+  }
+
+  function lidarMapSide(w, h) {
+    // Меньшая сторона доступной области; дробные пиксели округляем вниз,
+    // чтобы квадрат никогда не оказался на пиксель больше области.
+    const side = Math.floor(Math.min(Number(w) || 0, Number(h) || 0));
+    return side > 0 ? side : 0;
+  }
+
+  // Ставит квадрату сторону по меньшей стороне области. Возвращает сторону
+  // (0 — если места в раскладке ещё нет).
+  function sizeLidarMap() {
+    const area = lidarMapArea();
+    if (!area) return 0;
+    const side = lidarMapSide(area.w, area.h);
+    if (!side) return 0;
+    const style = area.map.style;
+    if (!style) return side;
+    const px = side + 'px';
+    if (style.width !== px) style.width = px;
+    if (style.height !== px) style.height = px;
+    // @supports not (aspect-ratio) держит высоту через padding-bottom:100%;
+    // когда сторона задана в пикселях, этот padding карту только растянет.
+    if (style.paddingBottom !== '0px') style.paddingBottom = '0px';
+    return side;
+  }
+
   function drawLidar(canvas, pts) {
     if (!canvas) return;
     const ctx = canvas.getContext && canvas.getContext('2d');
@@ -257,11 +308,23 @@
       ctx.arc(cx, cy, m * k, 0, Math.PI * 2);
       ctx.stroke();
     }
-    // подписи метров
+    // подписи метров — вдоль оси Y. Держим их внутри канвы (по x и по y) и не
+    // поверх маркера робота ▲ в центре: радиус здесь считается по меньшей
+    // стороне канвы, поэтому на высоком экране подписи оставались бы за краем.
     ctx.fillStyle = '#7a7a7e';
     ctx.font = '12px ' + getComputedStyle(document.body).fontFamily;
+    ctx.textAlign = 'left';
+    const markerHalf = 18;              // половина высоты маркера ▲ (26 px) + запас
+    const drawnLabels = [];
     for (let m = LIDAR_RING_M; m <= LIDAR_RANGE_M; m += LIDAR_RING_M) {
-      ctx.fillText(m + ' м', cx + 4, cy - m * k - 4);
+      const y = Math.max(14, Math.min(cy - m * k - 4, cy - markerHalf));
+      if (drawnLabels.some((prev) => Math.abs(prev - y) < 14)) continue; // подписи не накладываются
+      const text = m + ' м';
+      const width = (ctx.measureText(text) || {}).width || 0;
+      let x = cx + 6;
+      if (width && x + width > w - 6) x = Math.max(6, cx - 6 - width);
+      drawnLabels.push(y);
+      ctx.fillText(text, x, y);
     }
     // оси
     ctx.strokeStyle = '#333335';
@@ -668,6 +731,33 @@
     }
   }
 
+  // Раскладка меняется не каждый кадр (поворот экрана, открытие панелей), и
+  // канва должна перерисовываться на это сразу, а не остаться с прежним
+  // размером до перезагрузки: следим за областью карты, а где ResizeObserver
+  // нет (старые встроенные движки) — за окном.
+  function initLidarResize() {
+    sizeLidarMap();
+    redrawLidar();
+    const area = lidarMapArea();
+    const target = area ? ($('lidar-map-slot') || area.map.parentElement || area.map) : null;
+    const onChange = () => {
+      if (sizeLidarMap()) redrawLidar();
+    };
+    let watched = false;
+    if (target && typeof ResizeObserver === 'function') {
+      try {
+        new ResizeObserver(onChange).observe(target);
+        watched = true;
+      } catch (err) {
+        watched = false;
+      }
+    }
+    if (!watched && typeof window.addEventListener === 'function') {
+      window.addEventListener('resize', onChange);
+      window.addEventListener('orientationchange', onChange);
+    }
+  }
+
   // На основной карте остаётся короткая подпись; при отсутствии лидара
   // блокер показывает оператору серверную причину и не выдаёт демо за реальный скан.
   function renderLidar(d) {
@@ -699,6 +789,10 @@
       }
       empty.title = '';
     }
+    // Размер квадрата пересчитываем перед отрисовкой: если раскладка успела
+    // поменяться, drawLidar увидит новый clientWidth и перерисует канву.
+    sizeLidarMap();
+    lastLidarPts = pts;
     drawLidar(canvas, pts);
   }
 
@@ -762,6 +856,7 @@
     initKioskControls();
     initLidarFind();
     initLidarContinue();
+    initLidarResize();
     initSwipePage();
     initSteeringControls();
   }
