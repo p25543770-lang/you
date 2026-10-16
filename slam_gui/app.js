@@ -182,27 +182,58 @@ document.getElementById("clearance").addEventListener("input", (e) => {
   document.getElementById("clr-val").textContent = state.clearance.toFixed(2) + " м";
 });
 
+// «СТОП ТЯГИ» — программный стоп пульта. Закрывает локальный гейт симуляции и
+// отправляет на сервер команду PWM 0 + тормоз. Аварийного выключателя в силовой
+// цепи он не заменяет. Снятие флага ничего не включает на шасси.
 document.getElementById("btn-estop").addEventListener("click", () => {
   state.estop = !state.estop;
   if (state.estop) { state.auto = false; state.explore = false; }
   document.getElementById("btn-estop").classList.toggle("on", state.estop);
   document.getElementById("estop-state").textContent = state.estop ? "ВКЛ" : "ВЫКЛ";
   document.getElementById("statusline").classList.toggle("danger", state.estop);
-  document.getElementById("mode-label").textContent = state.estop ? "E-STOP · гейт закрыт" : "TELEOP · симуляция";
+  document.getElementById("mode-label").textContent = state.estop ? "СТОП ТЯГИ · гейт закрыт" : "ПУЛЬТ · симуляция";
   document.getElementById("gate").textContent = state.estop ? "HOLD" : "OK";
   document.getElementById("link-pulse").className = "pulse" + (state.estop ? " off" : "");
   if (state.estop) setMission("FAULT");
   else if (state.mission === "FAULT") setMission("IDLE");
-  toast(state.estop ? "Аварийный стоп включён" : "E-stop снят");
-  log(state.estop ? "err" : "ok", state.estop ? "E-STOP asserted" : "E-STOP cleared");
   publishCmd();
+  if (state.estop) {
+    toast("Стоп тяги: отправка на шасси…");
+    log("err", "стоп тяги включён в пульте — отправка команды PWM 0");
+    sendServerStop();
+  } else {
+    toast("Стоп в пульте снят. Тяга на шасси не включается сама.");
+    log("ok", "стоп в пульте снят (на шасси ничего не отправлено)");
+  }
 });
+
+async function sendServerStop() {
+  try {
+    const response = await fetch("api/stop", {
+      method: "POST", cache: "no-store",
+      headers: { "Content-Type": "application/json", "X-Robot-Control": "drive" },
+      body: "{}",
+    });
+    const body = await response.json().catch(() => ({}));
+    if (response.ok && body.ok) {
+      log("ok", "стоп тяги подтверждён сервером: PWM 0, тормоз");
+      toast("Стоп тяги подтверждён");
+    } else {
+      const reason = body.reason || ("HTTP " + response.status);
+      log("err", "стоп тяги НЕ подтверждён: " + reason + " — проверьте шасси");
+      toast("Стоп НЕ подтверждён: " + reason);
+    }
+  } catch (error) {
+    log("err", "стоп тяги НЕ подтверждён: нет связи с пультом — проверьте шасси");
+    toast("Стоп НЕ подтверждён: нет связи");
+  }
+}
 
 function homeModules() {
   state.modules.forEach((m) => { m.steer = 0; m.homed = true; });
   renderModules();
   toast("Хоминг отправлен на 4 модуля");
-  log("ok", "homing command → UART ×4");
+  log("ok", "хоминг: только симуляция, на шасси ничего не отправлено");
 }
 document.getElementById("btn-home").addEventListener("click", homeModules);
 document.getElementById("btn-recenter").addEventListener("click", () => {
@@ -220,12 +251,12 @@ document.getElementById("btn-auto").addEventListener("click", () => {
   if (state.auto) {
     state.wpIndex = 0;
     setMission("NAVIGATE");
-    document.getElementById("mode-label").textContent = "AUTO · маршрут";
+    document.getElementById("mode-label").textContent = "AUTO · симуляция маршрута";
     document.getElementById("btn-auto").textContent = "Стоп авто";
     toast("Едем по точкам");
   } else {
     state.vx = state.vy = state.wz = 0;
-    document.getElementById("mode-label").textContent = "TELEOP · симуляция";
+    document.getElementById("mode-label").textContent = "ПУЛЬТ · симуляция";
     document.getElementById("btn-auto").textContent = "Старт маршрута";
   }
 });
@@ -295,7 +326,7 @@ document.getElementById("btn-start-mission").addEventListener("click", () => {
   if (state.estop) { toast("Снимите E-stop"); return; }
   if (!state.cargoLock) { toast("Закройте ячейку хранения (окно «Сервис»)"); return; }
   setMission("NAVIGATE");
-  toast("Nav2: цель доставки");
+  toast("Миссия: симуляция, Nav2 не подключён, на робот ничего не отправлено");
 });
 document.getElementById("btn-pause-mission").addEventListener("click", () => setMission("YIELD_SIGN"));
 document.getElementById("btn-abort").addEventListener("click", () => setMission("IDLE"));
@@ -309,11 +340,11 @@ document.querySelectorAll("nav button").forEach((btn) => {
     document.getElementById("view-" + v).classList.remove("hidden");
     const titles = {
       dash: ["Пульт управления", "Автономный курьер · крабовый ход · ROS 2"],
-      drive: ["Ходовая 4WIS/4WID", "Свёрв-модули · UART · CRC16/Modbus"],
-      mission: ["Миссия доставки", "FSM · знаки · светофор · Nav2"],
+      drive: ["Ходовая 4WIS/4WID", "симуляция · команды на шасси не отправляются"],
+      mission: ["Миссия доставки", "симуляция FSM · Nav2 не подключён"],
       sensors: ["Сенсоры", "ЛДС-01 · камера · детекции"],
-      safety: ["Безопасность", "гейт /cmd_vel · вотчдог · АКБ"],
-      logs: ["Журнал", "протокол модулей и Nav2"],
+      safety: ["Безопасность", "гейт симуляции в браузере · АКБ"],
+      logs: ["Журнал", "журнал симуляции пульта"],
       console: ["Сервисный пульт", "ячейка хранения · двигатели · АКБ · статистика"],
     };
     document.getElementById("page-title").textContent = titles[v][0];
@@ -982,7 +1013,7 @@ function followRoute() {
     state.auto = false;
     state.vx = state.vy = state.wz = 0;
     setMission("IDLE");
-    document.getElementById("mode-label").textContent = "TELEOP · симуляция";
+    document.getElementById("mode-label").textContent = "ПУЛЬТ · симуляция";
     document.getElementById("btn-auto").textContent = "Старт маршрута";
     toast("Маршрут пройден");
     return;
@@ -1336,7 +1367,7 @@ document.getElementById("btn-explore").addEventListener("click", () => {
   } else {
     state.auto = false;
     state.vx = state.vy = state.wz = 0;
-    document.getElementById("mode-label").textContent = "TELEOP · симуляция";
+    document.getElementById("mode-label").textContent = "ПУЛЬТ · симуляция";
     document.getElementById("btn-explore").textContent = "Автоскан";
   }
 });

@@ -424,7 +424,7 @@ class MasterSource:
     supports_calibration = True
     STALE_S = 1.0
     DRIVE_STALE_S = 0.75
-    MAX_STEER_DEG = 32.0
+    MAX_STEER_DEG = 85.0
     MAX_DRIVE_PERCENT = 20
     MESSAGE_LIMIT = 40
 
@@ -1358,6 +1358,7 @@ class Vault:
             self.data["salt"] = secrets.token_hex(16)
             self.data["pinHash"] = self._hash(self.data["salt"], new)
             self.data["changedAt"] = self.clock()
+            self.data["pinChanged"] = True
             self._audit("pin_change", True, "PIN изменён")
             self._persist()
         return {"ok": True}

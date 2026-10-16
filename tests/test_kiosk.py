@@ -168,7 +168,8 @@ def test_steering_endpoint_dispatches_exactly_one_module_and_angle(kiosk_app, ki
     for bad_body in (
         {"module": "FR", "angle": 12, "pwm": 100},
         {"module": "drive", "angle": 12},
-        {"module": "FL", "angle": 33},
+        {"module": "FL", "angle": 85.5},
+        {"module": "FL", "angle": -85.5},
     ):
         response = kiosk_client.post("/api/kiosk_steer", json=bad_body, headers=headers)
         assert response.status_code == 400
@@ -299,9 +300,10 @@ def test_journal_endpoint_is_empty_and_honest_on_a_fresh_screen(kiosk_client):
     assert body["ok"] is True
     data = body["data"]
     assert data["demo"] is False              # это не демо-поток
-    assert data["entries"] == []
-    assert data["count"] == 0
-    assert data["levels"]["warn"] == 0
+    # Единственное допустимое событие на свежем экране — предупреждение о заводском PIN (оно настоящее).
+    assert [e for e in data["entries"] if "заводской" not in e.get("msg", "")] == []
+    assert data["count"] == len(data["entries"])
+    assert data["levels"]["warn"] == data["count"]
 
 
 def test_journal_records_real_pin_and_command_events(kiosk_app, kiosk_client):
@@ -818,3 +820,29 @@ def test_kiosk_launch_files_are_in_place(name):
 def test_kiosk_script_is_executable():
     path = Path(__file__).resolve().parent.parent / "scripts" / "kiosk.sh"
     assert os.access(path, os.X_OK), "scripts/kiosk.sh должен быть исполняемым"
+
+
+def test_kiosk_steer_api_accepts_exact_limits_and_refuses_beyond(kiosk_app, kiosk_client):
+    class FakeSteeringSource:
+        name = "master"
+        supports_individual_steer = True
+
+        def __init__(self):
+            self.commands = []
+
+        def steer_module(self, module, angle):
+            self.commands.append((module, angle))
+            return {"ok": True, "angle": round(angle, 1)}
+
+    source = FakeSteeringSource()
+    kiosk_app.extensions["rc_slam"].source = source
+    headers = {"X-Robot-Control": "steering"}
+
+    for angle in (85, -85, 0):
+        r = kiosk_client.post("/api/kiosk_steer", json={"module": "RL", "angle": angle}, headers=headers)
+        assert r.status_code == 200, angle
+    for angle in (85.5, -85.5, 90, -90):
+        r = kiosk_client.post("/api/kiosk_steer", json={"module": "RL", "angle": angle}, headers=headers)
+        assert r.status_code == 400, angle
+        assert r.get_json()["reason"] == "angle_limit"
+    assert source.commands == [("RL", 85), ("RL", -85), ("RL", 0)]

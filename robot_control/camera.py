@@ -11,6 +11,7 @@
 from __future__ import annotations
 
 import glob
+import hmac
 import logging
 import os
 import threading
@@ -18,6 +19,26 @@ import time
 from typing import Any, Generator, Optional
 
 log = logging.getLogger("robot_control.camera")
+
+
+#: Заголовок внешнего процесса, который присылает кадры камеры.
+FEED_TOKEN_HEADER = "X-Camera-Token"
+
+
+def feed_denied_reason(headers) -> Optional[str]:
+    """Почему кадр нельзя принять; None — можно.
+
+    Приём кадров по умолчанию закрыт: без ``RC_CAMERA_FEED_TOKEN`` любой клиент
+    в сети мог бы подставить изображение, которое оператор примет за камеру.
+    С токеном кадры принимаются только от процесса, знающего секрет.
+    """
+    expected = os.environ.get("RC_CAMERA_FEED_TOKEN", "").strip()
+    if not expected:
+        return "feed_disabled"
+    provided = str(headers.get(FEED_TOKEN_HEADER, "") or "")
+    if not hmac.compare_digest(provided.encode("utf-8"), expected.encode("utf-8")):
+        return "bad_token"
+    return None
 
 
 class CameraDevice:

@@ -1697,7 +1697,7 @@
           ctx1.stroke();
           ctx1.fillStyle = 'rgba(255,255,255,.85)';
           ctx1.font = '11px ui-monospace, monospace';
-          ctx1.fillText('CAM 1 · LIVE · ' + new Date().toLocaleTimeString('ru-RU'), 10, 18);
+          ctx1.fillText('CAM 1 · ДЕМО · ' + new Date().toLocaleTimeString('ru-RU'), 10, 18);
           anim1 = requestAnimationFrame(drawCam1);
           return;
         }
@@ -1705,7 +1705,7 @@
         const isDemo = new URLSearchParams(window.location.search).get('demo') === '1' || localStorage.getItem('kiosk_demo') === '1';
         if (isDemo) {
           if (cam1Empty) cam1Empty.hidden = true;
-          if (cam1Chip) { cam1Chip.textContent = '● LIVE · демо'; cam1Chip.className = 'cam-chip ok'; }
+          if (cam1Chip) { cam1Chip.textContent = '○ ДЕМО · не камера'; cam1Chip.className = 'cam-chip warn'; }
           const t = (now - t0) / 1000;
           ctx1.fillStyle = '#0f0f0f';
           ctx1.fillRect(0, 0, w, h);
@@ -1795,7 +1795,7 @@
           ctx2.stroke();
           ctx2.fillStyle = 'rgba(255,255,255,.85)';
           ctx2.font = '11px ui-monospace, monospace';
-          ctx2.fillText('CAM 2 · LIVE · ' + new Date().toLocaleTimeString('ru-RU'), 10, 18);
+          ctx2.fillText('CAM 2 · ДЕМО · ' + new Date().toLocaleTimeString('ru-RU'), 10, 18);
           anim2 = requestAnimationFrame(drawCam2);
           return;
         }
@@ -1803,7 +1803,7 @@
         const isDemo = new URLSearchParams(window.location.search).get('demo') === '1' || localStorage.getItem('kiosk_demo') === '1';
         if (isDemo) {
           if (cam2Empty) cam2Empty.hidden = true;
-          if (cam2Chip) { cam2Chip.textContent = '● LIVE · демо'; cam2Chip.className = 'cam-chip ok'; }
+          if (cam2Chip) { cam2Chip.textContent = '○ ДЕМО · не камера'; cam2Chip.className = 'cam-chip warn'; }
           const t = (now - t0) / 1000;
           ctx2.fillStyle = '#0a0a0a';
           ctx2.fillRect(0, 0, w, h);
@@ -2134,11 +2134,11 @@
       }
 
       let value = pending ? pending.angle : (moving && target != null ? target : (current == null ? 0 : current));
-      value = Math.max(-32, Math.min(32, Math.round(value)));
+      value = Math.max(-85, Math.min(85, Math.round(value)));
       const dirty = card.dataset.steerDirty === 'true';
       if (!dirty) slider.value = String(value);
       if (currentEl) currentEl.textContent = current == null ? '—' : Math.round(current) + '°';
-      // Ползунок ограничен ±32°, а при калибровке цель — до ±200°: показываем настоящую.
+      // Ползунок ограничен ±85°, а при калибровке цель — до ±200°: показываем настоящую.
       if (targetEl) targetEl.textContent = (!dirty && busy && target != null ? Math.round(target) : Math.round(+slider.value || 0)) + '°';
 
       const ready = available && steeringAuthorized && online && homed && !busy && !pending && !zeroPending && !calibPending && !tractionActive;
@@ -2407,7 +2407,7 @@
       const slider = $('steer-slider-' + id);
       const output = $('steer-target-' + id);
       if (!card || !slider) return;
-      slider.value = String(Math.max(-32, Math.min(32, Math.round(value))));
+      slider.value = String(Math.max(-85, Math.min(85, Math.round(value))));
       card.dataset.steerDirty = 'true';
       delete steerResult[id];
       if (output) output.textContent = Math.round(+slider.value) + '°';
@@ -2422,7 +2422,7 @@
         serial_unavailable: 'порт мастера недоступен',
         not_homed: 'сначала калибровка или 0° вручную',
         module_busy: 'дождитесь остановки модуля / выключите тягу',
-        angle_limit: 'угол за пределами ±32°',
+        angle_limit: 'угол за пределами ±85°',
         command_queue_full: 'очередь команд занята',
         invalid_module: 'неизвестный модуль',
         invalid_angle: 'неверный угол',
@@ -2438,7 +2438,7 @@
         if (window._openSteeringAuth) window._openSteeringAuth();
         return;
       }
-      const angle = Math.max(-32, Math.min(32, Number(slider.value)));
+      const angle = Math.max(-85, Math.min(85, Number(slider.value)));
       const sendButton = panel.querySelector('[data-steer-send="' + id + '"]');
       if (sendButton) sendButton.disabled = true;
       try {

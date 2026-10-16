@@ -21,7 +21,7 @@
 //   h  в ноль · s  стоп всего · g  продолжить · z  ноль здесь · p  состояние
 //
 // Команды сервера (бортовой экран, RC_SLAM_SOURCE=master):
-//   w FL 12.5      абсолютный угол одного модуля (FL/FR/RL/RR, предел ±32°)
+//   w FL 12.5      абсолютный угол одного модуля (FL/FR/RL/RR, предел ±85°)
 //   w FR zero      ноль одного модуля в текущем положении
 //   w RL calib     калибровка одного модуля по датчику
 //   t 8            тяга всех BLDC, −20…20 %; heartbeat не реже 650 мс
@@ -73,7 +73,7 @@ const uint8_t BLDC_DIR_FORWARD_LEVEL = LOW;
 const float STEPS_PER_DEGREE = 133.333333f;    // шагов_на_оборот × микрошаг × редуктор / 360
 const uint16_t STEP_PERIOD_US = 100;           // рабочий ход: 10 кГц ≈ 75°/с
 const uint16_t CALIB_STEP_PERIOD_US = 2000;    // точный подход к датчику: 500 Гц ≈ 3,75°/с
-const float STEER_LIMIT_DEG = 32.0f;           // предел абсолютной команды w (как у сервера)
+const float STEER_LIMIT_DEG = 85.0f;           // предел абсолютной команды w (как у сервера)
 const float MANUAL_MOVE_LIMIT_DEG = 360.0f;    // предел одной ручной команды d / c
 
 // ---- калибровка по оптодатчику (команда k) ----
@@ -741,7 +741,7 @@ void printModuleStatus() {
 //   g              продолжить поворот, прерванный s
 //   d <°> f|b      повернуть на угол: f — вправо (+), b — влево (−)
 //   c <°> | c c    качание на угол / выключить качание
-//   w <°>          абсолютный угол (нужен ноль, предел ±32°) — команда сервера
+//   w <°>          абсолютный угол (нужен ноль, предел ±85°) — команда сервера
 //   t <%> | b      тяга BLDC −20…20 % / тормоз
 //   p              состояние
 void stopEverything() {
@@ -849,7 +849,7 @@ void handleModuleCommand(char* line) {
       return;
     }
     if (!parseFloatToken(arg1, &degrees) || fabsf(degrees) > STEER_LIMIT_DEG) {
-      note(PSTR("w: угол вне ±32°"));
+      note(PSTR("w: угол вне ±85°"));
       return;
     }
     if (!zero_set) {
@@ -1167,7 +1167,7 @@ void handleServerSteer(char* module, char* value, char* extra) {
   } else {
     float degrees = 0.0f;
     if (!parseFloatToken(value, &degrees) || fabsf(degrees) > STEER_LIMIT_DEG) {
-      noteModule(module, PSTR("w: угол вне ±32°"));
+      noteModule(module, PSTR("w: угол вне ±85°"));
       return;
     }
     char angle[16];

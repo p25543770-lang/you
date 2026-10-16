@@ -125,7 +125,7 @@ def test_camera_manager_feed_and_get():
     assert cam_mgr.get_camera(0).is_active is True
 
 
-def test_slam_lidar_and_camera_api(client):
+def test_slam_lidar_and_camera_api(client, monkeypatch):
     from conftest import login
 
     login(client)
@@ -153,7 +153,16 @@ def test_slam_lidar_and_camera_api(client):
 
     # 4. POST /api/camera/0/frame и GET /api/camera/0/frame
     fake_frame = b"\xFF\xD8\xFF\xE0dummy_frame_data"
-    p_res = client.post("/api/camera/0/frame", data=fake_frame, content_type="image/jpeg")
+    # Приём кадров закрыт по умолчанию: подставить изображение без токена нельзя.
+    monkeypatch.delenv("RC_CAMERA_FEED_TOKEN", raising=False)
+    closed = client.post("/api/camera/0/frame", data=fake_frame, content_type="image/jpeg")
+    assert closed.status_code == 403 and closed.get_json()["error"] == "feed_disabled"
+    monkeypatch.setenv("RC_CAMERA_FEED_TOKEN", "feed-secret")
+    wrong = client.post("/api/camera/0/frame", data=fake_frame, content_type="image/jpeg",
+                        headers={"X-Camera-Token": "guess"})
+    assert wrong.status_code == 403 and wrong.get_json()["error"] == "bad_token"
+    p_res = client.post("/api/camera/0/frame", data=fake_frame, content_type="image/jpeg",
+                        headers={"X-Camera-Token": "feed-secret"})
     assert p_res.status_code == 200
 
     g_res = client.get("/api/camera/0/frame")
@@ -213,3 +222,14 @@ def test_lidar_status_shows_scan_when_points_arrive(client, operator):
     assert status["connected"] is True
     assert status["points_count"] == 2
     assert status["reason"].startswith("скан идёт")
+
+
+def test_kiosk_camera_feed_needs_token(kiosk_client, monkeypatch):
+    frame = b"\xFF\xD8\xFF\xE0frame"
+    monkeypatch.delenv("RC_CAMERA_FEED_TOKEN", raising=False)
+    assert kiosk_client.post("/api/camera/0/frame", data=frame, content_type="image/jpeg").status_code == 403
+    monkeypatch.setenv("RC_CAMERA_FEED_TOKEN", "feed-secret")
+    assert kiosk_client.post("/api/camera/0/frame", data=frame, content_type="image/jpeg").status_code == 403
+    ok = kiosk_client.post("/api/camera/0/frame", data=frame, content_type="image/jpeg",
+                           headers={"X-Camera-Token": "feed-secret"})
+    assert ok.status_code == 200

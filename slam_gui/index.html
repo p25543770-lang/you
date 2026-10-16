@@ -87,13 +87,13 @@
           <button class="refresh" id="btn-refresh">Обновить</button>
           <!-- добавлено пультом оператора: выход из сессии -->
           <a class="refresh" href="/exit" title="Завершить сеанс оператора">Выход</a>
-          <button class="estop" id="btn-estop">E-STOP</button>
+          <button class="estop" id="btn-estop" title="Программный стоп пульта: PWM 0 и тормоз на шасси. Не заменяет аварийный выключатель в силовой цепи.">СТОП ТЯГИ</button>
         </div>
       </header>
 
       <section id="view-dash" class="view dash">
         <div class="statusline" id="statusline">
-          <span><b>Режим:</b> <span id="mode-label">TELEOP · симуляция</span></span>
+          <span><b>Режим:</b> <span id="mode-label">ПУЛЬТ · симуляция</span></span>
           <span id="status-hint">WASD / стрелки · пробел — стоп · карта — основной экран</span>
         </div>
         <div class="metrics compact">
@@ -258,10 +258,11 @@
       <section id="view-mission" class="view hidden">
         <div class="panel">
           <div class="pt"><div><h3>FSM доставки</h3><p>реакции на знаки и светофор</p></div></div>
+          <p class="hint">Симуляция: Nav2 и планировщик миссий в этой сборке не подключены. Кнопки здесь ничего не отправляют на робот.</p>
           <div class="fsm" id="fsm"></div>
           <div class="mission-actions">
             <button class="primary" id="btn-start-mission">Старт миссии</button>
-            <button id="btn-pause-mission">Пауза Nav2</button>
+            <button id="btn-pause-mission">Пауза (симуляция)</button>
             <button id="btn-abort">Прервать</button>
           </div>
         </div>
@@ -282,12 +283,12 @@
 
       <section id="view-safety" class="view hidden">
         <div class="metrics">
-          <article class="metric"><div class="mi red"></div><div class="metric-top"><span>E-stop</span><b id="estop-state">ВЫКЛ</b></div></article>
+          <article class="metric"><div class="mi red"></div><div class="metric-top"><span>Стоп тяги</span><b id="estop-state">ВЫКЛ</b></div></article>
           <article class="metric"><div class="mi amber"></div><div class="metric-top"><span>Вотчдог связи</span><b id="wd">42 мс</b></div></article>
           <article class="metric"><div class="mi green"></div><div class="metric-top"><span>Порог АКБ</span><b>44.0 В</b></div></article>
           <article class="metric"><div class="mi blue"></div><div class="metric-top"><span>CRC ошибок</span><b id="crc">0</b></div></article>
         </div>
-        <p class="hint">Гейт /cmd_vel: e-stop, вотчдог UART, низкий SOC — публикация Twist блокируется.</p>
+        <p class="hint">Гейт симуляции в браузере: стоп тяги, вотчдог, низкий SOC. Публикации /cmd_vel в этой сборке нет — гейт на шасси не влияет; реальный стоп — «СТОП ТЯГИ» (команда на сервер).</p>
       </section>
 
       <section id="view-logs" class="view hidden">

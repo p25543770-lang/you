@@ -59,7 +59,7 @@
           <article class="rc-steering-card" data-rc-steering="${id}">
             <header><b>${id}</b><span data-status>нет связи</span></header>
             <div class="rc-steering-values"><span>Сейчас <b data-current>—</b></span><span>Цель <b data-target>0°</b></span></div>
-            <input data-range type="range" min="-32" max="32" step="1" value="0" aria-label="${id}, целевой угол" disabled>
+            <input data-range type="range" min="-85" max="85" step="1" value="0" aria-label="${id}, целевой угол" disabled>
             <div class="rc-steering-actions">
               <button type="button" data-calib disabled>Калибровка</button>
               <button type="button" data-origin disabled>Задать 0°</button>
@@ -344,7 +344,7 @@
       renderCard(id);
     });
     card.querySelectorAll('[data-step]').forEach((button) => button.addEventListener('click', () => {
-      range.value = String(Math.max(-32, Math.min(32, Number(range.value) + Number(button.dataset.step))));
+      range.value = String(Math.max(-85, Math.min(85, Number(range.value) + Number(button.dataset.step))));
       card.dataset.dirty = 'true';
       card.querySelector('[data-target]').textContent = Math.round(+range.value) + '°';
       renderCard(id);
@@ -394,7 +394,7 @@
   async function sendAngle(id) {
     if (!authorized) return unlock();
     const card = document.querySelector('[data-rc-steering="' + id + '"]');
-    const angle = Math.max(-32, Math.min(32, Number(card.querySelector('[data-range]').value)));
+    const angle = Math.max(-85, Math.min(85, Number(card.querySelector('[data-range]').value)));
     try {
       const { response, body } = await json('api/kiosk_steer', {
         method: 'POST', headers: { 'Content-Type': 'application/json', 'X-Robot-Control': 'steering' },
@@ -460,7 +460,7 @@
     return ({
       pin_required: 'PIN истёк · разблокируйте', module_offline: 'модуль не отвечает',
       serial_unavailable: 'USB-порт мастера недоступен', not_homed: 'сначала калибровка или 0° вручную',
-      module_busy: 'дождитесь остановки модуля', angle_limit: 'предел ±32°',
+      module_busy: 'дождитесь остановки модуля', angle_limit: 'предел ±85°',
       command_queue_full: 'очередь команд занята', control_not_supported: 'источник не поддерживает поворот'
     })[reason] || 'команда не принята';
   }
