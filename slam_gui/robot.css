@@ -513,12 +513,15 @@ body.soc-crit .kpi-sub { color: var(--err); }
   display: flex;
   flex-direction: column;
 }
+/* Карта сверху на всю ширину панели, показатели — одной строкой под ней:
+   так карте достаётся максимум места, а не колонка 200px справа. */
 .lidar-body {
   flex: 1 1 auto;
   min-height: 0;
   display: grid;
-  grid-template-columns: 1fr 200px;
-  gap: 18px;
+  grid-template-columns: 1fr;
+  grid-template-rows: minmax(0, 1fr) auto;
+  gap: 14px;
   align-items: stretch;
 }
 .lidar-map {
@@ -528,10 +531,13 @@ body.soc-crit .kpi-sub { color: var(--err); }
   border-radius: 14px;
   min-height: 0;
   aspect-ratio: 1/1;
+  /* Квадрат от доступной высоты строки; при узкой панели ограничен шириной
+     (отрисовка центрируется по меньшей стороне, см. drawLidar). */
+  height: 100%;
+  width: auto;
   max-width: 100%;
   align-self: center;
   justify-self: center;
-  width: 100%;
 }
 /* Старые встроенные веб-движки на борту (CEF/QtWebEngine/старый Android WebView)
    не умеют CSS aspect-ratio (добавлено только в 2021) — без него у .lidar-map
@@ -561,22 +567,23 @@ body.soc-crit .kpi-sub { color: var(--err); }
 
 .lidar-stats {
   margin: 0;
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 12px;
 }
 .lidar-stats > div {
   background: var(--bg-2);
   border: 1px solid var(--line);
   border-radius: 14px;
-  padding: 16px 20px;
+  padding: 12px 16px;
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 4px;
+  min-width: 0;
 }
 .lidar-stats dt {
   color: var(--muted);
-  font-size: 14px;
+  font-size: 13px;
   text-transform: uppercase;
   letter-spacing: 1.5px;
   font-weight: 700;
@@ -584,7 +591,8 @@ body.soc-crit .kpi-sub { color: var(--err); }
 }
 .lidar-stats dd {
   margin: 0;
-  font-size: 40px;
+  font-size: clamp(24px, 3vw, 34px);
+  line-height: 1.1;
   font-weight: 800;
   font-variant-numeric: tabular-nums;
   color: var(--text);
