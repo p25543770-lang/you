@@ -55,7 +55,7 @@ from flask import Flask, Response, jsonify, redirect, request
 from werkzeug.serving import make_server
 
 from robot_control import eventlog
-from robot_control.camera import CameraManager
+from robot_control.camera import CameraManager, feed_denied_reason
 from robot_control.config import PROJECT_ROOT, Config
 from robot_control.lidar import LidarManager, set_self_port
 from robot_control.lidar_settings import apply_lidar_settings, settings_payload
@@ -694,6 +694,9 @@ def create_kiosk_app(config: Config | None = None) -> Flask:
 
     @app.post("/api/camera/<int:cam_id>/frame")
     def api_kiosk_camera_feed(cam_id: int):
+        denied = feed_denied_reason(request.headers)
+        if denied:
+            return jsonify({"ok": False, "error": denied}), 403
         mgr = CameraManager.get_instance()
         data = request.get_data()
         if data:

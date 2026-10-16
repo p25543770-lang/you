@@ -299,9 +299,10 @@ def test_journal_endpoint_is_empty_and_honest_on_a_fresh_screen(kiosk_client):
     assert body["ok"] is True
     data = body["data"]
     assert data["demo"] is False              # это не демо-поток
-    assert data["entries"] == []
-    assert data["count"] == 0
-    assert data["levels"]["warn"] == 0
+    # Единственное допустимое событие на свежем экране — предупреждение о заводском PIN (оно настоящее).
+    assert [e for e in data["entries"] if "заводской" not in e.get("msg", "")] == []
+    assert data["count"] == len(data["entries"])
+    assert data["levels"]["warn"] == data["count"]
 
 
 def test_journal_records_real_pin_and_command_events(kiosk_app, kiosk_client):

@@ -1358,6 +1358,7 @@ class Vault:
             self.data["salt"] = secrets.token_hex(16)
             self.data["pinHash"] = self._hash(self.data["salt"], new)
             self.data["changedAt"] = self.clock()
+            self.data["pinChanged"] = True
             self._audit("pin_change", True, "PIN изменён")
             self._persist()
         return {"ok": True}

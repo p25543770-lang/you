@@ -719,3 +719,15 @@ def test_frame_ancestors_no_longer_allow_any_site(client):
     tokens = frame.replace("frame-ancestors", "").split()
     assert "http://*" not in tokens and "https://*" not in tokens
     assert "https://*.arena.ai" in tokens
+
+
+def test_factory_pin_warning_until_pin_is_changed(tmp_path, monkeypatch):
+    from robot_control import slam as slam_module
+
+    state = slam_module.build_state(mode="none", lock_file=tmp_path / "lock.json")
+    assert slam_module.warn_if_factory_pin(slam_module.load_backend(), state.vault) is True
+    # Значение PIN в тексте предупреждения не выводится (проверяем сам текст через лог).
+
+    state.vault.set_pin("7232", "915374")
+    assert slam_module.warn_if_factory_pin(slam_module.load_backend(), state.vault) is False
+    assert state.vault.data.get("pinChanged") is True

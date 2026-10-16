@@ -34,7 +34,7 @@ from pathlib import Path
 from flask import Blueprint, Response, jsonify, request, send_from_directory, session
 
 from robot_control import eventlog
-from robot_control.camera import CameraManager
+from robot_control.camera import CameraManager, feed_denied_reason
 from robot_control.lidar import (
     LidarManager,
     lidar_holds_port,
@@ -764,7 +764,22 @@ def build_state(mode="auto", ports=None, lock_file=None, pin=None,
         max_attempts=max_attempts or mod.MAX_ATTEMPTS,
         lock_ms=int((lock_sec if lock_sec is not None else mod.LOCK_MS / 1000.0) * 1000),
     )
+    warn_if_factory_pin(mod, vault)
     return mod.App(source, vault)
+
+
+def warn_if_factory_pin(mod, vault) -> bool:
+    """Записать предупреждение, если PIN кейса всё ещё заводской. Сам PIN не выводится."""
+    if vault.data.get("pinChanged"):
+        return False
+    try:
+        factory = vault._hash(vault.data["salt"], mod.DEFAULT_PIN) == vault.data["pinHash"]
+    except (KeyError, TypeError):
+        return False
+    if factory:
+        # Одна запись: журнал процесса получает предупреждение из обычного логирования.
+        log.warning("PIN кейса заводской: смените его (POST /api/lock/pin) до эксплуатации")
+    return factory
 
 
 def _send(name: str):
@@ -1147,6 +1162,10 @@ def create_blueprint(state, guard=None) -> Blueprint:
 
     @bp.post("/api/camera/<int:cam_id>/frame")
     def api_camera_feed(cam_id: int):
+        denied = feed_denied_reason(request.headers)
+        if denied:
+            status = 403
+            return jsonify({"ok": False, "error": denied}), status
         mgr = CameraManager.get_instance()
         data = request.get_data()
         if data:
