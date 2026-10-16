@@ -174,10 +174,14 @@
             <span class="panel-meta" id="lidar-meta">нет скана</span>
           </header>
           <div class="lidar-body">
-            <div class="lidar-map">
-              <canvas id="lidar-canvas" aria-label="Карта лидара"></canvas>
-              <p class="lidar-empty" id="lidar-empty">скана лидара нет</p>
-              <div class="robot-marker" aria-hidden="true">▲</div>
+            <!-- Область карты: её размеры читает robot.js, чтобы поставить
+                 квадрат по меньшей стороне (см. sizeLidarMap). -->
+            <div class="lidar-map-slot" id="lidar-map-slot">
+              <div class="lidar-map" id="lidar-map">
+                <canvas id="lidar-canvas" aria-label="Карта лидара"></canvas>
+                <p class="lidar-empty" id="lidar-empty">скана лидара нет</p>
+                <div class="robot-marker" aria-hidden="true">▲</div>
+              </div>
             </div>
             <dl class="lidar-stats">
               <div><dt>точек</dt><dd id="lidar-count">—</dd></div>
