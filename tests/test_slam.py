@@ -437,7 +437,10 @@ def test_master_source_queues_only_safe_module_angle_commands():
     assert result == {"ok": True, "queued": True, "module": "FR", "angle": 12.5}
     assert src.commands.get_nowait() == b"w FR 12.5\n"
 
-    assert src.steer_module("FR", 33, now=100.2)["reason"] == "angle_limit"
+    assert src.steer_module("FR", 85.5, now=100.2)["reason"] == "angle_limit"
+    assert src.steer_module("FR", -85.5, now=100.2)["reason"] == "angle_limit"
+    assert src.steer_module("FR", 85, now=100.2)["ok"] is True
+    assert src.steer_module("FR", -85, now=100.2)["ok"] is True
     assert src.steer_module("FL", 10, now=100.2)["reason"] == "module_offline"
     src.feed("@TLM mod=RL deg=0 tgt=0 moving=0 cal=0 cycle=0 calib=0", now=100.0)
     assert src.steer_module("RL", 10, now=100.2)["reason"] == "not_homed"

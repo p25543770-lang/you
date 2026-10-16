@@ -143,12 +143,13 @@ def test_drive_percent_never_exceeds_limit():
 def test_gentle_yaw_gives_front_and_rear_steer_within_limit():
     plan = plan_chassis(Twist(0.2, 0.1), Geometry(wheelbase=0.6, track=0.5))
     assert plan.steer_deg["FL"] > 0 and plan.steer_deg["RL"] < 0
-    assert all(abs(a) <= 32.0 for a in plan.steer_deg.values())
+    assert all(abs(a) <= 85.0 for a in plan.steer_deg.values())
 
 
 def test_too_sharp_turn_is_refused_not_clipped():
+    # Передний модуль уходит за 85°: команда отказывается целиком, а не обрезается.
     with pytest.raises(PlanError):
-        plan_chassis(Twist(0.2, 0.3), Geometry(wheelbase=0.6))
+        plan_chassis(Twist(0.2, 0.9), Geometry(wheelbase=0.6))
 
 
 def test_rotation_in_place_and_reverse_are_refused():

@@ -424,7 +424,7 @@ class MasterSource:
     supports_calibration = True
     STALE_S = 1.0
     DRIVE_STALE_S = 0.75
-    MAX_STEER_DEG = 32.0
+    MAX_STEER_DEG = 85.0
     MAX_DRIVE_PERCENT = 20
     MESSAGE_LIMIT = 40
 

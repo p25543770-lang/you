@@ -421,7 +421,7 @@ def test_log_panel_shows_real_journal_lines(tmp_path):
     payload = real_payload()
     payload["logs"] = journal_payload([
         journal_entry(1, "ok", "лидар на связи (serial:ttyUSB1, 360 точек)", source="лидар"),
-        journal_entry(2, "warn", "руление отклонено: угол вне допуска ±32°", source="управление"),
+        journal_entry(2, "warn", "руление отклонено: угол вне допуска ±85°", source="управление"),
         journal_entry(3, "warn", "PIN не принят (бортовой экран): неверный PIN",
                       source="pin", repeat=4),
     ])
@@ -430,7 +430,7 @@ def test_log_panel_shows_real_journal_lines(tmp_path):
     assert report["renderErrors"] == [], report["renderErrors"]
     assert [line["msg"].split("  ×")[0] for line in lines] == [
         "лидар на связи (serial:ttyUSB1, 360 точек)",
-        "руление отклонено: угол вне допуска ±32°",
+        "руление отклонено: угол вне допуска ±85°",
         "PIN не принят (бортовой экран): неверный PIN",
     ]
     assert [line["level"] for line in lines] == ["ok", "warn", "warn"]

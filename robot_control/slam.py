@@ -61,7 +61,7 @@ KIOSK_URL_PATH = "/kiosk"
 #: Ввод PIN открывает короткую сессию для руления и удерживаемой тяги.
 STEERING_SESSION_KEY = "kiosk_steering_expires"
 STEERING_SESSION_TTL_S = 5 * 60
-STEERING_ANGLE_LIMIT_DEG = 32.0
+STEERING_ANGLE_LIMIT_DEG = 85.0
 STEERING_COMMAND_HEADER = "X-Robot-Control"
 STEERING_COMMAND_HEADER_VALUE = "steering"
 DRIVE_COMMAND_HEADER_VALUE = "drive"
