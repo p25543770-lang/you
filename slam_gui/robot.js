@@ -320,6 +320,13 @@
 
   // Подробная диагностика берётся только из статуса сервера: экран не угадывает
   // причину отказа. Без свежих реальных точек телеметрия закрывается блокером.
+  // «Продолжить без лидара»: оператор сам закрыл плашку. Телеметрия
+  // открывается, скан лидара при этом не выдумывается (карта пустая, «скана
+  // нет»), а внизу экрана остаётся предупреждение — по нему плашка открывается
+  // снова. Как только лидар заработал, флаг сбрасывается: следующая потеря
+  // скана снова закроет экран.
+  let lidarDismissed = false;
+
   function renderLidarBlocker(d) {
     const blocker = $('lidar-blocker');
     if (!blocker) return;
@@ -327,7 +334,15 @@
     const pts = d ? lidarPoints(d) : [];
     const demo = d ? lidarIsDemo(d) : false;
     const working = live && d.linkOk !== false && st && st.connected === true && pts.length > 0 && !demo;
-    blocker.hidden = !!working;
+    if (working) lidarDismissed = false;
+    const warnBar = $('lidar-warn-bar');
+    if (warnBar) {
+      warnBar.hidden = !!working || !lidarDismissed;
+      if (!working && lidarDismissed) {
+        setText($('lidar-warn-text'), st && st.reason ? String(st.reason) : (live ? 'скана нет' : 'нет связи с сервером'));
+      }
+    }
+    blocker.hidden = !!working || lidarDismissed;
     if (working) return;
 
     const title = $('lidar-block-title');
@@ -617,6 +632,25 @@
     });
   }
 
+  function initLidarContinue() {
+    const btn = $('lidar-continue-btn');
+    if (btn) {
+      btn.addEventListener('click', (ev) => {
+        if (ev && ev.preventDefault) ev.preventDefault();
+        lidarDismissed = true;
+        renderLidarBlocker(lastData || {});
+      });
+    }
+    const bar = $('lidar-warn-bar');
+    if (bar) {
+      bar.addEventListener('click', (ev) => {
+        if (ev && ev.preventDefault) ev.preventDefault();
+        lidarDismissed = false;
+        renderLidarBlocker(lastData || {});
+      });
+    }
+  }
+
   // На основной карте остаётся короткая подпись; при отсутствии лидара
   // блокер показывает оператору серверную причину и не выдаёт демо за реальный скан.
   function renderLidar(d) {
@@ -710,6 +744,7 @@
     loop();
     initKioskControls();
     initLidarFind();
+    initLidarContinue();
     initSwipePage();
     initSteeringControls();
   }

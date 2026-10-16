@@ -61,9 +61,16 @@
           <p id="lidar-place-note" class="lidar-place-note" hidden></p>
           <p class="lidar-ports-note">Где лидар стоит в роботе, программа знать не может: она видит только USB-порт. По пути <code>by-path</code> виден разъём или хаб; соответствие «разъём → место на роботе» пишет человек (<code>RC_LIDAR_PLACE_NOTE</code> в <code>.env</code>).</p>
         </section>
+        <div class="lidar-block-actions">
+          <button type="button" id="lidar-continue-btn" class="lidar-continue-btn">Продолжить без лидара</button>
+          <span class="lidar-continue-note">Телеметрия откроется, но скана лидара не будет; предупреждение останется вверху экрана.</span>
+        </div>
         <small>Статистика и телеметрия скрыты до получения свежего реального скана. Экран проверяет подключение автоматически.</small>
       </div>
     </section>
+    <button type="button" id="lidar-warn-bar" class="lidar-warn-bar" hidden>
+      <b>ЛИДАР НЕ ГОТОВ</b> <span id="lidar-warn-text">скана нет</span> <u>открыть диагностику</u>
+    </button>
 
     <div class="cols">
       <!-- Левая колонка: АКБ + шасси -->

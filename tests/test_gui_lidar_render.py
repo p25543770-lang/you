@@ -210,7 +210,7 @@ def ports_payload(**overview_overrides) -> dict:
 
 
 def render(screen: str, payload: dict, tmp_path: Path, *, demo: bool = False,
-           click_find: bool = False) -> dict:
+           click_find: bool = False, click_continue: bool = False) -> dict:
     """Прогоняет ``slam_gui/<screen>.js`` на заготовленном ответе API.
 
     ``demo=True`` — тот же экран с явно включённым демо-режимом (``?demo=1``):
@@ -224,6 +224,8 @@ def render(screen: str, payload: dict, tmp_path: Path, *, demo: bool = False,
         env["HARNESS_DEMO"] = "1"
     if click_find:
         env["HARNESS_CLICK_FIND"] = "1"
+    if click_continue:
+        env["HARNESS_CLICK_CONTINUE"] = "1"
     result = subprocess.run(
         [NODE, str(HARNESS), screen, str(payload_file)],
         cwd=str(ROOT), capture_output=True, text=True, timeout=120, env=env,
@@ -621,3 +623,25 @@ def test_console_names_port_roles_and_paths(tmp_path):
     assert "by-path platform-fd500000.pcie-pci-0000:01:00.0-usb-0:1.3:1.0-port0" in text
     assert "модуль шасси" in text and "занят другим процессом" in text
     assert report["renderErrors"] == []
+
+
+def test_kiosk_continue_button_opens_telemetry_but_keeps_the_warning(tmp_path):
+    """«Продолжить без лидара»: плашка уходит, предупреждение остаётся, скан не выдумывается."""
+    report = render("robot", ports_payload(), tmp_path, click_continue=True)
+    assert report["lidarBlocked"] is True            # до нажатия экран закрыт
+    after, back = report["continueFlow"]
+    assert after["blocked"] is False
+    assert after["warn"] is True
+    assert "порт" in after["warnText"] or "лидар" in after["warnText"]
+    assert after["dots"] == 0 and after["emptyText"] == "скана лидара нет"
+    # Клик по предупреждению возвращает диагностику.
+    assert back["blocked"] is True and back["warn"] is False
+    assert report["renderErrors"] == []
+
+
+def test_kiosk_warning_bar_is_hidden_by_default(tmp_path):
+    report = render("robot", ports_payload(), tmp_path)
+    assert report["continueFlow"] == []
+    working = render("robot", real_payload(), tmp_path, click_continue=True)
+    # С рабочим лидаром ни плашки, ни предупреждения нет — кнопка ничего не меняет.
+    assert all(step["blocked"] is False and step["warn"] is False for step in working["continueFlow"])

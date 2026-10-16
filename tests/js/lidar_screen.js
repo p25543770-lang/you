@@ -286,6 +286,16 @@ const sleep = (ms) => new Promise((resolve) => originalSetTimeout(resolve, ms));
     className: Array.from(li.classList.set).join(' '),
     text: textOf(li),
   }));
+  /* «Продолжить без лидара»: клик, кадр отрисовки, затем — состояние плашки
+   * и предупреждения; второй клик по предупреждению возвращает плашку. */
+  const continueFlow = [];
+  if (screen === 'robot' && process.env.HARNESS_CLICK_CONTINUE === '1') {
+    const snap = () => ({ blocked: !byId('lidar-blocker').hidden, warn: !byId('lidar-warn-bar').hidden,
+                          warnText: byId('lidar-warn-text').textContent, emptyText: byId('lidar-empty').textContent,
+                          dots: byId('lidar-canvas').dots.length });
+    byId('lidar-continue-btn').click(); continueFlow.push(snap());
+    byId('lidar-warn-bar').click(); continueFlow.push(snap());
+  }
   if (screen === 'robot' && process.env.HARNESS_CLICK_FIND === '1') {
     byId('lidar-find-btn').click();
     await sleep(10);
@@ -294,6 +304,7 @@ const sleep = (ms) => new Promise((resolve) => originalSetTimeout(resolve, ms));
     screen,
     navigation,
     lidarPorts,
+    continueFlow,
     lidarFindStatus: byId('lidar-find-status').textContent,
     lidarFindButton: byId('lidar-find-btn').textContent,
     lidarPortsEmpty: byId('lidar-ports-empty').hidden ? '' : byId('lidar-ports-empty').textContent,
