@@ -41,6 +41,18 @@
       </div>
     </header>
 
+    <section id="lidar-blocker" class="lidar-blocker" role="alert" aria-live="assertive" hidden>
+      <div class="lidar-blocker-card">
+        <span class="lidar-blocker-mark" aria-hidden="true">!</span>
+        <p class="lidar-blocker-kicker">БЕЗОПАСНОСТЬ · ЛИДАР</p>
+        <h1 id="lidar-block-title">Ожидание лидара</h1>
+        <p id="lidar-block-reason" class="lidar-block-reason">Получаем статус датчика…</p>
+        <p id="lidar-block-details" class="lidar-block-details" hidden></p>
+        <p id="lidar-block-hint" class="lidar-block-hint" hidden></p>
+        <small>Статистика и телеметрия скрыты до получения свежего реального скана. Экран проверяет подключение автоматически.</small>
+      </div>
+    </section>
+
     <div class="cols">
       <!-- Левая колонка: АКБ + шасси -->
       <div class="col-left">

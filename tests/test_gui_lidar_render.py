@@ -360,6 +360,23 @@ def test_missing_scan_shows_reason_and_usb_diagnostics(screen, tmp_path):
     assert report["renderErrors"] == []
 
 
+def test_kiosk_hides_telemetry_until_real_lidar_scan(tmp_path):
+    working = render("robot", real_payload(), tmp_path)
+    assert working["lidarBlocked"] is False
+
+    missing = render("robot", empty_payload(), tmp_path)
+    assert missing["lidarBlocked"] is True
+    assert "лидар не ответил ни на одном из 2 портов" in missing["lidarBlockReason"]
+    assert "проверь кабель и питание лидара" in missing["lidarBlockHint"]
+    assert "USB/serial-порты доступны" in missing["lidarBlockDetails"]
+
+
+def test_kiosk_does_not_treat_demo_scan_as_working_lidar(tmp_path):
+    report = render("robot", demo_payload(), tmp_path)
+    assert report["lidarBlocked"] is True
+    assert "реального лидара нет" in report["lidarBlockReason"]
+
+
 @pytest.mark.parametrize("screen", SCREENS)
 def test_missing_scan_meta_text(screen, tmp_path):
     report = render(screen, empty_payload(), tmp_path)

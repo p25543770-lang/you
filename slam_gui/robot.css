@@ -1043,6 +1043,79 @@ body[data-theme="ice"] { --bg:#0a1418; --bg-2:#0f1f24; --panel:#14272e; --panel-
 /* ------------------------ Маленькие экраны (fallback) ------------------------ */
 /* ========================= СВАЙП-ЭКРАН: два направления с главного ========================= */
 .kiosk { position: relative; }
+
+/* Телеметрия намеренно закрыта, пока не подтверждён свежий реальный скан. */
+.lidar-blocker {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  display: grid;
+  place-items: center;
+  padding: clamp(18px, 5vw, 64px);
+  background: rgba(5, 7, 9, .94);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  color: var(--text);
+}
+.lidar-blocker[hidden] { display: none !important; }
+.lidar-blocker-card {
+  width: min(760px, 100%);
+  max-height: 100%;
+  overflow: auto;
+  padding: clamp(24px, 5vw, 52px);
+  border: 1px solid #63302b;
+  border-radius: 24px;
+  background: linear-gradient(145deg, #1a1414, #101214 72%);
+  box-shadow: 0 24px 100px rgba(0,0,0,.55), 0 0 48px rgba(255,80,65,.08);
+  text-align: center;
+}
+.lidar-blocker-mark {
+  display: grid;
+  place-items: center;
+  width: 64px;
+  height: 64px;
+  margin: 0 auto 18px;
+  border: 2px solid #ff6860;
+  border-radius: 50%;
+  color: #ff6860;
+  font-size: 38px;
+  font-weight: 900;
+  box-shadow: 0 0 28px rgba(255,104,96,.16);
+}
+.lidar-blocker-kicker {
+  margin: 0 0 10px;
+  color: #ff8179;
+  font-size: 12px;
+  font-weight: 900;
+  letter-spacing: .18em;
+}
+.lidar-blocker h1 { margin: 0 0 18px; font-size: clamp(28px, 5vw, 48px); }
+.lidar-block-reason {
+  margin: 0;
+  padding: 16px 18px;
+  border: 1px solid #4b302d;
+  border-radius: 12px;
+  background: rgba(0,0,0,.24);
+  color: #fff0ef;
+  font: 600 clamp(15px, 2vw, 20px)/1.5 var(--mono);
+  overflow-wrap: anywhere;
+}
+.lidar-block-details, .lidar-block-hint {
+  margin: 14px 0 0;
+  color: #d1c7c6;
+  font-size: clamp(14px, 1.8vw, 17px);
+  line-height: 1.55;
+  overflow-wrap: anywhere;
+}
+.lidar-block-hint { color: #ffd28a; font-weight: 700; }
+.lidar-blocker-card > small {
+  display: block;
+  margin-top: 22px;
+  color: #9b9697;
+  font-size: 13px;
+  line-height: 1.5;
+}
+
 .swipe-hint-bar {
   position: absolute;
   left: 50%;
