@@ -249,7 +249,7 @@
   /** Символ текущего состояния окна для заголовка вкладки (document.title). */
   function titleBadge() {
     const parts = [];
-    if (typeof state !== 'undefined' && state.estop) parts.push('E-STOP');
+    if (typeof state !== 'undefined' && state.estop) parts.push('СТОП ТЯГИ');
     if (lock.open) parts.push('ячейка открыта');
     if (typeof state !== 'undefined' && state.serviceStand) parts.push('стенд');
     return parts.length ? '[' + parts.join(' · ') + '] ' : '';
@@ -506,7 +506,7 @@
           <tr><td><kbd>Esc</kbd></td><td>закрыть окно/палитру</td></tr>
         </table>
         <p class="csl-modal-text">Тяга подаётся кнопками с удержанием — «мёртвая рука»: отпустили кнопку,
-        и модуль получает нулевую ШИМ. Команды разрешены только в режиме «стенд» и вне E-STOP.</p>`,
+        и модуль получает нулевую ШИМ. Команды разрешены только в режиме «стенд» и вне «СТОП ТЯГИ».</p>`,
       okText: 'Понятно',
       cancelText: null,
     });
@@ -546,7 +546,7 @@
       { title: (settings.sound ? 'Выключить' : 'Включить') + ' звук', hint: 'Alt+Z', run: () => setSound(!settings.sound) },
       { title: (settings.large ? 'Обычный' : 'Крупный') + ' интерфейс', hint: 'Alt+A', run: () => setLarge(!settings.large) },
       { title: 'Справка: горячие клавиши', hint: '', run: showHelp },
-      { title: (typeof state !== 'undefined' && state.estop ? 'Снять' : 'Включить') + ' E-STOP', hint: 'Space', run: () => { const b = $('btn-estop'); if (b) b.click(); } },
+      { title: (typeof state !== 'undefined' && state.estop ? 'Снять' : 'Включить') + ' стоп тяги', hint: 'Space', run: () => { const b = $('btn-estop'); if (b) b.click(); } },
     ]);
   }
 
@@ -687,7 +687,7 @@
     if (typeof state === 'undefined') return;
     const estop = $('csl-tb-estop');
     if (estop) {
-      estop.textContent = state.estop ? 'E-STOP' : 'движение разрешено';
+      estop.textContent = state.estop ? 'СТОП ТЯГИ' : 'движение разрешено';
       estop.className = 'csl-chip ' + (state.estop ? 'csl-chip-locked' : 'csl-chip-open');
     }
     const l = $('csl-tb-lock');
@@ -1040,7 +1040,7 @@
 
   function serviceInterlock() {
     if (typeof state === 'undefined') return 'Симуляция недоступна';
-    if (state.estop) return 'Снимите E-STOP';
+    if (state.estop) return 'Снимите стоп тяги';
     if (!state.serviceStand) return 'Включите «Сервисный режим · стенд»';
     return null;
   }
@@ -1157,7 +1157,7 @@
       const chip = $('csl-state-' + mm.id);
       if (chip) {
         // Приоритет: авария → активное удержание тяги → хоминг → движение → готов.
-        const st = state.estop ? ['E-STOP', 'locked']
+        const st = state.estop ? ['СТОП ТЯГИ', 'locked']
           : holds[mm.id] ? ['УДЕРЖАНИЕ', 'open']
           : !m.homed ? ['ХОМИНГ', 'locked']
           : Math.abs(c.pwm) > 0.5 ? ['ДВИЖЕНИЕ', 'open'] : ['ГОТОВ', 'closed'];

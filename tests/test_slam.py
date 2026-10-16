@@ -123,7 +123,13 @@ def test_operator_drive_requires_login_pin_and_drive_header(app, client, operato
     assert source.commands == [8.0]
 
     client.post("/api/kiosk_lock/session/end", json={})
-    assert client.post("/api/drive", json={"percent": 0}, headers=header).status_code == 401
+    # Ненулевая тяга без PIN по-прежнему запрещена.
+    assert client.post("/api/drive", json={"percent": 5}, headers=header).status_code == 401
+    assert source.commands == [8.0]
+    # СТОП (0 %) разрешён без PIN: он только гасит PWM и включает тормоз.
+    stopped = client.post("/api/drive", json={"percent": 0}, headers=header)
+    assert stopped.status_code == 200
+    assert source.commands == [8.0, 0]
 
 
 def test_api_health_reports_source(client, operator):
@@ -595,3 +601,121 @@ def test_master_source_reports_each_module_and_empty_for_silent_ones():
     stale = src.read(now=102.0)                             # старше STALE_S — связи нет
     assert stale["linkOk"] is False
     assert all(m["online"] is False for m in stale["motors"])
+
+
+# ------------------------- СТОП тяги и замок кейса ------------------------- #
+def test_stop_is_accepted_without_pin_but_motion_is_not(app, client, operator):
+    """СТОП (0 %) — единственная команда тяги без PIN; проверка заголовка и входа остаётся."""
+    class FakeDriveSource:
+        name = "master"
+        supports_drive = True
+
+        def __init__(self):
+            self.commands = []
+
+        def drive(self, percent):
+            self.commands.append(percent)
+            return {"ok": True, "percent": round(percent)}
+
+    source = FakeDriveSource()
+    app.extensions["rc_slam"].source = source
+    header = {"X-Robot-Control": "drive"}
+    login(client)
+    assert client.post("/api/drive", json={"percent": 0}).status_code == 400  # нет заголовка
+    assert client.post("/api/drive", json={"percent": 0}, headers=header).status_code == 200
+    assert client.post("/api/drive", json={"percent": -3}, headers=header).status_code == 401
+    # Тело, которое не является чистым СТОПом, без PIN не проходит (401 раньше разбора тела).
+    assert client.post("/api/drive", json={"percent": 0.0, "x": 1}, headers=header).status_code == 401
+    assert client.post("/api/drive", json={"percent": False}, headers=header).status_code == 401
+    assert source.commands == [0]
+
+
+def test_api_stop_relays_to_kiosk_and_reports_real_result(app, client, operator):
+    """Пульт 8080 не владеет портом: СТОП уходит на бортовой экран и возвращается его ответ."""
+    import http.server
+    import json
+    import threading
+
+    received = []
+
+    class Kiosk(http.server.BaseHTTPRequestHandler):
+        def do_POST(self):
+            length = int(self.headers.get("Content-Length") or 0)
+            body = json.loads(self.rfile.read(length) or b"{}")
+            received.append((self.path, self.headers.get("X-Robot-Control"), body))
+            payload = json.dumps({"ok": True, "queued": True, "percent": 0}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Kiosk)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    try:
+        class PeerSource:
+            name = "master-peer"
+            supports_drive = False
+            peer_url = "http://127.0.0.1:%d/api/kiosk_state" % server.server_address[1]
+
+        app.extensions["rc_slam"].source = PeerSource()
+        login(client)
+        assert client.post("/api/stop", json={}).status_code == 400  # нет заголовка
+        response = client.post("/api/stop", json={}, headers={"X-Robot-Control": "drive"})
+        assert response.status_code == 200
+        assert response.get_json()["ok"] is True
+        assert received == [("/api/kiosk_drive", "drive", {"percent": 0})]
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_api_stop_reports_unreachable_kiosk_honestly(app, client, operator):
+    class PeerSource:
+        name = "master-peer"
+        supports_drive = False
+        peer_url = "http://127.0.0.1:9/api/kiosk_state"  # порт, на котором никто не слушает
+
+    app.extensions["rc_slam"].source = PeerSource()
+    login(client)
+    response = client.post("/api/stop", json={}, headers={"X-Robot-Control": "drive"})
+    assert response.status_code == 503
+    assert response.get_json() == {"ok": False, "reason": "kiosk_unreachable"}
+
+
+def test_stop_url_is_derived_from_peer_telemetry_url():
+    from robot_control.slam import is_stop_request, stop_url_for
+
+    assert stop_url_for("http://127.0.0.1:8090/api/kiosk_state") == "http://127.0.0.1:8090/api/kiosk_drive"
+    assert is_stop_request({"percent": 0}) and is_stop_request({"percent": 0.0})
+    assert not is_stop_request({"percent": 0, "extra": 1})
+    assert not is_stop_request({"percent": False})
+    assert not is_stop_request(None)
+
+
+def test_lock_without_external_command_is_logged_as_software_only(app, client, operator, monkeypatch):
+    """Без RUS_SLAM_LOCK_CMD открытие — только программное. Журнал должен сказать это прямо."""
+    from robot_control import slam as slam_module
+
+    monkeypatch.delenv("RUS_SLAM_LOCK_CMD", raising=False)
+    messages = []
+    monkeypatch.setattr(slam_module.eventlog, "record",
+                        lambda level, message, **kw: messages.append((level, message)))
+    login(client)
+    response = client.post("/api/lock/open", json={"pin": DEFAULT_PIN})
+    assert response.status_code == 200
+    assert response.get_json()["hardware"] == "software"
+    assert any(level == "warn" and "ТОЛЬКО программно" in text for level, text in messages)
+
+
+def test_frame_ancestors_no_longer_allow_any_site(client):
+    """Clickjacking: пульт не встраивается чужими сайтами, только доменами превью."""
+    csp = client.get("/login").headers["Content-Security-Policy"]
+    frame = [part for part in csp.split(";") if "frame-ancestors" in part][0]
+    assert "'self'" in frame
+    tokens = frame.replace("frame-ancestors", "").split()
+    assert "http://*" not in tokens and "https://*" not in tokens
+    assert "https://*.arena.ai" in tokens

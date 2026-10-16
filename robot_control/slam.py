@@ -20,12 +20,15 @@ from __future__ import annotations
 
 import glob
 import importlib.util
+import json
 import logging
 import os
 import math
 import re
 import threading
 import time
+import urllib.error
+import urllib.request
 from pathlib import Path
 
 from flask import Blueprint, Response, jsonify, request, send_from_directory, session
@@ -231,6 +234,87 @@ _LIDAR_PREFIX_RE = re.compile(r"(?i)(?:^|(?<=[\s(]))лидар:\s*")
 #: Последнее состояние лидара, о котором уже написано в журнал.
 _lidar_note: tuple | None = None
 _lidar_note_lock = threading.Lock()
+
+
+def is_stop_request(body) -> bool:
+    """Команда СТОП: тяга ровно 0 %. Она только гасит PWM и включает тормоз.
+
+    Такая команда не даёт движения, поэтому её не блокирует PIN-сессия:
+    иначе после истечения PIN оператор не мог бы остановить шасси с пульта.
+    Заголовок ``X-Robot-Control`` и вход оператора по-прежнему обязательны.
+    Любая ненулевая тяга, лимит 20 % и PIN для неё не меняются.
+    """
+    if not isinstance(body, dict) or set(body) != {"percent"}:
+        return False
+    value = body.get("percent")
+    return not isinstance(value, bool) and isinstance(value, (int, float)) and value == 0
+
+
+def stop_url_for(peer_url: str) -> str:
+    """Адрес команды тяги бортового экрана по его адресу телеметрии."""
+    base = str(peer_url or "").split("/api/", 1)[0].rstrip("/")
+    return base + "/api/kiosk_drive"
+
+
+def relay_stop(peer_url: str, timeout: float = 1.5):
+    """Переслать СТОП на бортовой экран (владелец порта мастера). Возвращает (тело, статус)."""
+    url = stop_url_for(peer_url)
+    request_obj = urllib.request.Request(
+        url, data=b'{"percent": 0}', method="POST",
+        headers={"Content-Type": "application/json", "X-Robot-Control": DRIVE_COMMAND_HEADER_VALUE},
+    )
+    try:
+        with urllib.request.urlopen(request_obj, timeout=timeout) as response:
+            body = json.loads(response.read().decode("utf-8", "replace") or "{}")
+            return body, 200 if body.get("ok") else 409
+    except urllib.error.HTTPError as exc:
+        try:
+            body = json.loads(exc.read().decode("utf-8", "replace") or "{}")
+        except (ValueError, OSError):
+            body = {}
+        body.setdefault("ok", False)
+        body.setdefault("reason", "kiosk_refused")
+        return body, exc.code or 502
+    except (urllib.error.URLError, OSError, ValueError):
+        return {"ok": False, "reason": "kiosk_unreachable"}, 503
+
+
+#: Русский текст причины отказа при остановке тяги (для журнала).
+STOP_REASON_TEXT = {
+    "kiosk_unreachable": "бортовой экран не отвечает",
+    "kiosk_refused": "бортовой экран отказал",
+    "serial_unavailable": "UART мастера недоступен",
+    "module_offline": "модуль не на связи",
+    "command_queue_full": "очередь команд переполнена",
+    "control_not_supported": "этот пульт не управляет шасси",
+    "command_failed": "команда не выполнена",
+}
+
+
+def note_stop_result(result, *, where: str) -> None:
+    """Записать в журнал, подтверждена ли остановка тяги сервером (а не только экраном)."""
+    if (result or {}).get("ok"):
+        eventlog.record("info", "СТОП тяги подтверждён (%s): PWM 0, тормоз" % where, source="тяга")
+        return
+    reason = str((result or {}).get("reason", "") or "")
+    text = STOP_REASON_TEXT.get(reason, reason or "неизвестная причина")
+    eventlog.record("err", "СТОП тяги НЕ подтверждён (%s): %s — проверьте шасси" % (where, text),
+                    source="тяга")
+
+
+def note_lock_hardware(result, action: str) -> None:
+    """Честно записать, что сделал замок кейса: физически или только программно."""
+    mode = str((result or {}).get("hardware", "") or "")
+    verb = "открыт" if action == "open" else "закрыт"
+    env = "RUS_SLAM_LOCK_CMD" if action == "open" else "RUS_SLAM_LOCK_CMD_CLOSE"
+    if mode == "hardware":
+        eventlog.record("info", "кейс %s: внешняя команда замка выполнена (%s)" % (verb, env), source="замок")
+    elif mode == "software":
+        eventlog.record("warn", "кейс %s ТОЛЬКО программно: %s не задана, физического замка нет"
+                        % (verb, env), source="замок")
+    elif mode == "error":
+        eventlog.record("err", "кейс: команда замка (%s) не выполнена — физическое состояние неизвестно"
+                        % env, source="замок")
 
 
 def note_lidar_status(status) -> None:
@@ -879,11 +963,15 @@ def create_blueprint(state, guard=None) -> Blueprint:
     def api_kiosk_lock_open():
         body = request.get_json(silent=True) or {}
         result = state.open_lock(str(body.get("pin", "")))
+        if result.get("ok"):
+            note_lock_hardware(result, "open")
         return jsonify(result), 200 if result.get("ok") else 403
 
     @bp.post("/api/kiosk_lock/close")
     def api_kiosk_lock_close():
-        return jsonify(state.close_lock())
+        result = state.close_lock()
+        note_lock_hardware(result, "close")
+        return jsonify(result)
 
     @bp.post("/api/kiosk_steer")
     def api_kiosk_steer():
@@ -919,10 +1007,11 @@ def create_blueprint(state, guard=None) -> Blueprint:
     def api_kiosk_drive():
         if request.headers.get(STEERING_COMMAND_HEADER) != DRIVE_COMMAND_HEADER_VALUE:
             return jsonify({"ok": False, "reason": "request_header_required"}), 400
-        if not steering_access_valid():
+        body = request.get_json(silent=True)
+        if not steering_access_valid() and not is_stop_request(body):
             note_pin_required("тяга")
             return jsonify({"ok": False, "reason": "pin_required"}), 401
-        result, status = dispatch_drive_command(state.source, request.get_json(silent=True))
+        result, status = dispatch_drive_command(state.source, body)
         return jsonify(result), status
 
     # -------------------------------- API -------------------------------- #
@@ -945,9 +1034,32 @@ def create_blueprint(state, guard=None) -> Blueprint:
     def api_drive():
         if request.headers.get(STEERING_COMMAND_HEADER) != DRIVE_COMMAND_HEADER_VALUE:
             return jsonify({"ok": False, "reason": "request_header_required"}), 400
-        if not steering_access_valid():
+        body = request.get_json(silent=True)
+        if not steering_access_valid() and not is_stop_request(body):
             return jsonify({"ok": False, "reason": "pin_required"}), 401
-        result, status = dispatch_drive_command(state.source, request.get_json(silent=True))
+        result, status = dispatch_drive_command(state.source, body)
+        return jsonify(result), status
+
+    @bp.post("/api/stop")
+    @guard
+    def api_stop():
+        """СТОП тяги с пульта: команда PWM 0 и тормоз на шасси.
+
+        Пульт 8080 не владеет портом мастера, поэтому команда пересылается на
+        бортовой экран (8090). Ответ — только реальный итог: подтверждён ли стоп.
+        Это программная остановка; аварийный выключатель в силовой цепи остаётся обязательным.
+        """
+        if request.headers.get(STEERING_COMMAND_HEADER) != DRIVE_COMMAND_HEADER_VALUE:
+            return jsonify({"ok": False, "reason": "request_header_required"}), 400
+        source = state.source
+        if getattr(source, "supports_drive", False):
+            result, status = dispatch_drive_command(source, {"percent": 0})
+            where = "пульт"
+        else:
+            peer = getattr(source, "peer_url", None) or peer_kiosk_url()
+            result, status = relay_stop(peer)
+            where = "бортовой экран"
+        note_stop_result(result, where=where)
         return jsonify(result), status
 
     # ----------------------------- ЛИДАР --------------------------------- #
@@ -1086,12 +1198,16 @@ def create_blueprint(state, guard=None) -> Blueprint:
     def api_lock_open():
         body = request.get_json(silent=True) or {}
         result = state.open_lock(str(body.get("pin", "")))
+        if result.get("ok"):
+            note_lock_hardware(result, "open")
         return jsonify(result), 200 if result.get("ok") else 403
 
     @bp.post("/api/lock/close")
     @guard
     def api_lock_close():
-        return jsonify(state.close_lock())
+        result = state.close_lock()
+        note_lock_hardware(result, "close")
+        return jsonify(result)
 
     @bp.post("/api/lock/pin")
     @guard

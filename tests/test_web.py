@@ -82,12 +82,13 @@ def test_login_success_gives_session_and_redirect(app, client, operator):
     assert cookie.secure is False  # RC_COOKIE_SECURE не включён
 
 
-def test_panel_after_login_is_a_stub(client, operator):
-    """Служебная страница /panel — по-прежнему без органов управления."""
+def test_panel_after_login_is_a_service_page(client, operator):
+    """Служебная страница /panel — без органов управления, со ссылками на настоящие экраны."""
     login(client)
     text = client.get("/panel").get_data(as_text=True)
     assert OPERATOR in text
-    assert "Управление роботом ещё не подключено" in text
+    assert "Управление роботом ещё не подключено" not in text
+    assert 'href="/console"' in text and 'href="/service"' in text
     # никаких органов управления в заглушке быть не должно
     for forbidden in ('name="throttle"', 'name="steer"', 'id="joystick"', "/api/robot"):
         assert forbidden not in text
