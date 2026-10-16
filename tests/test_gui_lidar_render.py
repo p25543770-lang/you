@@ -177,7 +177,7 @@ def ports_overview_payload() -> dict:
              "by_path": ["/dev/serial/by-path/platform-fd500000.pcie-pci-0000:01:00.0-usb-0:1.3:1.0-port0"],
              "accessible": True, "excluded": False, "excluded_by": None, "chassis_module": False,
              "candidate": True, "note": "нет данных", "role": "no_response",
-             "role_label": "не отвечает", "why": "порт открылся, но лидар не ответил ни по одному протоколу"},
+             "role_label": "не отвечает на протокол лидара", "why": "порт открылся, но лидар не ответил ни по одному протоколу"},
             {"port": "/dev/ttyUSB0", "device": "/dev/ttyUSB0", "by_id": [],
              "by_path": ["/dev/serial/by-path/platform-fd500000.pcie-pci-0000:01:00.0-usb-0:1.1:1.0-port0"],
              "accessible": True, "excluded": True, "excluded_by": "RC_SLAM_MASTER_PORT",
@@ -530,7 +530,7 @@ def test_kiosk_lists_ports_with_roles_and_physical_paths(tmp_path):
     assert report["lidarBlocked"] is True
     rows = {row["text"].split(" ")[0]: row for row in report["lidarPorts"]}
     assert set(rows) == {"/dev/ttyUSB1", "/dev/ttyUSB0", "/dev/ttyACM0", "/dev/ttyUSB2"}
-    assert "не отвечает" in rows["/dev/ttyUSB1"]["text"]
+    assert "не отвечает на протокол лидара" in rows["/dev/ttyUSB1"]["text"]
     assert "usb-0:1.3:1.0-port0" in rows["/dev/ttyUSB1"]["text"]          # by-path
     assert "usb-Silicon_Labs_CP2102" in rows["/dev/ttyUSB1"]["text"]      # by-id
     assert "мастер руля" in rows["/dev/ttyUSB0"]["text"]
@@ -593,7 +593,20 @@ def test_kiosk_without_ports_tells_what_to_check(tmp_path):
     text = report["lidarPortsEmpty"]
     for word in ("кабель", "итание", "переходник", "lsusb"):
         assert word in text, word
-    assert "ядро не видит" in text
+    assert "не обнаружено" in text
+    assert "ls /dev/tty*: сервер не передал" in text        # нет данных — так и написано
+
+    listed = render("robot", ports_payload(
+        ports=[], usb_devices=[],
+        tty={"count": 71, "usb_like": [], "names": ["tty0", "ttyS0"]},
+        lsusb={"available": True, "lines": ["Bus 001 Device 002: ID 2109:3431 VIA Labs Hub"], "error": None},
+    ), tmp_path)
+    assert "ls /dev/tty*: 71 записей" in listed["lidarPortsEmpty"]
+    assert "устройств не обнаружено" in listed["lidarPortsEmpty"]
+    assert "lsusb: Bus 001 Device 002: ID 2109:3431" in listed["lidarPortsEmpty"]
+    absent = render("robot", ports_payload(ports=[], usb_devices=[],
+                                           lsusb={"available": False, "lines": [], "error": "lsusb не установлен"}), tmp_path)
+    assert "lsusb: lsusb не установлен" in absent["lidarPortsEmpty"]
 
     seen = render("robot", ports_payload(ports=[], usb_devices=[
         {"bus_path": "1-1.3", "id": "10c4:ea60", "manufacturer": "Silicon Labs", "product": "CP2102 USB to UART"}]), tmp_path)

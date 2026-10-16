@@ -1945,7 +1945,7 @@ PORT_ROLE_LABELS = {
     "excluded": "исключён настройкой",
     "busy": "занят другим процессом",
     "no_access": "нет доступа",
-    "no_response": "не отвечает",
+    "no_response": "не отвечает на протокол лидара",
     "missing": "нет в системе",
 }
 
@@ -2029,6 +2029,34 @@ def usb_devices() -> list[dict[str, Any]]:
             "product": read("product"),
         })
     return found
+
+
+def tty_listing() -> dict[str, Any]:
+    """Реальный результат ``ls /dev/tty*``: что вообще есть из tty в системе.
+
+    Нужен, когда serial-портов нет: видно, что в ``/dev`` есть только
+    виртуальные консоли и ``ttyS*``, а USB-порта нет — то есть устройство до
+    системы не доходит. Ничего не открывается.
+    """
+    names = sorted((os.path.basename(p) for p in glob.glob("/dev/tty*")), key=_natural_key)
+    usb_like = [n for n in names if n.startswith(("ttyUSB", "ttyACM", "ttyAMA", "ttyTHS"))]
+    return {"count": len(names), "usb_like": usb_like, "names": names}
+
+
+def lsusb_output() -> dict[str, Any]:
+    """Реальный вывод ``lsusb`` (если утилита есть); иначе так и сказано."""
+    import shutil
+    import subprocess
+    path = shutil.which("lsusb")
+    if not path:
+        return {"available": False, "lines": [], "error": "lsusb не установлен (пакет usbutils)"}
+    try:
+        out = subprocess.run([path], capture_output=True, text=True, timeout=3.0)
+    except (OSError, subprocess.SubprocessError) as exc:
+        return {"available": True, "lines": [], "error": "lsusb не выполнился: %s" % exc}
+    lines = [line.strip() for line in out.stdout.splitlines() if line.strip()]
+    return {"available": True, "lines": lines,
+            "error": (out.stderr.strip() or None) if out.returncode else None}
 
 
 def excluded_by_settings(path: str) -> Optional[dict[str, str]]:
@@ -2248,12 +2276,20 @@ def ports_overview(manager: Optional["LidarManager"] = None,
         connected=connected,
         configured=getattr(manager, "port", None) if manager else os.environ.get("RC_LIDAR_PORT"),
     )
-    return {
+    overview: dict[str, Any] = {
         "ports": rows,
         "usb_devices": usb_devices(),
         "find": PORT_WATCH.status(),
         "place_note": place_note(),
+        # Блок показывает только реальное состояние системы: здесь нет и не
+        # может быть демо-портов, даже при RC_SLAM_SOURCE=sim.
+        "real_only": True,
     }
+    if not rows:
+        # Портов нет совсем: реальный результат ``ls /dev/tty*`` и ``lsusb``.
+        overview["tty"] = tty_listing()
+        overview["lsusb"] = lsusb_output()
+    return overview
 
 
 def startup_summary() -> list[str]:

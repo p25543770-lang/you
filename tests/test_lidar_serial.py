@@ -1507,7 +1507,8 @@ def test_port_inventory_names_roles_and_physical_paths(fake_dev, monkeypatch):
     assert "другой программой" in rows[busy]["why"]
     # Подписи ролей — ровно те, что просят на экране.
     labels = {rows[p]["role_label"] for p in rows}
-    assert {"мастер руля", "модуль шасси", "занят другим процессом", "не отвечает"} <= labels
+    assert {"мастер руля", "модуль шасси", "занят другим процессом",
+            "не отвечает на протокол лидара"} <= labels
 
 
 def test_port_inventory_untried_port_is_a_candidate(fake_dev):
@@ -1633,3 +1634,40 @@ def test_usb_devices_reads_sysfs_without_hubs(tmp_path, monkeypatch):
     devices = lidar.usb_devices()
     assert devices == [{"bus_path": "1-1.3", "id": "10c4:ea60", "manufacturer": "Silicon Labs",
                         "product": "CP2102 USB to UART Bridge Controller"}]
+
+
+def test_ports_overview_without_ports_reports_real_tty_and_lsusb(fake_dev, monkeypatch):
+    """Портов нет — в блоке реальный результат ls /dev/tty* и lsusb, не выдумка."""
+    monkeypatch.setattr(lidar, "lsusb_output",
+                        lambda: {"available": False, "lines": [], "error": "lsusb не установлен (пакет usbutils)"})
+    overview = lidar.ports_overview(None)
+    assert overview["ports"] == []
+    assert overview["tty"]["usb_like"] == []
+    assert overview["tty"]["count"] == len(overview["tty"]["names"])
+    assert overview["lsusb"]["available"] is False
+    assert "lsusb" in overview["lsusb"]["error"]
+    # С портами листинг tty не нужен — его нет (экран не показывает лишнего).
+    fake_dev("ttyUSB0")
+    assert "tty" not in lidar.ports_overview(None)
+
+
+def test_lsusb_output_is_honest_when_tool_is_missing(monkeypatch):
+    import shutil
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    result = lidar.lsusb_output()
+    assert result == {"available": False, "lines": [], "error": "lsusb не установлен (пакет usbutils)"}
+
+
+def test_ports_block_is_real_only(fake_dev, monkeypatch):
+    """Блок «Порты на роботе» — только реальное состояние, даже при RC_SLAM_SOURCE=sim."""
+    monkeypatch.setenv("RC_SLAM_SOURCE", "sim")
+    monkeypatch.setenv("RC_LIDAR_SOURCE", "serial")
+    port = fake_dev("ttyUSB3", by_path="pci-usb-0:1.2:1.0-port0")
+    overview = lidar.ports_overview(None)
+    assert overview["real_only"] is True
+    assert [row["device"] for row in overview["ports"]] == [port]     # ровно то, что есть в системе
+    blob = json.dumps(overview, ensure_ascii=False).lower()
+    for word in ("demo", "демо", "sim", "симул", "example", "пример"):
+        assert word not in blob, word
+    for row in overview["ports"]:
+        assert row["by_path"] and all(os.path.islink(p) for p in row["by_path"])

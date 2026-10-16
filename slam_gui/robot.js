@@ -545,10 +545,27 @@
           '3. USB-переходник (CP2102/CH340/FTDI): переткнуть в другой разъём, проверить светодиод.',
           '4. В терминале: lsusb и ls -l /dev/serial/by-path/ — ниже то, что видит ядро по USB.',
         ];
-        if (devices.length) {
-          checks.push('USB-устройства, которые видит ядро (как lsusb), но без serial-драйвера: ' + devices.map((dev) => [dev.id, dev.manufacturer, dev.product].filter(Boolean).join(' ')).join('; ') + ' — если среди них переходник лидара, не загружен драйвер tty (dmesg | tail).');
+        const tty = overview.tty && typeof overview.tty === 'object' ? overview.tty : null;
+        if (tty && Array.isArray(tty.names)) {
+          const usbLike = Array.isArray(tty.usb_like) ? tty.usb_like : [];
+          checks.push('ls /dev/tty*: ' + tty.count + ' записей' + (usbLike.length
+            ? ', из них последовательные порты: ' + usbLike.join(', ')
+            : ', USB/UART-портов (ttyUSB*, ttyACM*, ttyAMA*) среди них нет — устройств не обнаружено'));
         } else {
-          checks.push('USB-устройств (кроме хабов) ядро не видит: до USB лидар не доходит — кабель, питание или переходник.');
+          checks.push('ls /dev/tty*: сервер не передал результат.');
+        }
+        const lsusb = overview.lsusb && typeof overview.lsusb === 'object' ? overview.lsusb : null;
+        if (lsusb && lsusb.available && Array.isArray(lsusb.lines) && lsusb.lines.length) {
+          checks.push('lsusb: ' + lsusb.lines.join(' | '));
+        } else if (lsusb && lsusb.available) {
+          checks.push('lsusb: устройств не обнаружено' + (lsusb.error ? ' (' + lsusb.error + ')' : ''));
+        } else if (lsusb) {
+          checks.push('lsusb: ' + (lsusb.error || 'недоступен'));
+        }
+        if (devices.length) {
+          checks.push('USB-устройства по sysfs (без serial-драйвера): ' + devices.map((dev) => [dev.id, dev.manufacturer, dev.product].filter(Boolean).join(' ')).join('; ') + ' — если среди них переходник лидара, не загружен драйвер tty (dmesg | tail).');
+        } else {
+          checks.push('USB-устройств (кроме хабов) по sysfs не обнаружено: до USB лидар не доходит — кабель, питание или переходник.');
         }
         setText(emptyEl, checks.join('\n'));
       } else {

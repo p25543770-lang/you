@@ -65,6 +65,7 @@ from robot_control.lidar import (  # noqa: E402
     motor_variant_name,
     motor_variants,
     open_serial,
+    port_inventory,
     probe_port,
     stable_port_path,
 )
@@ -113,6 +114,21 @@ def describe_ports(port: str = "") -> None:
         log("  • %s%s" % (path, note))
     if blocked:
         log("Исключены (мастер/модули шасси или RC_LIDAR_EXCLUDE): %s" % ", ".join(blocked))
+    # То же, что показывает экран «Лидар не готов»: роль каждого порта и его
+    # физический USB-путь (by-path → разъём/хаб). Где лидар стоит в роботе,
+    # по этому не узнать — соответствие «разъём → место» пишет человек.
+    rows = port_inventory(configured=port or os.environ.get("RC_LIDAR_PORT"))
+    if rows:
+        log("Все serial-порты системы (роль · by-path · by-id):")
+        for row in rows:
+            log("  • %s — %s%s" % (row["device"], row["role_label"],
+                                  (" (%s)" % row["why"]) if row["why"] else ""))
+            for link in row["by_path"]:
+                log("      by-path: %s" % link)
+            for link in row["by_id"]:
+                log("      by-id:   %s" % link)
+            if not row["by_path"]:
+                log("      by-path: нет")
     if (os.environ.get("RC_LIDAR_AUTOPROBE") or "").strip().lower() in {"0", "false", "no", "off"}:
         log("Примечание: RC_LIDAR_AUTOPROBE=0 в приложении — «сначала закреплённый порт», "
             "а не «только он»; проверка всё равно проходит все порты выше.")
