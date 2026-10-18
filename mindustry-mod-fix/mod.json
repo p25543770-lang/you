@@ -1,0 +1,9 @@
+{
+  "name": "campaign-threat-radar",
+  "displayName": "Campaign Threat Radar",
+  "author": "<автор мода>",
+  "description": "<описание>",
+  "version": "<текущая версия мода>",
+  "minGameVersion": "154",
+  "dependencies": []
+}
