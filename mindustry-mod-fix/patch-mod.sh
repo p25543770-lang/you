@@ -19,15 +19,18 @@ fi
 PATHARG="$1"
 
 if [[ -d "$PATHARG" ]]; then
-  # Ищем mod.json или mod.hjson в корне папки
-  if [[ -f "$PATHARG/mod.json" ]]; then
-    FILE="$PATHARG/mod.json"
-  elif [[ -f "$PATHARG/mod.hjson" ]]; then
-    FILE="$PATHARG/mod.hjson"
-  else
-    echo "В папке $PATHARG не найден mod.json или mod.hjson"
-    exit 2
-  fi
+# Ищем mod.json или mod.hjson в корне папки
+if [[ -f "$PATHARG/mod.json" ]]; then
+  FILE="$PATHARG/mod.json"
+elif [[ -f "$PATHARG/mod.hjson" ]]; then
+  FILE="$PATHARG/mod.hjson"
+elif compgen -G "$PATHARG"/*/mod.json > /dev/null; then
+  # импортнутый мод может лежать во вложенной папке с тем же именем
+  FILE=$(compgen -G "$PATHARG"/*/mod.json | head -n1)
+else
+  echo "В папке $PATHARG не найден mod.json или mod.hjson"
+  exit 2
+fi
 else
   FILE="$PATHARG"
 fi

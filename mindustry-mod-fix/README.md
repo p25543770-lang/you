@@ -1,44 +1,95 @@
-# Исправление «Campaign Threat Radar» для последней версии Mindustry
+# Как починить «Campaign Threat Radar» — 3 шага вручную
 
-На скриншоте — менеджер модов Mindustry (v8, build 160.7). Ошибка
-«Несовместимый» возникает потому, что в `mod.json` мода **Campaign Threat Radar**
-отсутствует поле `minGameVersion`. Mindustry требует `minGameVersion >= 136`
-(для v8), а по подсказке в игре минимум — **154**.
+На скриншоте ошибка: **«Этот мод несовместим с последней версией игры. Автор должен
+обновить его и добавить minGameVersion: 154 в файл mod.json.»**
 
-В этой папке:
+Речь про мод **Campaign Threat Radar** (версия 1, автор — `local`, т.е. вы
+импортировали его вручную кнопкой «Импортировать модификацию»).
+Чтобы он заработал, нужно ОДИН раз вручную дописать одну строку в его
+`mod.json` / `mod.hjson`.
 
-- `patch-mod.sh` — патчит установленный мод на вашем диске (Windows / Linux /
-  Android — выберите нужную папку модов, см. ниже).
-- `mod.json` — готовый исправленный шаблон `mod.json` с
-  `"minGameVersion": "154"`.
+## Шаг 1 — Найдите папку Mindustry с модами
 
-## Куда класть / где искать мод «Campaign Threat Radar»
+| Система | Путь |
+|---------|------|
+| **Windows** | Откройте Проводник, в адресной строке наберите `%APPDATA%\Mindustry\mods\` и нажмите Enter. |
+| **Linux** | `~/.local/share/Mindustry/mods/` |
+| **macOS** | `~/Library/Application Support/Mindustry/mods/` |
+| **Android** | Через файловый менеджер: внутренняя память → `Mindustry/mods/` (если нет — ищите в `Android/data/io.anuke.mindustry/files/mods/`, нужен доступ к файлам). |
 
-| ОС        | Путь к папке модов                                                  |
-|-----------|---------------------------------------------------------------------|
-| Windows   | `%APPDATA%\Mindustry\mods\`                                         |
-| Linux     | `~/.local/share/Mindustry/mods/`                                    |
-| macOS     | `~/Library/Application Support/Mindustry/mods/`                     |
-| Android   | внутренний накопитель → `Mindustry/mods/`                           |
-| Steam     | `<Steam>/steamapps/common/Mindustry/mods/` (редко)                  |
+Импортированные локально моды лежат прямо в этой папке в виде **подпапки**
+(обычно имя совпадает с названием мода, или имеет вид
+`1728394050000_Campaign Threat Radar`), либо как `.zip`.
 
-Ищите папку (или `.zip`) с именем вроде `campaign-threat-radar` или похожим,
-внутри — файл `mod.json` (или `mod.hjson`).
+## Шаг 2 — Откройте `mod.json` (или `mod.hjson`)
 
-## Быстрый ручной фик
+Внутри найденной папки (или внутри `.zip`, который придётся распаковать)
+есть файл `mod.json` или `mod.hjson`. Откройте его Блокнотом / VS Code /
+любым текстовым редактором.
 
-1. Откройте `mod.json` (или `mod.hjson`) мода любым текстовым редактором
-   (Notepad, VS Code, …).
-2. Найдите секцию с `name`, `displayName`, `author`, `version`, …
-3. Добавьте строку (запятую в конце предыдущей строки не забудьте):
+Содержимое будет выглядеть примерно так:
 
-       "minGameVersion": "154",
+```json
+{
+  "name": "campaign-threat-radar",
+  "displayName": "Campaign Threat Radar",
+  "author": "local",
+  "version": "1",
+  "description": "Client-only campaign HUD showing enemy units and likely approach paths..."
+}
+```
 
-   Для `mod.hjson` (без кавычек у ключей):
+(Если у вас `mod.hjson` — без фигурных скобок и кавычек у ключей — читайте
+конец инструкции.)
 
-       minGameVersion: "154"
+## Шаг 3 — Добавьте строку `minGameVersion`
 
-4. Сохраните файл и перезапустите игру. Мод перестанет быть «Несовместимым».
+Добавьте **одну строку** (не забудьте запятую в конце предыдущей строки):
 
-Если мод упакован в `.zip`, распакуйте его в подпапку `mods/`, исправьте
-`mod.json` внутри папки и перезапустите игру (либо перепакуйте в `.zip`).
+```json
+"minGameVersion": "154",
+```
+
+Итог должен выглядеть так:
+
+```json
+{
+  "name": "campaign-threat-radar",
+  "displayName": "Campaign Threat Radar",
+  "author": "local",
+  "version": "1",
+  "minGameVersion": "154",
+  "description": "Client-only campaign HUD showing enemy units and likely approach paths..."
+}
+```
+
+Сохраните файл. Если вы правили `.zip` — перепакуйте содержимое обратно в
+zip (убедитесь, что `mod.json` лежит в **корне** архива, а не во вложенной
+папке), и положите в `mods/`.
+
+✅ **Полностью закройте игру и запустите заново** (просто перезагрузить список
+модов недостаточно — Mindustry читает манифесты только при старте).
+После этого вместо «Несовместимый / Выключено» мод будет доступен для включения.
+
+---
+
+### Если у вас `mod.hjson` (формат с минимумом кавычек)
+
+Там всё то же самое, но ключ без кавычек:
+
+```hjson
+name: campaign-threat-radar
+displayName: Campaign Threat Radar
+author: local
+version: "1"
+minGameVersion: "154"
+description: Client-only campaign HUD showing enemy units and likely approach paths
+```
+
+### Какое число ставить?
+
+- `154` — **минимальное значение**, которое требует сама игра на скриншоте
+  (подсказка «добавьте minGameVersion: 154»). С ним мод заведётся на v8.
+- Если у вас самая свежая Mindustry build **160.7** (на октябрь 2026) — можно
+  поставить `"160.7"`, но `"154"` тоже работает, потому что это только
+  *минимальная* требуемая версия.

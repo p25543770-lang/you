@@ -1,9 +1,9 @@
 {
   "name": "campaign-threat-radar",
   "displayName": "Campaign Threat Radar",
-  "author": "<автор мода>",
-  "description": "<описание>",
-  "version": "<текущая версия мода>",
+  "author": "local",
+  "version": "1",
   "minGameVersion": "154",
+  "description": "Client-only campaign HUD showing enemy units and likely approach paths",
   "dependencies": []
 }
